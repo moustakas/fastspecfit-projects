@@ -1,0 +1,261 @@
+#!/usr/bin/env python
+"""
+Fit the low-mass AGN sample.
+
+fastspecfit-lowmass-agn --mp 32 --coadd-type cumulative --tile 80608 --night 20201220 --plan --nompi
+
+"""
+import pdb # for debugging
+
+import os, time
+import numpy as np
+from glob import glob
+from astropy.table import Table
+
+from desiutil.log import get_logger
+log = get_logger()
+
+def run_fastspecfit(args, comm=None, fastphot=False, specprod_dir=None, makeqa=False):
+
+    import sys, subprocess
+    from fastspecfit.mpi import backup_logs, plan
+
+    if comm is None:
+        rank, size = 0, 1
+    else:
+        rank, size = comm.rank, comm.size
+
+    args.maxnodes = min(args.maxnodes, size)
+
+    t0 = time.time()
+    if rank == 0:
+        log.info('Starting at {}'.format(time.asctime()))
+
+    samplefile = os.path.join(os.getenv('FASTSPECFIT_DATA'), 'LowMassAGN-trim.txt')
+    sample = Table.read(samplefile, format='ascii.commented_header')
+
+    alltiles = sample['tile'].astype(str).data
+    allpetals = sample['petal'].astype(str).data
+    targetids = ','.join(sample['targetid'].astype(str))
+
+    zbestfiles = [glob(os.path.join(specprod_dir, 'cumulative', tile, '????????', 'zbest-{}-{}-thru????????.fits'.format(
+        petal, tile))) for tile, petal in zip(alltiles, allpetals)]
+    zbestfiles = np.unique(zbestfiles)
+
+    if fastphot:
+        prefix = 'fastphot'
+    else:
+        prefix = 'fastspec'
+
+    outfiles = []
+    for zbestfile in zbestfiles:
+        outfiles.append(os.path.join(os.getenv('FASTSPECFIT_DATA'), 'fastspec', os.path.basename(zbestfile).replace('zbest-', '{}-'.format(prefix))))
+    outfiles = np.hstack(outfiles)
+    groups = [np.arange(len(outfiles))]
+
+    qadir = os.getenv('FASTSPECFIT_HTML')
+
+    if rank == 0:
+        log.info('Initial setup took {:.1f} sec'.format(time.time() - t0))
+
+    sys.stdout.flush()
+    if comm:
+        zbestfiles = comm.bcast(zbestfiles, root=0)
+        outfiles = comm.bcast(outfiles, root=0)
+        groups = comm.bcast(groups, root=0)
+
+    # all done
+    if len(zbestfiles) == 0:
+        return
+        
+    assert(len(groups) == size)
+    assert(len(np.concatenate(groups)) == len(zbestfiles))
+
+    #pixels = np.array([int(os.path.basename(os.path.dirname(x))) for x in zbestfiles])
+    for ii in groups[rank]:
+        log.info('Rank {} started at {}'.format(rank, time.asctime()))
+        sys.stdout.flush()
+
+        if args.makeqa:
+            #  hack--the desired output directories are in the 'zbestfiles' variable!
+            if fastphot:
+                cmd = 'fastspecfit-qa --fastphotfile {} -o {} --mp {}'.format(outfiles[ii], qadir, args.mp)
+            else:
+                cmd = 'fastspecfit-qa --fastspecfile {} -o {} --mp {}'.format(outfiles[ii], qadir, args.mp)
+
+            cmd += ' --targetid {}'.format(targetids)
+                
+            if args.ntargets:
+                cmd += ' --ntargets {}'.format(args.ntargets)
+        else:
+            if fastphot:
+                cmd = 'fastphot {} -o {} --mp {} --coadd-type {}'.format(zbestfiles[ii], outfiles[ii],
+                                                                         args.mp, args.coadd_type)
+            else:
+                cmd = 'fastspec {} -o {} --mp {} --coadd-type {}'.format(zbestfiles[ii], outfiles[ii],
+                                                                         args.mp, args.coadd_type)
+                if args.solve_vdisp:
+                    cmd += ' --solve-vdisp'
+                    
+            cmd += ' --targetid {}'.format(targetids)
+                    
+            if args.ntargets:
+                cmd += ' --ntargets {}'.format(args.ntargets)
+
+        logfile = outfiles[ii].replace('.fits', '.log')
+        assert(logfile != outfiles[ii])
+
+        log.info('  rank {}: {}'.format(rank, cmd))
+        #log.info('LOGGING to {}'.format(logfile))
+        sys.stdout.flush()
+
+        if args.dry_run:
+            continue
+
+        try:
+            t1 = time.time()
+            if os.path.exists(logfile) and not args.overwrite:
+                backup_logs(logfile)
+            # memory leak?  Try making system call instead
+            outdir = os.path.dirname(logfile)
+            if not os.path.isdir(outdir):
+                os.makedirs(outdir, exist_ok=True)
+            if args.nolog:
+                err = subprocess.call(cmd.split())
+            else:
+                with open(logfile, 'w') as mylog:
+                    err = subprocess.call(cmd.split(), stdout=mylog, stderr=mylog)
+            dt1 = time.time() - t1
+            if err == 0:
+                log.info('  rank {} done in {:.2f} sec'.format(rank, dt1))
+                if not os.path.exists(outfiles[ii]):
+                    log.warning('  rank {} missing {}'.format(rank, outfiles[ii]))
+            else:
+                log.warning('  rank {} broke after {:.1f} sec with error code {}'.format(rank, dt1, err))
+        except Exception as err:
+            log.warning('  rank {} raised an exception'.format(rank))
+            import traceback
+            traceback.print_exc()
+
+    log.info('  rank {} is done'.format(rank))
+    sys.stdout.flush()
+
+    if comm is not None:
+        comm.barrier()
+
+    if rank == 0 and not args.dry_run:
+        for outfile in outfiles:
+            if not os.path.exists(outfile):
+                log.warning('Missing {}'.format(outfile))
+
+        log.info('All done at {}'.format(time.asctime()))
+
+def merge_fastspecfit(args, outdir, fastphot=False, specprod_dir=None):
+    """Merge all the individual catalogs into a single large catalog. Runs only on
+    rank 0.
+
+    """
+    import fitsio
+    from astropy.io import fits
+    from astropy.table import Table, vstack
+    from fastspecfit.mpi import plan
+    from fastspecfit.io import write_fastspecfit
+
+    if fastphot:
+        prefix = 'fastphot'
+        outprefix = 'fastphot-lowmass-agn'
+        extname = 'FASTPHOT'
+    else:
+        prefix = 'fastspec'
+        outprefix = 'fastspec-lowmass-agn'
+        extname = 'FASTSPEC'
+
+    outfiles = glob(os.path.join(outdir, '{}-*.fits'.format(prefix)))
+    #outdir, _, outfiles, _, _ = plan(args, merge=True, fastphot=fastphot,
+    #                                 specprod_dir=specprod_dir)
+    
+    mergedir = os.getenv('FASTSPECFIT_DATA')
+    #mergedir = os.path.join(outdir, 'merged')
+    if not os.path.isdir(mergedir):
+        os.makedirs(mergedir, exist_ok=True)
+
+    mergefile = os.path.join(mergedir, '{}-{}.fits'.format(outprefix, args.specprod))
+    #mergefile = os.path.join(mergedir, '{}-{}-{}.fits'.format(outprefix, args.specprod, args.coadd_type))
+    if os.path.isfile(mergefile) and not args.overwrite:
+        log.info('Merged output file {} exists!'.format(mergefile))
+        return
+
+    t0 = time.time()
+    out, meta = [], []
+    for outfile in outfiles:
+        out.append(Table(fitsio.read(outfile, ext=extname)))
+        meta.append(Table(fitsio.read(outfile, ext='METADATA')))
+    out = vstack(out)
+    meta = vstack(meta)
+    log.info('Merging {} objects from {} {} files took {:.2f} min.'.format(
+        len(out), len(outfiles), outprefix, (time.time()-t0)/60.0))
+
+    write_fastspecfit(out, meta, outfile=mergefile, specprod=args.specprod,
+                      coadd_type=args.coadd_type, fastphot=fastphot)
+        
+def main():
+    """Main wrapper on fastphot and fastspec.
+
+    Currently only knows about SV1 observations.
+
+    """
+    import argparse    
+    from fastspecfit.mpi import plan
+    
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--specprod', type=str, default='denali', choices=['denali', 'cascades', 'daily'],
+                        help='Spectroscopic production to process.')
+    parser.add_argument('--coadd-type', type=str, default='cumulative', choices=['cumulative', 'pernight', 'perexp'],
+                        help='Specify which type of spectra/zbest files to process.')
+    
+    parser.add_argument('--tile', default=None, type=str, nargs='*', help='Tile(s) to process.')
+    parser.add_argument('--night', default=None, type=str, nargs='*', help='Night(s) to process (ignored if coadd-type is cumulative).')
+    
+    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
+    parser.add_argument('--maxnodes', type=int, default=256, help='maximum number of nodes to use')
+    parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
+    
+    parser.add_argument('--fastphot', action='store_true', help='Fit the broadband photometry.')
+    parser.add_argument('--solve-vdisp', action='store_true', help='Solve for the velocity disperion (only used with fastspec).')
+
+    parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
+    parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
+    
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite any existing output files.')
+    parser.add_argument('--plan', action='store_true', help='Plan how many nodes to use and how to distribute the targets.')
+    parser.add_argument('--nompi', action='store_true', help='Do not use MPI parallelism.')
+    parser.add_argument('--nolog', action='store_true', help='Do not write to the log file.')
+    parser.add_argument('--dry-run', action='store_true', help='Generate but do not run commands')
+
+    args = parser.parse_args()
+
+    specprod_dir = os.path.join(os.getenv('DESI_SPECTRO_REDUX'), args.specprod, 'tiles')
+    os.environ['FASTSPECFIT_DATA'] = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'lowmass-agn')
+    os.environ['FASTSPECFIT_HTML'] = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'lowmass-agn', 'qa')
+
+    if args.merge or args.makeqa or args.nompi:
+        comm = None
+    else:
+        try:
+            from mpi4py import MPI
+            comm = MPI.COMM_WORLD
+        except ImportError:
+            comm = None
+            
+    if args.merge:
+        #from fastspecfit.mpi import merge_fastspecfit
+        outdir = os.path.join(os.getenv('FASTSPECFIT_DATA'), 'fastspec')
+        merge_fastspecfit(args, outdir, fastphot=args.fastphot, specprod_dir=specprod_dir)
+    elif args.plan:
+        plan(args, comm=comm, fastphot=args.fastphot, specprod_dir=specprod_dir)
+    else:
+        run_fastspecfit(args, comm=comm, fastphot=args.fastphot,
+                        specprod_dir=specprod_dir, makeqa=args.makeqa)
+
+if __name__ == '__main__':
+    main()
