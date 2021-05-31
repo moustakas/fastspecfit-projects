@@ -1,0 +1,85 @@
+#!/usr/bin/env python
+"""
+
+fastspecfit-html --fastphotfile /global/cfs/cdirs/desi/spectro/fastspecfit/denali/tiles/merged/fastphot-denali-cumulative.fits --fastspecfile /global/cfs/cdirs/desi/spectro/fastspecfit/denali/tiles/merged/fastspec-denali-cumulative.fits --htmldir /global/cfs/cdirs/desi/users/ioannis/fastspecfit/pyqsofit --targetids 39627835572227829,39627811392062386,39627871790039320,39627835551255114,39627847639237185,39627859739804184,39633348330522578,39633354928165027,39633341665773359,39633324645286861,39633331528141827,39633345017023776,39627682689849628,39627700788270581,39627694769445378,39627664629173903,39627670677359523,39627652604103932,39627658606157124,39627676691995378,39627676696183205,39627700809244440,39627694786223622,39627682715015069
+
+fastspecfit-qa --fastphotfile /global/cfs/cdirs/desi/spectro/fastspecfit/denali/tiles/merged/fastphot-denali-cumulative.fits --outdir /global/cfs/cdirs/desi/users/ioannis/fastspecfit/pyqsofit --targetids 39627835572227829,39627811392062386,39627871790039320,39627835551255114,39627847639237185,39627859739804184,39633348330522578,39633354928165027,39633341665773359,39633324645286861,39633331528141827,39633345017023776,39627682689849628,39627700788270581,39627694769445378,39627664629173903,39627670677359523,39627652604103932,39627658606157124,39627676691995378,39627676696183205,39627700809244440,39627694786223622,39627682715015069
+
+fastspecfit-qa --fastspecfile /global/cfs/cdirs/desi/spectro/fastspecfit/denali/tiles/merged/fastspec-denali-cumulative.fits --outdir /global/cfs/cdirs/desi/users/ioannis/fastspecfit/pyqsofit --targetids 39627835572227829,39627811392062386,39627871790039320,39627835551255114,39627847639237185,39627859739804184,39633348330522578,39633354928165027,39633341665773359,39633324645286861,39633331528141827,39633345017023776,39627682689849628,39627700788270581,39627694769445378,39627664629173903,39627670677359523,39627652604103932,39627658606157124,39627676691995378,39627676696183205,39627700809244440,39627694786223622,39627682715015069
+
+"""
+import os, pdb
+from glob import glob
+import numpy as np
+
+def main():
+
+    cfsroot = '/global/cfs/cdirs/'
+    httpsroot = 'https://data.desi.lbl.gov/'
+
+    htmldir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/pyqsofit'
+    htmldir_https = htmldir.replace(cfsroot, httpsroot)
+
+    htmlhome = 'index.html'
+    htmlhomefile = os.path.join(htmldir, htmlhome)
+    htmlhomefile_https = os.path.join(htmldir_https, htmlhome)
+    print('Building {}'.format(htmlhomefile))
+
+    targetids = [
+        39627835572227829,
+        39627811392062386,
+        39627871790039320,
+        39627835551255114,
+        39627847639237185,
+        39627859739804184,
+        39633348330522578,
+        39633354928165027,
+        39633341665773359,
+        39633324645286861,
+        39633331528141827,
+        39633345017023776,
+        39627682689849628,
+        39627700788270581,
+        39627694769445378,
+        39627664629173903,
+        39627670677359523,
+        39627652604103932,
+        39627658606157124,
+        39627676691995378,
+        39627676696183205,
+        39627700809244440,
+        39627694786223622,
+        39627682715015069]
+
+    with open(htmlhomefile, 'w') as html:
+        html.write('<html><body>\n')
+        html.write('<style type="text/css">\n')
+        html.write('table, td, th {padding: 5px; text-align: center; border: 1px solid black;}\n')
+        html.write('p {display: inline-block;;}\n')
+        html.write('</style>\n')
+
+        html.write('<table>\n')
+        html.write('<tr>\n')
+        html.write('<th>TargetID</th>\n')
+        html.write('<th>fastspec</th>\n')
+        html.write('<th>fastphot</th>\n')
+        html.write('</tr>\n')
+
+        for targetid in targetids:
+            html.write('<tr>\n')
+            html.write('<td>{}</td>\n'.format(targetid))
+
+            for prefix in ('fastspec', 'fastphot'):
+                pngfile = glob(os.path.join(htmldir, '{}-?????-cumulative-{}.png'.format(prefix, targetid)))[0]
+                #pdb.set_trace()
+                if os.path.isfile(pngfile):
+                    httpfile = os.path.join(htmldir_https, os.path.basename(pngfile))
+                    html.write('<td><a href="{0}"><img src="{0}" height="auto" width="512px"></a></td>\n'.format(httpfile))
+                else:
+                    html.write('<td>Not Available</td>\n')
+        html.write('</table>\n')
+        html.write('<br /><br />\n')
+        html.write('</html></body>\n')
+
+if __name__ == '__main__':
+    main()
