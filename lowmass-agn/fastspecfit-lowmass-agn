@@ -2,202 +2,21 @@
 """
 Fit the low-mass AGN sample.
 
-fastspecfit-lowmass-agn --mp 32 --coadd-type cumulative --tile 80608 --night 20201220 --plan --nompi
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 32
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 20 --ntargets 20 --makeqa
 
 """
 import pdb # for debugging
 
-import os, time
+import os, time, subprocess
 import numpy as np
+import fitsio
 from glob import glob
 from astropy.table import Table
 
 from desiutil.log import get_logger
 log = get_logger()
 
-def run_fastspecfit(args, comm=None, fastphot=False, specprod_dir=None, makeqa=False):
-
-    import sys, subprocess
-    from fastspecfit.mpi import backup_logs, plan
-
-    if comm is None:
-        rank, size = 0, 1
-    else:
-        rank, size = comm.rank, comm.size
-
-    args.maxnodes = min(args.maxnodes, size)
-
-    t0 = time.time()
-    if rank == 0:
-        log.info('Starting at {}'.format(time.asctime()))
-
-    samplefile = os.path.join(os.getenv('FASTSPECFIT_DATA'), 'LowMassAGN-trim.txt')
-    sample = Table.read(samplefile, format='ascii.commented_header')
-
-    alltiles = sample['tile'].astype(str).data
-    allpetals = sample['petal'].astype(str).data
-    targetids = ','.join(sample['targetid'].astype(str))
-
-    zbestfiles = [glob(os.path.join(specprod_dir, 'cumulative', tile, '????????', 'zbest-{}-{}-thru????????.fits'.format(
-        petal, tile))) for tile, petal in zip(alltiles, allpetals)]
-    zbestfiles = np.unique(zbestfiles)
-
-    if fastphot:
-        prefix = 'fastphot'
-    else:
-        prefix = 'fastspec'
-
-    outfiles = []
-    for zbestfile in zbestfiles:
-        outfiles.append(os.path.join(os.getenv('FASTSPECFIT_DATA'), 'fastspec', os.path.basename(zbestfile).replace('zbest-', '{}-'.format(prefix))))
-    outfiles = np.hstack(outfiles)
-    groups = [np.arange(len(outfiles))]
-
-    qadir = os.getenv('FASTSPECFIT_HTML')
-
-    if rank == 0:
-        log.info('Initial setup took {:.1f} sec'.format(time.time() - t0))
-
-    sys.stdout.flush()
-    if comm:
-        zbestfiles = comm.bcast(zbestfiles, root=0)
-        outfiles = comm.bcast(outfiles, root=0)
-        groups = comm.bcast(groups, root=0)
-
-    # all done
-    if len(zbestfiles) == 0:
-        return
-        
-    assert(len(groups) == size)
-    assert(len(np.concatenate(groups)) == len(zbestfiles))
-
-    #pixels = np.array([int(os.path.basename(os.path.dirname(x))) for x in zbestfiles])
-    for ii in groups[rank]:
-        log.info('Rank {} started at {}'.format(rank, time.asctime()))
-        sys.stdout.flush()
-
-        if args.makeqa:
-            #  hack--the desired output directories are in the 'zbestfiles' variable!
-            if fastphot:
-                cmd = 'fastspecfit-qa --fastphotfile {} -o {} --mp {}'.format(outfiles[ii], qadir, args.mp)
-            else:
-                cmd = 'fastspecfit-qa --fastspecfile {} -o {} --mp {}'.format(outfiles[ii], qadir, args.mp)
-
-            cmd += ' --targetid {}'.format(targetids)
-                
-            if args.ntargets:
-                cmd += ' --ntargets {}'.format(args.ntargets)
-        else:
-            if fastphot:
-                cmd = 'fastphot {} -o {} --mp {} --coadd-type {}'.format(zbestfiles[ii], outfiles[ii],
-                                                                         args.mp, args.coadd_type)
-            else:
-                cmd = 'fastspec {} -o {} --mp {} --coadd-type {}'.format(zbestfiles[ii], outfiles[ii],
-                                                                         args.mp, args.coadd_type)
-                if args.solve_vdisp:
-                    cmd += ' --solve-vdisp'
-                    
-            cmd += ' --targetid {}'.format(targetids)
-                    
-            if args.ntargets:
-                cmd += ' --ntargets {}'.format(args.ntargets)
-
-        logfile = outfiles[ii].replace('.fits', '.log')
-        assert(logfile != outfiles[ii])
-
-        log.info('  rank {}: {}'.format(rank, cmd))
-        #log.info('LOGGING to {}'.format(logfile))
-        sys.stdout.flush()
-
-        if args.dry_run:
-            continue
-
-        try:
-            t1 = time.time()
-            if os.path.exists(logfile) and not args.overwrite:
-                backup_logs(logfile)
-            # memory leak?  Try making system call instead
-            outdir = os.path.dirname(logfile)
-            if not os.path.isdir(outdir):
-                os.makedirs(outdir, exist_ok=True)
-            if args.nolog:
-                err = subprocess.call(cmd.split())
-            else:
-                with open(logfile, 'w') as mylog:
-                    err = subprocess.call(cmd.split(), stdout=mylog, stderr=mylog)
-            dt1 = time.time() - t1
-            if err == 0:
-                log.info('  rank {} done in {:.2f} sec'.format(rank, dt1))
-                if not os.path.exists(outfiles[ii]):
-                    log.warning('  rank {} missing {}'.format(rank, outfiles[ii]))
-            else:
-                log.warning('  rank {} broke after {:.1f} sec with error code {}'.format(rank, dt1, err))
-        except Exception as err:
-            log.warning('  rank {} raised an exception'.format(rank))
-            import traceback
-            traceback.print_exc()
-
-    log.info('  rank {} is done'.format(rank))
-    sys.stdout.flush()
-
-    if comm is not None:
-        comm.barrier()
-
-    if rank == 0 and not args.dry_run:
-        for outfile in outfiles:
-            if not os.path.exists(outfile):
-                log.warning('Missing {}'.format(outfile))
-
-        log.info('All done at {}'.format(time.asctime()))
-
-def merge_fastspecfit(args, outdir, fastphot=False, specprod_dir=None):
-    """Merge all the individual catalogs into a single large catalog. Runs only on
-    rank 0.
-
-    """
-    import fitsio
-    from astropy.io import fits
-    from astropy.table import Table, vstack
-    from fastspecfit.mpi import plan
-    from fastspecfit.io import write_fastspecfit
-
-    if fastphot:
-        prefix = 'fastphot'
-        outprefix = 'fastphot-lowmass-agn'
-        extname = 'FASTPHOT'
-    else:
-        prefix = 'fastspec'
-        outprefix = 'fastspec-lowmass-agn'
-        extname = 'FASTSPEC'
-
-    outfiles = glob(os.path.join(outdir, '{}-*.fits'.format(prefix)))
-    #outdir, _, outfiles, _, _ = plan(args, merge=True, fastphot=fastphot,
-    #                                 specprod_dir=specprod_dir)
-    
-    mergedir = os.getenv('FASTSPECFIT_DATA')
-    #mergedir = os.path.join(outdir, 'merged')
-    if not os.path.isdir(mergedir):
-        os.makedirs(mergedir, exist_ok=True)
-
-    mergefile = os.path.join(mergedir, '{}-{}.fits'.format(outprefix, args.specprod))
-    #mergefile = os.path.join(mergedir, '{}-{}-{}.fits'.format(outprefix, args.specprod, args.coadd_type))
-    if os.path.isfile(mergefile) and not args.overwrite:
-        log.info('Merged output file {} exists!'.format(mergefile))
-        return
-
-    t0 = time.time()
-    out, meta = [], []
-    for outfile in outfiles:
-        out.append(Table(fitsio.read(outfile, ext=extname)))
-        meta.append(Table(fitsio.read(outfile, ext='METADATA')))
-    out = vstack(out)
-    meta = vstack(meta)
-    log.info('Merging {} objects from {} {} files took {:.2f} min.'.format(
-        len(out), len(outfiles), outprefix, (time.time()-t0)/60.0))
-
-    write_fastspecfit(out, meta, outfile=mergefile, specprod=args.specprod,
-                      coadd_type=args.coadd_type, fastphot=fastphot)
-        
 def main():
     """Main wrapper on fastphot and fastspec.
 
@@ -206,56 +25,161 @@ def main():
     """
     import argparse    
     from fastspecfit.mpi import plan
+    from fastspecfit.continuum import ContinuumFit
+    from fastspecfit.emlines import EMLineFit
+    from fastspecfit.io import DESISpectra, write_fastspecfit, read_fastspecfit
+    from fastspecfit.fastspecfit import _fastspec_one, fastspec_one, _desiqa_one, desiqa_one
     
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--specprod', type=str, default='denali', choices=['denali', 'cascades', 'daily'],
-                        help='Spectroscopic production to process.')
-    parser.add_argument('--coadd-type', type=str, default='cumulative', choices=['cumulative', 'pernight', 'perexp'],
-                        help='Specify which type of spectra/zbest files to process.')
-    
-    parser.add_argument('--tile', default=None, type=str, nargs='*', help='Tile(s) to process.')
-    parser.add_argument('--night', default=None, type=str, nargs='*', help='Night(s) to process (ignored if coadd-type is cumulative).')
-    
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
-    parser.add_argument('--maxnodes', type=int, default=256, help='maximum number of nodes to use')
     parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
+    parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
     
     parser.add_argument('--fastphot', action='store_true', help='Fit the broadband photometry.')
-    parser.add_argument('--solve-vdisp', action='store_true', help='Solve for the velocity disperion (only used with fastspec).')
 
     parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
     parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
+    parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
     
     parser.add_argument('--overwrite', action='store_true', help='Overwrite any existing output files.')
     parser.add_argument('--plan', action='store_true', help='Plan how many nodes to use and how to distribute the targets.')
-    parser.add_argument('--nompi', action='store_true', help='Do not use MPI parallelism.')
-    parser.add_argument('--nolog', action='store_true', help='Do not write to the log file.')
     parser.add_argument('--dry-run', action='store_true', help='Generate but do not run commands')
 
     args = parser.parse_args()
 
-    specprod_dir = os.path.join(os.getenv('DESI_SPECTRO_REDUX'), args.specprod, 'tiles')
-    os.environ['FASTSPECFIT_DATA'] = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'lowmass-agn')
-    os.environ['FASTSPECFIT_HTML'] = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'lowmass-agn', 'qa')
+    def fit_survey(sample, survey='main', ntargets=None, outfile=None):
+        """Wrapper so we can fit fuji separately from guadalupe"""
 
-    if args.merge or args.makeqa or args.nompi:
-        comm = None
-    else:
-        try:
-            from mpi4py import MPI
-            comm = MPI.COMM_WORLD
-        except ImportError:
-            comm = None
+        I = np.where(sample['SURVEY'] == survey)[0]
+        #I = I[:4]
+        if len(I) == 0:
+            return
+        
+        if survey == 'main':
+            specprod = 'guadalupe'
+        else:
+            specprod = 'fuji'
+
+        specprod_dir = os.path.join(os.environ.get('DESI_ROOT'), 'spectro', 'redux', specprod, 'healpix')
+
+        programs = sample['PROGRAM'][I].data
+        healpixels = sample['HEALPIX'][I].data
+        targetids = sample['TARGETID'][I].data
+
+        redrockfiles = [glob(os.path.join(specprod_dir, survey, program, str(healpixel//100), str(healpixel), 'redrock-{}-{}-{}.fits'.format(
+            survey, program, healpixel))) for program, healpixel in zip(programs, healpixels)]
+        redrockfiles = np.sort(np.unique(redrockfiles))
+
+        Spec.select(redrockfiles=redrockfiles, ntargets=ntargets, targetids=targetids)
+
+        data = Spec.read_and_unpack(CFit, fastphot=False, synthphot=True, remember_coadd=True)    
+
+        if args.makeqa:
+            fastfit, metadata, coadd_type, _ = read_fastspecfit(outfile)
             
+            indx = np.arange(len(data))
+            qaargs = [(CFit, EMFit, data[igal], fastfit[indx[igal]], metadata[indx[igal]],
+                       coadd_type, False, qadir, None) for igal in np.arange(len(indx))]                
+    
+            if args.mp > 1:
+                import multiprocessing
+                with multiprocessing.Pool(args.mp) as P:
+                    P.map(_desiqa_one, qaargs)
+            else:
+                [desiqa_one(*_qaargs) for _qaargs in qaargs]
+        else:
+            out, meta = Spec.init_output(CFit=CFit, EMFit=EMFit, fastphot=False)
+            
+            # Fit in parallel
+            t0 = time.time()
+            fitargs = [(iobj, data[iobj], out[iobj], meta[iobj], CFit, EMFit, False) # solve-vdisp and verbose
+                       for iobj in np.arange(Spec.ntargets)]
+            if args.mp > 1:
+                import multiprocessing
+                with multiprocessing.Pool(args.mp) as P:
+                    _out = P.map(_fastspec_one, fitargs)
+            else:
+                _out = [fastspec_one(*_fitargs) for _fitargs in fitargs]
+            _out = list(zip(*_out))
+            out = Table(np.hstack(_out[0]))
+            meta = Table(np.hstack(_out[1]))
+            log.info('Fitting everything took: {:.2f} sec'.format(time.time()-t0))
+
+            # Write out.
+            write_fastspecfit(out, meta, outfile=outfile, specprod=Spec.specprod,
+                              coadd_type=Spec.coadd_type, fastphot=False)
+
+    # project parameters
+    outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/lowmass-agn/fujilupe'
+    qadir = os.path.join(outdir, 'qa')
+    if not os.path.isdir(qadir):
+        os.makedirs(qadir, exist_ok=True)
+
+    samplefile = os.path.join(outdir, 'fastspecfit_blagn_test.fits')
+    sample = Table(fitsio.read(samplefile))
+
+    # select a subset of targets
+    if args.targetids:
+        targetids = np.array([int(x) for x in args.targetids.split(',')])
+        sample = sample[np.isin(sample['TARGETID'], targetids)]
+
     if args.merge:
-        #from fastspecfit.mpi import merge_fastspecfit
-        outdir = os.path.join(os.getenv('FASTSPECFIT_DATA'), 'fastspec')
-        merge_fastspecfit(args, outdir, fastphot=args.fastphot, specprod_dir=specprod_dir)
-    elif args.plan:
-        plan(args, comm=comm, fastphot=args.fastphot, specprod_dir=specprod_dir)
-    else:
-        run_fastspecfit(args, comm=comm, fastphot=args.fastphot,
-                        specprod_dir=specprod_dir, makeqa=args.makeqa)
+        from fastspecfit.mpi import merge_fastspecfit
+        merge_fastspecfit(mergedir=outdir, outsuffix='lowmass-agn', supermerge=True)
+        return
+
+    if args.makehtml:
+        pngfiles = glob(os.path.join(qadir, '*.png'))
+        if len(pngfiles) == 0:
+            print('No PNG files found in {}'.format(qadir))
+            return
+
+        indexfile = os.path.join(qadir, 'index.html')
+        print('Writing {}'.format(indexfile))
+        with open(indexfile, 'w') as html:
+            html.write('<html><body>\n')
+            html.write('<style type="text/css">\n')
+            html.write('table, td, th {padding: 5px; text-align: center; border: 1px solid black}\n')
+            html.write('</style>\n')
+
+            html.write('<h1>Low-mass AGN Project</h1>\n')
+            html.write('<h3><a href="fastspec-lowmass-agn.fits">Download fastspec catalog</a> (<a href="https://fastspecfit.readthedocs.io/en/latest/fastspec.html">Data Model</a>)</h3>\n')
+
+            for survey in ['sv1', 'sv3', 'main']:
+                for program in ['bright', 'dark']:
+                    I = np.where((sample['SURVEY'] == survey) * (sample['PROGRAM'] == program))[0]
+                    if len(I) == 0:
+                        continue
+
+                    html.write('<h2>{} - {}</h2>\n'.format(survey, program))
+                    html.write('<table>\n')
+                    for S in sample[I]:
+                        pngfile = os.path.join(qadir, 'fastspec-{}-{}-{}-{}.png'.format(S['SURVEY'], S['PROGRAM'], S['HEALPIX'], S['TARGETID']))
+                        if os.path.isfile(pngfile):
+                            #print(survey, program, pngfile)
+                            html.write('<tr width="90%"><td colspan="4"><a href="{0}"><img src="{0}" height="auto" width="512px"></a></td></tr>\n'.format(os.path.basename(pngfile)))
+                            html.write('<tr width="90%">')
+                            html.write('<td>{}</td>'.format(S['TARGETID']))
+                            html.write('<td>{}</td>'.format(S['SURVEY']))
+                            html.write('<td>{}</td>'.format(S['PROGRAM']))
+                            html.write('<td>{}</td>'.format(S['HEALPIX']))
+                            html.write('</tr>\n')
+                        else:
+                            pdb.set_trace()
+                    html.write('</table>\n')
+                    html.write('<br />\n')
+
+        return
+
+    Spec = DESISpectra()
+    CFit = ContinuumFit()
+    EMFit = EMLineFit()
+
+    # Need to fit main separately from sv[1-3].
+    #for survey in ['sv1', 'sv2', 'sv3', 'main']:
+    for survey in set(sample['SURVEY']):
+        outfile = os.path.join(outdir, 'fastspec-lowmass-agn-{}.fits'.format(survey))
+        fit_survey(sample, survey=survey, ntargets=args.ntargets, outfile=outfile)
 
 if __name__ == '__main__':
     main()
