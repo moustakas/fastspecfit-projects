@@ -145,7 +145,7 @@ def main():
             html.write('</style>\n')
 
             html.write('<h1>Low-z / SAGA Project</h1>\n')
-            html.write('<h3><a href="fastspec-lowz.fits">Download fastspec catalog</a> (<a href="https://fastspecfit.readthedocs.io/en/latest/fastspec.html">Data Model</a>)</h3>\n')
+            html.write('<h3><a href="../fastspec-lowz.fits">Download fastspec catalog</a> (<a href="https://fastspecfit.readthedocs.io/en/latest/fastspec.html">Data Model</a>)</h3>\n')
 
             for survey in ['sv1', 'sv3', 'main']:
                 for program in ['bright', 'dark']:
