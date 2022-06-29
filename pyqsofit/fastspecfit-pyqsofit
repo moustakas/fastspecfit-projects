@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """
-Fit the low-mass AGN sample.
+Fit the pyqsofit sample
 
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 32
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 20 --ntargets 20 --makeqa
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/pyqsofit/fastspecfit-pyqsofit --mp 32
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/pyqsofit/fastspecfit-pyqsofit --mp 20 --ntargets 20 --makeqa
 
 """
 import pdb # for debugging
@@ -50,6 +50,11 @@ def main():
     def fit_survey(sample, survey='main', ntargets=None, outfile=None):
         """Wrapper so we can fit fuji separately from guadalupe"""
 
+        I = np.where(sample['SURVEY'] == survey)[0]
+        #I = I[:5]
+        if len(I) == 0:
+            return
+        
         if survey == 'main':
             specprod = 'guadalupe'
         else:
@@ -57,13 +62,16 @@ def main():
 
         specprod_dir = os.path.join(os.environ.get('DESI_ROOT'), 'spectro', 'redux', specprod, 'healpix')
 
-        programs = sample['PROGRAM'].data
-        healpixels = sample['HEALPIX'].data
-        targetids = sample['TARGETID'].data
+        programs = sample['PROGRAM'][I].data
+        healpixels = sample['HEALPIX'][I].data
+        targetids = sample['TARGETID'][I].data
 
         redrockfiles = [glob(os.path.join(specprod_dir, survey, program, str(healpixel//100), str(healpixel), 'redrock-{}-{}-{}.fits'.format(
             survey, program, healpixel))) for program, healpixel in zip(programs, healpixels)]
         redrockfiles = np.sort(np.unique(redrockfiles))
+        if len(redrockfiles) == 0:
+            print('No redrock files for survey {}!'.format(survey))
+            raise ValueError
 
         Spec.select(redrockfiles=redrockfiles, ntargets=ntargets, targetids=targetids)
 
@@ -105,13 +113,21 @@ def main():
                               coadd_type=Spec.coadd_type, fastphot=False)
 
     # project parameters
-    outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/lowmass-agn/fujilupe'
+    outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/pyqsofit/fujilupe'
     qadir = os.path.join(outdir, 'qa')
     if not os.path.isdir(qadir):
         os.makedirs(qadir, exist_ok=True)
 
-    samplefile = os.path.join(outdir, 'fastspecfit_blagn_test.fits')
-    sample = Table(fitsio.read(samplefile))
+    samplefile = os.path.join(outdir, 'qso_not_type2_ID.fits')
+    sample = Table(fitsio.read(samplefile, ext=1))
+    sample.rename_column('HPXPIXEL', 'HEALPIX')
+    sample['SURVEY'] = [survey.strip() for survey in sample['SURVEY']]
+    sample['PROGRAM'] = [program.strip() for program in sample['PROGRAM']]
+
+    print('Removing survey=special!')
+    sample = sample[sample['SURVEY'] != 'special']
+
+    #sample = sample[sample['HEALPIX'] == 10152]
 
     # select a subset of targets
     if args.targetids:
@@ -120,7 +136,7 @@ def main():
 
     if args.merge:
         from fastspecfit.mpi import merge_fastspecfit
-        merge_fastspecfit(mergedir=outdir, outsuffix='lowmass-agn', supermerge=True)
+        merge_fastspecfit(mergedir=outdir, outsuffix='pyqsofit', supermerge=True)
         return
 
     if args.makehtml:
@@ -137,8 +153,8 @@ def main():
             html.write('table, td, th {padding: 5px; text-align: center; border: 1px solid black}\n')
             html.write('</style>\n')
 
-            html.write('<h1>Low-mass AGN Project</h1>\n')
-            html.write('<h3><a href="../fastspec-lowmass-agn.fits">Download fastspec catalog</a> (<a href="https://fastspecfit.readthedocs.io/en/latest/fastspec.html">Data Model</a>)</h3>\n')
+            html.write('<h1>PyQSOFit Sample</h1>\n')
+            html.write('<h3><a href="../fastspec-pyqsofit.fits">Download fastspec catalog</a> (<a href="https://fastspecfit.readthedocs.io/en/latest/fastspec.html">Data Model</a>)</h3>\n')
 
             for survey in set(sample['SURVEY']):
                 I = survey == sample['SURVEY']
@@ -158,8 +174,8 @@ def main():
                             html.write('<td>{}</td>'.format(S['PROGRAM']))
                             html.write('<td>{}</td>'.format(S['HEALPIX']))
                             html.write('</tr>\n')
-                        else:
-                            pdb.set_trace()
+                        #else:
+                        #    pdb.set_trace()
                     html.write('</table>\n')
                     html.write('<br />\n')
 
@@ -171,11 +187,10 @@ def main():
 
     # Need to fit main separately from sv[1-3].
     for survey in set(sample['SURVEY']):
-        I = survey == sample['SURVEY']
-        for program in set(sample['PROGRAM'][I]):
-            J = program == sample['PROGRAM'][I]
-        outfile = os.path.join(outdir, 'fastspec-lowmass-agn-{}.fits'.format(survey))
-        fit_survey(sample[I][J], survey=survey, ntargets=args.ntargets, outfile=outfile)
+    #for survey in ['sv1', 'sv2', 'sv3', 'main']:
+    #for survey in ['special']:
+        outfile = os.path.join(outdir, 'fastspec-pyqsofit-{}.fits'.format(survey))
+        fit_survey(sample, survey=survey, ntargets=args.ntargets, outfile=outfile)
 
 if __name__ == '__main__':
     main()
