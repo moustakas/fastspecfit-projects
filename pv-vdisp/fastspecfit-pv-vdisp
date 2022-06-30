@@ -1,0 +1,182 @@
+#!/usr/bin/env python
+"""
+Fit the pv-vdisp sample
+
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/pv-vdisp/fastspecfit-pv-vdisp --mp 32
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/pv-vdisp/fastspecfit-pv-vdisp --mp 20 --makeqa
+
+"""
+import pdb # for debugging
+
+import os, time, subprocess
+import numpy as np
+import fitsio
+from glob import glob
+from astropy.table import Table
+
+from desiutil.log import get_logger
+log = get_logger()
+
+def main():
+    """Main wrapper on fastphot and fastspec.
+
+    Currently only knows about SV1 observations.
+
+    """
+    import argparse    
+    from fastspecfit.mpi import plan
+    from fastspecfit.continuum import ContinuumFit
+    from fastspecfit.emlines import EMLineFit
+    from fastspecfit.io import DESISpectra, write_fastspecfit, read_fastspecfit
+    from fastspecfit.fastspecfit import _fastspec_one, fastspec_one, _desiqa_one, desiqa_one
+    
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
+    parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
+    
+    parser.add_argument('--fastphot', action='store_true', help='Fit the broadband photometry.')
+
+    parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
+    parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
+    parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
+    
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite any existing output files.')
+    parser.add_argument('--plan', action='store_true', help='Plan how many nodes to use and how to distribute the targets.')
+    parser.add_argument('--dry-run', action='store_true', help='Generate but do not run commands')
+
+    args = parser.parse_args()
+
+    def fit_onetile(sample, specprod='fuji', outfile=None):
+        """Wrapper so we can fit fuji separately from guadalupe"""
+
+        specprod_dir = os.path.join(os.environ.get('DESI_ROOT'), 'spectro', 'redux', specprod, 'tiles', 'cumulative')
+
+        tileid = sample['TILE'][0]
+        nights = sample['YYYYMMDD'].data
+        petals = sample['PETAL'].data
+        targetids = sample['TARGETID'].data
+
+        #redrockfiles = [os.path.join(specprod_dir, str(tileid), str(night), 'redrock-{}-{}-thru{}.fits'.format(
+        #    petal, tileid, night)) for night, petal in zip(nights, petals)]
+        redrockfiles = [glob(os.path.join(specprod_dir, str(tileid), str(night), 'redrock-{}-{}-thru{}.fits'.format(
+            petal, tileid, night))) for night, petal in zip(nights, petals)]
+        redrockfiles = np.sort(np.unique(redrockfiles))
+        if len(redrockfiles) == 0:
+            print('No redrock files for survey {}!'.format(survey))
+            raise ValueError
+
+        Spec.select(redrockfiles=redrockfiles, targetids=targetids)
+
+        data = Spec.read_and_unpack(CFit, fastphot=False, synthphot=True, remember_coadd=True)    
+
+        if args.makeqa:
+            fastfit, metadata, coadd_type, _ = read_fastspecfit(outfile)
+            
+            indx = np.arange(len(data))
+            qaargs = [(CFit, EMFit, data[igal], fastfit[indx[igal]], metadata[indx[igal]],
+                       coadd_type, False, qadir, None) for igal in np.arange(len(indx))]                
+    
+            if args.mp > 1:
+                import multiprocessing
+                with multiprocessing.Pool(args.mp) as P:
+                    P.map(_desiqa_one, qaargs)
+            else:
+                [desiqa_one(*_qaargs) for _qaargs in qaargs]
+        else:
+            out, meta = Spec.init_output(CFit=CFit, EMFit=EMFit, fastphot=False)
+            
+            # Fit in parallel
+            t0 = time.time()
+            fitargs = [(iobj, data[iobj], out[iobj], meta[iobj], CFit, EMFit, False) # solve-vdisp and verbose
+                       for iobj in np.arange(Spec.ntargets)]
+            if args.mp > 1:
+                import multiprocessing
+                with multiprocessing.Pool(args.mp) as P:
+                    _out = P.map(_fastspec_one, fitargs)
+            else:
+                _out = [fastspec_one(*_fitargs) for _fitargs in fitargs]
+            _out = list(zip(*_out))
+            out = Table(np.hstack(_out[0]))
+            meta = Table(np.hstack(_out[1]))
+            log.info('Fitting everything took: {:.2f} sec'.format(time.time()-t0))
+
+            # Write out.
+            write_fastspecfit(out, meta, outfile=outfile, specprod=Spec.specprod,
+                              coadd_type=Spec.coadd_type, fastphot=False)
+
+    # project parameters
+    outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/pv-vdisp/fujilupe'
+    qadir = os.path.join(outdir, 'qa')
+    if not os.path.isdir(qadir):
+        os.makedirs(qadir, exist_ok=True)
+
+    samplefile = os.path.join(outdir, 'Everest_FP_velocity_dispersions.txt')
+    sample = Table.read(samplefile, format='ascii.commented_header')
+    [sample.rename_column(col, col.upper()) for col in sample.colnames]
+
+    ww = (sample['TILE'] > 80000) * (sample['TILE'] < 90000)
+    sample = sample[ww]
+
+    # select a subset of targets
+    if args.targetids:
+        targetids = np.array([int(x) for x in args.targetids.split(',')])
+        sample = sample[np.isin(sample['TARGETID'], targetids)]
+
+    if args.merge:
+        from fastspecfit.mpi import merge_fastspecfit
+        merge_fastspecfit(mergedir=outdir, outsuffix='pv-vdisp', supermerge=True)
+        return
+
+    if args.makehtml:
+        pngfiles = glob(os.path.join(qadir, '*.png'))
+        if len(pngfiles) == 0:
+            print('No PNG files found in {}'.format(qadir))
+            return
+
+        indexfile = os.path.join(qadir, 'index.html')
+        print('Writing {}'.format(indexfile))
+        with open(indexfile, 'w') as html:
+            html.write('<html><body>\n')
+            html.write('<style type="text/css">\n')
+            html.write('table, td, th {padding: 5px; text-align: center; border: 1px solid black}\n')
+            html.write('</style>\n')
+
+            html.write('<h1>Peculiar Velocity - Velocity Dispersion Sample</h1>\n')
+            html.write('<h3><a href="../fastspec-pv-vdisp.fits">Download fastspec catalog</a> (<a href="https://fastspecfit.readthedocs.io/en/latest/fastspec.html">Data Model</a>)</h3>\n')
+
+            for tileid in set(sample['TILE']):
+                I = tileid == sample['TILE']
+
+                html.write('<h2>{}</h2>\n'.format(tileid))
+                html.write('<table>\n')
+                for S in sample[I]:
+                    pngfile = os.path.join(qadir, 'fastspec-{}-cumulative-{}.png'.format(S['TILE'], S['TARGETID']))
+                    if os.path.isfile(pngfile):
+                        #print(survey, program, pngfile)
+                        html.write('<tr width="90%"><td colspan="4"><a href="{0}"><img src="{0}" height="auto" width="512px"></a></td></tr>\n'.format(os.path.basename(pngfile)))
+                        html.write('<tr width="90%">')
+                        html.write('<td>{}</td>'.format(S['TARGETID']))
+                        html.write('<td>{}</td>'.format(S['TILE']))
+                        html.write('<td>{}</td>'.format(S['YYYYMMDD']))
+                        html.write('<td>pPXF={:.2f}+/-{:.2f} km/s</td>'.format(S['PPXF_SIGMA'], S['PPXF_SIGMA_ERROR']))
+                        html.write('</tr>\n')
+                    #else:
+                    #    pdb.set_trace()
+                html.write('</table>\n')
+                html.write('<br />\n')
+
+        return
+
+    Spec = DESISpectra()
+    CFit = ContinuumFit(solve_vdisp=True)
+    EMFit = EMLineFit()
+
+    # Need to fit each tile separately.
+    for tileid in set(sample['TILE']):
+        I = tileid == sample['TILE']
+        outfile = os.path.join(outdir, 'fastspec-pv-vdisp-{}.fits'.format(tileid))
+        fit_onetile(sample[I][:1], outfile=outfile)
+        pdb.set_trace()
+
+if __name__ == '__main__':
+    main()
