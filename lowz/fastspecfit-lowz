@@ -3,8 +3,8 @@
 Fit the lowz sample
 
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowz/fastspecfit-lowz --mp 32
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowz/fastspecfit-lowz --mp 32 --makeqa
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowz/fastspecfit-lowz --merge
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowz/fastspecfit-lowz --mp 32 --makeqa --nqa 50
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowz/fastspecfit-lowz --makehtml
 
 """
@@ -34,8 +34,8 @@ def main():
     
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
-    parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
     parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
+    parser.add_argument('--nqa', type=int, default=50, help='Random subset of objects to make QA for.')
     
     parser.add_argument('--fastphot', action='store_true', help='Fit the broadband photometry.')
 
@@ -49,7 +49,7 @@ def main():
 
     args = parser.parse_args()
 
-    def fit_survey(sample, survey='main', ntargets=None, outfile=None):
+    def fit_survey(sample, survey='main', outfile=None):
         """Wrapper so we can fit fuji separately from guadalupe"""
 
         if survey == 'main':
@@ -79,12 +79,13 @@ def main():
             #    survey, program, healpixel))) for program, healpixel, pixel100 in zip(programs, healpixels, pixels100)]
             redrockfiles = np.sort(np.unique(redrockfiles))
     
-            Spec.select(redrockfiles=redrockfiles, ntargets=ntargets, targetids=targetids)
+            Spec.select(redrockfiles=redrockfiles, targetids=targetids)
     
             data = Spec.read_and_unpack(CFit, fastphot=False, synthphot=True, remember_coadd=True)    
     
             if args.makeqa:
                 fastfit, metadata, coadd_type, _ = read_fastspecfit(outfile100)
+                pdb.set_trace()
                 
                 indx = np.arange(len(data))
                 qaargs = [(CFit, EMFit, data[igal], fastfit[indx[igal]], metadata[indx[igal]],
@@ -128,11 +129,22 @@ def main():
     sample = Table(fitsio.read(samplefile))
 
     #sample = sample[sample['HEALPIX'] == 10152]
+    #sample = sample[(sample['SURVEY'] == 'sv3') * (sample['PROGRAM'] == 'bright')]
 
     # select a subset of targets
     if args.targetids:
         targetids = np.array([int(x) for x in args.targetids.split(',')])
         sample = sample[np.isin(sample['TARGETID'], targetids)]
+
+    if args.makeqa and args.nqa:
+        if args.nqa > len(sample):
+            nqa = len(sample)
+        else:
+            nqa = args.nqa
+        print('Making QA for a random subset of {} objects!'.format(nqa))
+        rand = np.random.RandomState(seed=1)
+        I = rand.choice(len(sample), nqa, replace=False)
+        sample = sample[I]
 
     if args.merge:
         from fastspecfit.mpi import merge_fastspecfit
@@ -185,6 +197,9 @@ def main():
     CFit = ContinuumFit()
     EMFit = EMLineFit()
 
+    #pixels100 = np.array([str(healpixel//100) for healpixel in sample['HEALPIX'].data])
+    #pdb.set_trace()
+
     # Need to fit main separately from sv[1-3].
     #for survey in ['sv1', 'sv2', 'sv3', 'main']:
     for survey in set(sample['SURVEY']):
@@ -192,7 +207,7 @@ def main():
         for program in set(sample['PROGRAM'][I]):
             J = program == sample['PROGRAM'][I]
             outfile = os.path.join(outdir, 'fastspec-lowz-{}-{}.fits'.format(survey, program))
-            fit_survey(sample[I][J], survey=survey, ntargets=args.ntargets, outfile=outfile)
+            fit_survey(sample[I][J], survey=survey, outfile=outfile)
 
 if __name__ == '__main__':
     main()

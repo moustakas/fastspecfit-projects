@@ -3,7 +3,7 @@
 Fit the pyqsofit sample
 
 /global/u2/i/ioannis/code/desihub/fastspecfit-projects/pyqsofit/fastspecfit-pyqsofit --mp 32
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/pyqsofit/fastspecfit-pyqsofit --mp 20 --ntargets 20 --makeqa
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/pyqsofit/fastspecfit-pyqsofit --mp 32 --makeqa
 
 """
 import pdb # for debugging
@@ -32,8 +32,8 @@ def main():
     
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
-    parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
     parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
+    parser.add_argument('--nqa', type=int, default=50, help='Random subset of objects to make QA for.')
     
     parser.add_argument('--fastphot', action='store_true', help='Fit the broadband photometry.')
 
@@ -47,70 +47,74 @@ def main():
 
     args = parser.parse_args()
 
-    def fit_survey(sample, survey='main', ntargets=None, outfile=None):
+    def fit_survey(sample, survey='main', outfile=None):
         """Wrapper so we can fit fuji separately from guadalupe"""
 
-        I = np.where(sample['SURVEY'] == survey)[0]
-        #I = I[:5]
-        if len(I) == 0:
-            return
-        
-        if survey == 'main':
+        if survey == 'main' or survey == 'special':
             specprod = 'guadalupe'
         else:
             specprod = 'fuji'
 
         specprod_dir = os.path.join(os.environ.get('DESI_ROOT'), 'spectro', 'redux', specprod, 'healpix')
 
-        programs = sample['PROGRAM'][I].data
-        healpixels = sample['HEALPIX'][I].data
-        targetids = sample['TARGETID'][I].data
+        #programs = sample['PROGRAM'].data
+        #healpixels = sample['HEALPIX'].data
+        #targetids = sample['TARGETID'].data
+        pixels100 = np.array([str(healpixel//100) for healpixel in sample['HEALPIX'].data])
 
-        redrockfiles = [glob(os.path.join(specprod_dir, survey, program, str(healpixel//100), str(healpixel), 'redrock-{}-{}-{}.fits'.format(
-            survey, program, healpixel))) for program, healpixel in zip(programs, healpixels)]
-        redrockfiles = np.sort(np.unique(redrockfiles))
-        if len(redrockfiles) == 0:
-            print('No redrock files for survey {}!'.format(survey))
-            raise ValueError
+        for pixel100 in sorted(set(pixels100)):
+            outfile100 = outfile.replace('.fits', '-{}.fits'.format(pixel100))
 
-        Spec.select(redrockfiles=redrockfiles, ntargets=ntargets, targetids=targetids)
+            J = np.where(pixel100 == pixels100)[0]
 
-        data = Spec.read_and_unpack(CFit, fastphot=False, synthphot=True, remember_coadd=True)    
+            programs = sample['PROGRAM'][J].data
+            healpixels = sample['HEALPIX'][J].data
+            targetids = sample['TARGETID'][J].data
 
-        if args.makeqa:
-            fastfit, metadata, coadd_type, _ = read_fastspecfit(outfile)
-            
-            indx = np.arange(len(data))
-            qaargs = [(CFit, EMFit, data[igal], fastfit[indx[igal]], metadata[indx[igal]],
-                       coadd_type, False, qadir, None) for igal in np.arange(len(indx))]                
+            redrockfiles = [glob(os.path.join(specprod_dir, survey, program, pixel100, str(healpixel), 'redrock-{}-{}-{}.fits'.format(
+                survey, program, healpixel))) for program, healpixel in zip(programs, healpixels)]
+            #redrockfiles = [glob(os.path.join(specprod_dir, survey, program, pixel100, str(healpixel), 'redrock-{}-{}-{}.fits'.format(
+            #    survey, program, healpixel))) for program, healpixel, pixel100 in zip(programs, healpixels, pixels100)]
+            redrockfiles = np.sort(np.unique(redrockfiles))
     
-            if args.mp > 1:
-                import multiprocessing
-                with multiprocessing.Pool(args.mp) as P:
-                    P.map(_desiqa_one, qaargs)
+            Spec.select(redrockfiles=redrockfiles, targetids=targetids)
+    
+            data = Spec.read_and_unpack(CFit, fastphot=False, synthphot=True, remember_coadd=True)    
+    
+            if args.makeqa:
+                fastfit, metadata, coadd_type, _ = read_fastspecfit(outfile100)
+                
+                indx = np.arange(len(data))
+                qaargs = [(CFit, EMFit, data[igal], fastfit[indx[igal]], metadata[indx[igal]],
+                           coadd_type, False, qadir, None) for igal in np.arange(len(indx))]                
+        
+                if args.mp > 1:
+                    import multiprocessing
+                    with multiprocessing.Pool(args.mp) as P:
+                        P.map(_desiqa_one, qaargs)
+                else:
+                    [desiqa_one(*_qaargs) for _qaargs in qaargs]
             else:
-                [desiqa_one(*_qaargs) for _qaargs in qaargs]
-        else:
-            out, meta = Spec.init_output(CFit=CFit, EMFit=EMFit, fastphot=False)
-            
-            # Fit in parallel
-            t0 = time.time()
-            fitargs = [(iobj, data[iobj], out[iobj], meta[iobj], CFit, EMFit, False) # solve-vdisp and verbose
-                       for iobj in np.arange(Spec.ntargets)]
-            if args.mp > 1:
-                import multiprocessing
-                with multiprocessing.Pool(args.mp) as P:
-                    _out = P.map(_fastspec_one, fitargs)
-            else:
-                _out = [fastspec_one(*_fitargs) for _fitargs in fitargs]
-            _out = list(zip(*_out))
-            out = Table(np.hstack(_out[0]))
-            meta = Table(np.hstack(_out[1]))
-            log.info('Fitting everything took: {:.2f} sec'.format(time.time()-t0))
-
-            # Write out.
-            write_fastspecfit(out, meta, outfile=outfile, specprod=Spec.specprod,
-                              coadd_type=Spec.coadd_type, fastphot=False)
+                out, meta = Spec.init_output(CFit=CFit, EMFit=EMFit, fastphot=False)
+                
+                # Fit in parallel
+                t0 = time.time()
+                fitargs = [(iobj, data[iobj], out[iobj], meta[iobj], CFit, EMFit, False) # solve-vdisp and verbose
+                           for iobj in np.arange(Spec.ntargets)]
+                if args.mp > 1:
+                    import multiprocessing
+                    with multiprocessing.Pool(args.mp) as P:
+                        _out = P.map(_fastspec_one, fitargs)
+                else:
+                    _out = [fastspec_one(*_fitargs) for _fitargs in fitargs]
+                _out = list(zip(*_out))
+                out = Table(np.hstack(_out[0]))
+                meta = Table(np.hstack(_out[1]))
+                log.info('Fitting everything took: {:.2f} sec'.format(time.time()-t0))
+    
+                # Write out.
+                write_fastspecfit(out, meta, outfile=outfile100, specprod=Spec.specprod,
+                                  coadd_type=Spec.coadd_type, fastphot=False)
 
     # project parameters
     outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/pyqsofit/fujilupe'
@@ -124,8 +128,10 @@ def main():
     sample['SURVEY'] = [survey.strip() for survey in sample['SURVEY']]
     sample['PROGRAM'] = [program.strip() for program in sample['PROGRAM']]
 
-    print('Removing survey=special!')
-    sample = sample[sample['SURVEY'] != 'special']
+    #pdb.set_trace()
+
+    #print('Removing survey=special!')
+    #sample = sample[sample['SURVEY'] != 'special']
 
     #sample = sample[sample['HEALPIX'] == 10152]
 
@@ -133,6 +139,16 @@ def main():
     if args.targetids:
         targetids = np.array([int(x) for x in args.targetids.split(',')])
         sample = sample[np.isin(sample['TARGETID'], targetids)]
+
+    if args.makeqa and args.nqa:
+        if args.nqa > len(sample):
+            nqa = len(sample)
+        else:
+            nqa = args.nqa
+        print('Making QA for a random subset of {} objects!'.format(nqa))
+        rand = np.random.RandomState(seed=1)
+        I = rand.choice(len(sample), nqa, replace=False)
+        sample = sample[I]
 
     if args.merge:
         from fastspecfit.mpi import merge_fastspecfit
@@ -187,10 +203,11 @@ def main():
 
     # Need to fit main separately from sv[1-3].
     for survey in set(sample['SURVEY']):
-    #for survey in ['sv1', 'sv2', 'sv3', 'main']:
-    #for survey in ['special']:
-        outfile = os.path.join(outdir, 'fastspec-pyqsofit-{}.fits'.format(survey))
-        fit_survey(sample, survey=survey, ntargets=args.ntargets, outfile=outfile)
+        I = survey == sample['SURVEY']
+        for program in set(sample['PROGRAM'][I]):
+            J = program == sample['PROGRAM'][I]
+            outfile = os.path.join(outdir, 'fastspec-pyqsofit-{}-{}.fits'.format(survey, program))
+            fit_survey(sample[I][J], survey=survey, outfile=outfile)
 
 if __name__ == '__main__':
     main()

@@ -174,8 +174,8 @@ def main():
         I = survey == sample['SURVEY']
         for program in set(sample['PROGRAM'][I]):
             J = program == sample['PROGRAM'][I]
-        outfile = os.path.join(outdir, 'fastspec-lowmass-agn-{}.fits'.format(survey))
-        fit_survey(sample[I][J], survey=survey, ntargets=args.ntargets, outfile=outfile)
+            outfile = os.path.join(outdir, 'fastspec-lowmass-agn-{}-{}.fits'.format(survey, program))
+            fit_survey(sample[I][J], survey=survey, ntargets=args.ntargets, outfile=outfile)
 
 if __name__ == '__main__':
     main()
