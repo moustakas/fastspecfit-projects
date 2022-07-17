@@ -1,0 +1,90 @@
+#!/usr/bin/env python
+"""
+Compute K-corrections for the pv-vdisp sample. This code needs to by run after
+loading the legacyhalos environment, which includes kcorrect and pydl.
+
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/pv-vdisp/kcorrect-pv-vdisp
+
+kc = Kcorrect(responses=['decam_g', 'decam_r', 'decam_z', 'wise_w1'], responses_out=['sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'], redshift_range=[0.05, 0.1], nredshift=10)
+redshift = 0.07449587571570698
+maggies = np.array([2.20814607e-07, 5.35109581e-07, 1.00688837e-06, 8.29891613e-07])
+ivar = np.array([1.68168776e+19, 5.50286047e+18, 4.86446756e+18, 3.53224415e+17])
+coeffs = kc.fit_coeffs(redshift=redshift, maggies=maggies, ivar=ivar)
+absmag = kc.absmag(redshift=redshift, maggies=maggies, ivar=ivar, coeffs=coeffs, band_shift=0.1)
+kcorr = kc.kcorrect(redshift=redshift, coeffs=coeffs, band_shift=0.1)
+
+"""
+def main():
+
+    import os, pdb
+    import numpy as np
+    import fitsio
+    from astropy.table import Table
+    from kcorrect.kcorrect import Kcorrect
+    
+    outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/pv-vdisp/fujilupe'
+    outfile = os.path.join(outdir, 'kcorrect-pv-vdisp.fits')
+
+    # sv1-bright-39633089965589981
+    redshift = 0.07449587571570698
+    maggies = np.array([2.20814607e-07, 5.35109581e-07, 1.00688837e-06, 8.29891613e-07])
+    ivar = np.array([1.68168776e+19, 5.50286047e+18, 4.86446756e+18, 3.53224415e+17])
+    kc = Kcorrect(responses=['decam_g', 'decam_r', 'decam_z', 'wise_w1'],
+                  responses_out=['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0'],
+                  redshift_range=[0.001, 0.1], nredshift=100)
+    coeffs = kc.fit_coeffs(redshift=redshift, maggies=maggies, ivar=ivar)
+    absmag = kc.absmag(redshift=redshift, maggies=maggies, ivar=ivar, coeffs=coeffs, band_shift=0.1)
+    kcorr = kc.kcorrect(redshift=redshift, coeffs=coeffs, band_shift=0.1)
+    print(absmag, kcorr)
+    pdb.set_trace()
+
+    meta = Table(fitsio.read(os.path.join(outdir, 'fastphot-pv-vdisp.fits'), 'METADATA'))
+    fast = Table(fitsio.read(os.path.join(outdir, 'fastphot-pv-vdisp.fits'), 'FASTPHOT'))
+
+    #meta = meta[:5]
+    #fast = fast[:5]
+    nobj = len(meta)
+
+    fast_absmag = np.array(fast['ABSMAG_SDSS_U', 'ABSMAG_SDSS_G', 'ABSMAG_SDSS_R', 'ABSMAG_SDSS_I'].as_array().tolist())
+    fast_kcorr = np.array(fast['KCORR_SDSS_U', 'KCORR_SDSS_G', 'KCORR_SDSS_R', 'KCORR_SDSS_I'].as_array().tolist())
+
+    kc = Kcorrect(responses=['decam_g', 'decam_r', 'decam_z', 'wise_w1'],
+                  responses_out=['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0'],
+                  redshift_range=[0.001, 0.1], nredshift=100)
+
+    dust = np.array(meta['MW_TRANSMISSION_G', 'MW_TRANSMISSION_R', 'MW_TRANSMISSION_Z', 'MW_TRANSMISSION_W1'].as_array().tolist())
+    
+    maggies = np.array(meta['FLUX_G', 'FLUX_R', 'FLUX_Z', 'FLUX_W1'].as_array().tolist())*1e-9/dust
+    ivarmaggies = np.array(meta['FLUX_IVAR_G', 'FLUX_IVAR_R', 'FLUX_IVAR_Z', 'FLUX_IVAR_W1'].as_array().tolist())*1e18*dust**2
+    redshifts = meta['Z'].data
+
+    absmags, kcorrs = [], []
+    for ii in np.arange(nobj):
+        coeffs = kc.fit_coeffs(redshift=redshifts[ii], maggies=maggies[ii, :], ivar=ivarmaggies[ii, :])
+        absmag = kc.absmag(redshift=redshifts[ii], maggies=maggies[ii, :],
+                           ivar=ivarmaggies[ii, :], coeffs=coeffs, band_shift=0.1)
+        kcorr = kc.kcorrect(redshift=redshifts[ii], coeffs=coeffs, band_shift=0.1)
+        absmags.append(absmag)
+        kcorrs.append(kcorr)
+
+        print(absmag, kcorr)
+
+    absmags = np.vstack(absmags)
+    kcorrs = np.vstack(kcorrs)
+
+    bands = ['u', 'g', 'r', 'i']
+    out = Table()
+    out['SURVEY'] = meta['SURVEY']
+    out['PROGRAM'] = meta['PROGRAM']
+    out['HEALPIX'] = meta['HEALPIX']
+    out['TARGETID'] = meta['TARGETID']
+    for ii, band in enumerate(bands):
+        out['ABSMAG_SDSS_{}'.format(band.upper())] = absmags[:, ii]
+    for ii, band in enumerate(bands):
+        out['KCORR_SDSS_{}'.format(band.upper())] = kcorrs[:, ii]
+
+    print('Writing {}'.format(outfile))
+    out.write(outfile, overwrite=True)
+
+if __name__ == '__main__':
+    main()

@@ -85,7 +85,7 @@ def main():
     
             if args.makeqa:
                 fastfit, metadata, coadd_type, _ = read_fastspecfit(outfile100)
-                pdb.set_trace()
+                log.info('Fix me!')
                 
                 indx = np.arange(len(data))
                 qaargs = [(CFit, EMFit, data[igal], fastfit[indx[igal]], metadata[indx[igal]],

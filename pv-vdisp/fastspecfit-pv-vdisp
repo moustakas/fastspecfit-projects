@@ -3,6 +3,7 @@
 Fit the pv-vdisp sample
 
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/pv-vdisp/fastspecfit-pv-vdisp --mp 32
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/pv-vdisp/fastspecfit-pv-vdisp --fastphot --mp 32
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/pv-vdisp/fastspecfit-pv-vdisp --mp 32 --makeqa
 /global/u2/i/ioannis/code/desihub/fastspecfit-projects/pv-vdisp/fastspecfit-pv-vdisp --merge
 /global/u2/i/ioannis/code/desihub/fastspecfit-projects/pv-vdisp/fastspecfit-pv-vdisp --makehtml
@@ -14,7 +15,7 @@ import os, time, subprocess
 import numpy as np
 import fitsio
 from glob import glob
-from astropy.table import Table
+from astropy.table import Table, QTable, vstack
 
 from desiutil.log import get_logger
 log = get_logger()
@@ -35,12 +36,10 @@ def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
     parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
-    
     parser.add_argument('--fastphot', action='store_true', help='Fit the broadband photometry.')
     parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
     parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
     parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
-    parser.add_argument('--overwrite', action='store_true', help='Overwrite any existing output files.')
 
     args = parser.parse_args()
 
@@ -60,7 +59,7 @@ def main():
         pixels100 = np.array([str(healpixel//100) for healpixel in sample['HEALPIX'].data])
 
         for pixel100 in sorted(set(pixels100)):
-            outfile100 = outfile.replace('.fits', '-{}.fits'.format(pixel100))
+            outfile100 = outfile.replace('.fits', '-{}.fits.gz'.format(pixel100))
 
             J = np.where(pixel100 == pixels100)[0]
 
@@ -116,13 +115,24 @@ def main():
                         _out = [fastspec_one(*_fitargs) for _fitargs in fitargs]
                     
                 _out = list(zip(*_out))
-                out = Table(np.hstack(_out[0]))
-                meta = Table(np.hstack(_out[1]))
-                log.info('Fitting everything took: {:.2f} sec'.format(time.time()-t0))
+                out = QTable(np.hstack(_out[0]))
+                meta = QTable(np.hstack(_out[1]))
+                if fastphot:
+                    modelspectra = None
+                else:
+                    try:
+                        # need to vstack to preserve the wavelength metadata 
+                        modelspectra = vstack(_out[2], metadata_conflicts='error')
+                    except:
+                        errmsg = 'Metadata conflict when stacking model spectra.'
+                        log.critical(errmsg)
+                        raise ValueError(errmsg)
+                    log.info('Fitting everything took: {:.2f} sec'.format(time.time()-t0))
     
                 # Write out.
-                write_fastspecfit(out, meta, outfile=outfile100, specprod=Spec.specprod,
-                                  coadd_type=Spec.coadd_type, fastphot=fastphot)
+                write_fastspecfit(out, meta, modelspectra=modelspectra, outfile=outfile100,
+                                  specprod=Spec.specprod, coadd_type=Spec.coadd_type,
+                                  fastphot=fastphot)
 
     def fit_onetile(sample, specprod='fuji', outfile=None):
         """Wrapper so we can fit fuji separately from guadalupe"""
@@ -145,7 +155,7 @@ def main():
 
         Spec.select(redrockfiles=redrockfiles, targetids=targetids)
 
-        data = Spec.read_and_unpack(CFit, fastphot=False, synthphot=True, remember_coadd=True)    
+        data = Spec.read_and_unpack(CFit, fastphot=fastphot, synthphot=True, remember_coadd=True)    
 
         if args.makeqa:
             fastfit, metadata, coadd_type, _ = read_fastspecfit(outfile)
@@ -161,7 +171,7 @@ def main():
             else:
                 [desiqa_one(*_qaargs) for _qaargs in qaargs]
         else:
-            out, meta = Spec.init_output(CFit=CFit, EMFit=EMFit, fastphot=False)
+            out, meta = Spec.init_output(CFit=CFit, EMFit=EMFit, fastphot=fastphot)
             
             # Fit in parallel
             t0 = time.time()
@@ -174,13 +184,13 @@ def main():
             else:
                 _out = [fastspec_one(*_fitargs) for _fitargs in fitargs]
             _out = list(zip(*_out))
-            out = Table(np.hstack(_out[0]))
-            meta = Table(np.hstack(_out[1]))
+            out = QTable(np.hstack(_out[0]))
+            meta = QTable(np.hstack(_out[1]))
             log.info('Fitting everything took: {:.2f} sec'.format(time.time()-t0))
 
             # Write out.
             write_fastspecfit(out, meta, outfile=outfile, specprod=Spec.specprod,
-                              coadd_type=Spec.coadd_type, fastphot=False)
+                              coadd_type=Spec.coadd_type, fastphot=fastphot)
 
     # project parameters
     outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/pv-vdisp/fujilupe'
@@ -300,7 +310,7 @@ def main():
         I = survey == sample['SURVEY']
         for program in set(sample['PROGRAM'][I]):
             J = program == sample['PROGRAM'][I]
-            outfile = os.path.join(outdir, '{}-pv-vdisp-{}-{}.fits'.format(prefix, survey, program))
+            outfile = os.path.join(outdir, '{}-pv-vdisp-{}-{}.fits.gz'.format(prefix, survey, program))
             #print(ii, np.sum(J), outfile)
             #ii = ii+1
             fit_survey(sample[I][J], survey=survey, outfile=outfile, fastphot=args.fastphot)
