@@ -17,8 +17,7 @@ to measure the emission line ratios in some systematic way, be able to separate
 sources by their ionization (i.e., PNe and HII) and investigate their kinematics
 and gas-phase metallicities.
 
-/global/homes/k/koposov/desi_koposov/m31_processing_scripts/reduction_2205/data/
-coadd_m31_all_220521.fits - coadd file
+/global/homes/k/koposov/desi_koposov/m31_processing_scripts/reduction_2205/data/coadd_m31_all_220521.fits - coadd file
 rvtab_coadd_m31_all_220521.fits - rvtab file
 
 """
@@ -131,7 +130,7 @@ def main():
     # project parameters
     outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/m31/fujilupe'
     redrockfile = os.path.join(outdir, 'redrock-m31_rvtab_good_220521.fits')
-    fastfitfile = os.path.join(outdir, 'fastspec-m31_rvtab_good_220521.fits')
+    fastfitfile = os.path.join(outdir, 'fastspec-m31_rvtab_good_220521-test.fits')
     
     qadir = os.path.join(outdir, 'qa')
     if not os.path.isdir(qadir):
@@ -230,7 +229,7 @@ def main():
         
         # Fit in parallel
         t0 = time.time()
-        fitargs = [(iobj, data[iobj], out[iobj], meta[iobj], CFit, EMFit, False) # solve-vdisp and verbose
+        fitargs = [(iobj, data[iobj], out[iobj], meta[iobj], CFit, EMFit, False, False) # verbose and broadlinefit
                    for iobj in np.arange(Spec.ntargets)]
         if args.mp > 1:
             import multiprocessing
@@ -249,100 +248,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-###########
-#
-#import pdb # for debugging
-#
-#import os, time, subprocess
-#import numpy as np
-#from glob import glob
-#from astropy.table import Table
-#
-#from desiutil.log import get_logger
-#log = get_logger()
-#
-#def main():
-#    """Main wrapper on fastphot and fastspec.
-#
-#    Currently only knows about SV1 observations.
-#
-#    """
-#    import argparse    
-#    from fastspecfit.mpi import plan
-#    
-#    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-#    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
-#    parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
-#    
-#    parser.add_argument('--fastphot', action='store_true', help='Fit the broadband photometry.')
-#
-#    parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
-#    parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
-#    
-#    parser.add_argument('--overwrite', action='store_true', help='Overwrite any existing output files.')
-#    parser.add_argument('--plan', action='store_true', help='Plan how many nodes to use and how to distribute the targets.')
-#    parser.add_argument('--nolog', action='store_true', help='Do not write to the log file.')
-#    parser.add_argument('--dry-run', action='store_true', help='Generate but do not run commands')
-#
-#    args = parser.parse_args()
-#
-#    from fastspecfit.continuum import ContinuumFit
-#    from fastspecfit.emlines import EMLineFit
-#    from fastspecfit.io import DESISpectra, write_fastspecfit, read_fastspecfit
-#    from fastspecfit.fastspecfit import _fastspec_one, fastspec_one, _desiqa_one, desiqa_one
-#    
-#    outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/m31'
-#    qadir = os.path.join(outdir, 'qa')
-#    redrockfile = os.path.join(outdir, 'redrock-m31.fits')
-#    fastfitfile = os.path.join(outdir, 'fastspec-m31.fits')
-#
-#    zmin = -1.0
-#    zwarnmax = 0
-#
-#    Spec = DESISpectra(specprod='everest')
-#    CFit = ContinuumFit()
-#    EMFit = EMLineFit()
-#
-#    Spec.find_specfiles(redrockfiles=redrockfile, coadd_type='custom',
-#                        zmin=zmin, zwarnmax=zwarnmax, ntargets=args.ntargets)
-#
-#    data = Spec.read_and_unpack(CFit, fastphot=False, synthphot=True, remember_coadd=True)    
-#
-#    if args.makeqa:
-#        fastfit, metadata, specprod, coadd_type = read_fastspecfit(fastfitfile, fastphot=False)
-#
-#        indx = np.arange(len(data))
-#        qaargs = [(CFit, EMFit, data[igal], fastfit[indx[igal]], metadata[indx[igal]],
-#                   coadd_type, False, qadir, None) for igal in np.arange(len(indx))]                
-#
-#        if args.mp > 1:
-#            import multiprocessing
-#            with multiprocessing.Pool(args.mp) as P:
-#                P.map(_desiqa_one, qaargs)
-#        else:
-#            [desiqa_one(*_qaargs) for _qaargs in qaargs]
-#    else:
-#        out, meta = Spec.init_output(CFit=CFit, EMFit=EMFit, fastphot=False)
-#        
-#        # Fit in parallel
-#        t0 = time.time()
-#        fitargs = [(iobj, data[iobj], out[iobj], meta[iobj], CFit, EMFit, False, False) # solve-vdisp and verbose
-#                   for iobj in np.arange(Spec.ntargets)]
-#        if args.mp > 1:
-#            import multiprocessing
-#            with multiprocessing.Pool(args.mp) as P:
-#                _out = P.map(_fastspec_one, fitargs)
-#        else:
-#            _out = [fastspec_one(*_fitargs) for _fitargs in fitargs]
-#        _out = list(zip(*_out))
-#        out = Table(np.hstack(_out[0]))
-#        meta = Table(np.hstack(_out[1]))
-#        log.info('Fitting everything took: {:.2f} sec'.format(time.time()-t0))
-#    
-#        # Write out.
-#        write_fastspecfit(out, meta, outfile=fastfitfile, specprod=Spec.specprod,
-#                          coadd_type=Spec.coadd_type, fastphot=False)
-#    
-#if __name__ == '__main__':
-#    main()
