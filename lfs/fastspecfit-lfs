@@ -2,13 +2,14 @@
 """
 Fit the [OII] electron density sample.
 
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 32
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 32 --makeqa
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lfs/fastspecfit-lfs --build-sample
 
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 32 --fastphot
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 32 --fastphot --makeqa
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lfs/fastspecfit-lfs --mp 32 --makeqa
 
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --makehtml
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lfs/fastspecfit-lfs --mp 32 --fastphot
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lfs/fastspecfit-lfs --mp 32 --fastphot --makeqa
+
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lfs/fastspecfit-lfs --makehtml
 
 """
 import pdb # for debugging
@@ -17,26 +18,20 @@ import os, time, subprocess
 import numpy as np
 import fitsio
 from glob import glob
-from astropy.table import Table, Table, vstack
+from astropy.table import Table, vstack, join
 
 from desiutil.log import get_logger
 log = get_logger()
 
-def main():
-    """Main wrapper on fastphot and fastspec.
+outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/lfs'
 
-    Currently only knows about SV1 observations.
+def parser():
 
-    """
     import argparse    
-    from fastspecfit.mpi import plan
-    from fastspecfit.continuum import ContinuumFit
-    from fastspecfit.emlines import EMLineFit
-    from fastspecfit.io import DESISpectra, write_fastspecfit, read_fastspecfit
-    from fastspecfit.fastspecfit import _fastspec_one, fastspec_one, _fastphot_one, fastphot_one, _desiqa_one, desiqa_one
-    
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
+    parser.add_argument('--build-sample', action='store_true', help='Build the parent sample.')
+
     parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
     parser.add_argument('--fastphot', action='store_true', help='Fit the broadband photometry.')
     parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
@@ -45,6 +40,93 @@ def main():
 
     args = parser.parse_args()
 
+    return args
+
+def build_sample(survey='sv3', target='ELGnotqso'):
+
+    from fastspecfit.io import read_fastspecfit, write_fastspecfit
+
+    program = {'ELGnotqso': 'dark', 'BGS_BRIGHT': 'bright'}
+
+    # https://data.desi.lbl.gov/desi/survey/catalogs/edav1/sv3/LSScats/
+    area = {'ELGnotqso_N': 81.9568, 'ELGnotqso_S': 82.5512,
+            'BGS_BRIGHT_N': 86.2884, 'BGS_BRIGHT_N': 87.204}
+
+    catdir = os.path.join(os.environ.get('DESI_ROOT'), 'survey', 'catalogs', 'edav1', survey, 'LSScats', 'clustering')
+
+    # read the fastphot and fastspec samples for the specified survey and program
+    fastdir = os.path.join(os.environ.get('DESI_ROOT'), 'spectro', 'fastspecfit', 'fuji', 'catalogs')
+    specfile = os.path.join(fastdir, 'fastspec-fuji-{}-{}.fits'.format(survey, program[target]))
+    photfile = os.path.join(fastdir, 'fastphot-fuji-{}-{}.fits'.format(survey, program[target]))
+
+    #fastspec, metaspec, _, _, models = read_fastspecfit(specfile, read_models=True)
+    fastspec, metaspec, _, _ = read_fastspecfit(specfile)
+    fastphot, metaphot, _, _ = read_fastspecfit(photfile)
+    assert(np.all(metaspec['TARGETID'] == metaphot['TARGETID']))
+
+    for region, hemi in zip(['S', 'N'], ['south', 'north']):
+        # read the clustering sample
+        catfile = os.path.join(catdir, '{}_{}_clustering.dat.fits'.format(target, region))
+        cat = Table(fitsio.read(catfile))
+        log.info('Read {} object(s) from {}'.format(len(cat), catfile))
+    
+        #meta = Table(fitsio.read(photfile, 'METADATA'))
+        #meta = meta[(meta['SURVEY'] == survey) * (meta['PROGRAM'] == program[target])]
+
+        # find members
+        I = np.isin(metaspec['TARGETID'], cat['TARGETID'])
+        _fastspec = fastspec[I]
+        _fastphot = fastphot[I]
+        _metaspec = metaspec[I]
+        _metaphot = metaphot[I]
+
+        # now sort
+        I = np.hstack([np.where(tid == _metaspec['TARGETID'])[0] for tid in cat['TARGETID']])
+        _fastspec = _fastspec[I]
+        _fastphot = _fastphot[I]
+        _metaspec = _metaspec[I]
+        _metaphot = _metaphot[I]
+        try:
+            assert(np.all(_metaspec['TARGETID'] == cat['TARGETID']))
+        except:
+            pdb.set_trace()
+
+        specprod = _metaphot['SPECPROD'][0]
+        _metaphot.remove_column('SPECPROD')
+
+        out = join(_fastspec, _fastphot, keys=['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX'])
+        cat.remove_columns(['RA', 'DEC', 'Z'])
+        [cat.rename_column(col, col.upper()) for col in cat.colnames]
+        out = join(out, cat, keys='TARGETID')
+
+        # write out
+        if not os.path.isdir(outdir):
+            os.makedirs(outdir, exist_ok=True)
+        outfile = os.path.join(outdir, 'parent-{}-{}.fits'.format(target.lower().replace('_', '-'), hemi))
+        log.info('Writing {} objects to {}'.format(len(out), outfile))
+        
+        write_fastspecfit(out, _metaphot, outfile=outfile, specprod=specprod,
+                          coadd_type='healpix')
+
+def main():
+    """Main wrapper on fastphot and fastspec.
+
+    Currently only knows about SV1 observations.
+
+    """
+    #from fastspecfit.mpi import plan
+    #from fastspecfit.continuum import ContinuumFit
+    #from fastspecfit.emlines import EMLineFit
+    #from fastspecfit.io import DESISpectra, write_fastspecfit, read_fastspecfit
+    #from fastspecfit.fastspecfit import _fastspec_one, fastspec_one, _fastphot_one, fastphot_one, _desiqa_one, desiqa_one
+
+    args = parser()
+
+    if args.build_sample:
+        build_sample(survey='sv3', target='BGS_BRIGHT')
+        build_sample(survey='sv3', target='ELGnotqso')
+        return
+    
     def fit_survey(sample, survey='main', outfile=None, fastphot=False):
         """Wrapper so we can fit fuji separately from guadalupe"""
 
@@ -131,7 +213,7 @@ def main():
                               fastphot=fastphot)
 
     # project parameters
-    outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/lowmass-agn/fujilupe'
+    outdir = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/lfs/fujilupe'
     qadir = os.path.join(outdir, 'qa')
     if not os.path.isdir(qadir):
         os.makedirs(qadir, exist_ok=True)
@@ -148,7 +230,7 @@ def main():
 
     if args.merge:
         from fastspecfit.mpi import merge_fastspecfit
-        merge_fastspecfit(mergedir=outdir, outsuffix='lowmass-agn', supermerge=True)
+        merge_fastspecfit(mergedir=outdir, outsuffix='lfs', supermerge=True)
         return
 
     if args.makehtml:
@@ -166,7 +248,7 @@ def main():
             html.write('</style>\n')
 
             html.write('<h1>Low-mass AGN Project</h1>\n')
-            html.write('<h3><a href="../fastspec-lowmass-agn.fits.gz">Download fastspec catalog</a> (<a href="https://fastspecfit.readthedocs.io/en/latest/fastspec.html">Data Model</a>)</h3>\n')
+            html.write('<h3><a href="../fastspec-lfs.fits.gz">Download fastspec catalog</a> (<a href="https://fastspecfit.readthedocs.io/en/latest/fastspec.html">Data Model</a>)</h3>\n')
 
             for survey in set(sample['SURVEY']):
                 I = survey == sample['SURVEY']
@@ -207,7 +289,7 @@ def main():
         I = survey == sample['SURVEY']
         for program in set(sample['PROGRAM'][I]):
             J = program == sample['PROGRAM'][I]
-            outfile = os.path.join(outdir, '{}-lowmass-agn-{}-{}.fits.gz'.format(prefix, survey, program))
+            outfile = os.path.join(outdir, '{}-lfs-{}-{}.fits.gz'.format(prefix, survey, program))
             fit_survey(sample[I][J], survey=survey, outfile=outfile, fastphot=args.fastphot)
 
 if __name__ == '__main__':
