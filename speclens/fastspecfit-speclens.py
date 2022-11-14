@@ -107,7 +107,7 @@ def main():
     args = parser.parse_args()
 
     # project parameters
-    outdir = 'global/cfs/cdirs/desi/users/nrfran/speclens/'
+    outdir = '/global/cfs/cdirs/desi/users/nrfran/speclens/'
     redrockfile = os.path.join(outdir, 'redrock-sv3-bright-25964-out.fits')
     fastfitfile = os.path.join(outdir, 'fastspec-sv3-bright-25964-out.fits')
     
