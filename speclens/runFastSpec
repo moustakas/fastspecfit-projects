@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# run fastspecfit for give spectroscopic lenses
+python3 fastspecfit-speclens.py --zcatfile z_catalog_sv3_bright_25964.fits --preprocess --overwrite

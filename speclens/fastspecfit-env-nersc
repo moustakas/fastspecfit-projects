@@ -1,0 +1,21 @@
+#!/bin/bash
+
+echo '----- Loading FastSpecFit -----'
+source /global/cfs/cdirs/desi/software/desi_environment.sh master
+
+#module load fastspecfit/main
+#export FASTSPECFIT_TEMPLATES=$DESI_ROOT/science/gqp/templates/SSP-CKC14z
+
+conda create -y --name fastspecfit python numpy scipy numba astropy matplotlib seaborn
+conda activate fastspecfit
+pip install fitsio healpy speclite
+
+for package in desiutil desimodel desitarget desispec fastspecfit; do
+  python -m pip install git+https://github.com/desihub/$package.git@main#egg=$package
+done
+
+FASTSPECFIT_TEMPLATES=/global/cfs/cdirs/desi/science/gqp/templates/SSP-CKC14z
+DUST_DIR=/global/cfs/cdirs/cosmo/data/dust/v0_1
+
+echo 'FASTSPECFIT_TEMPLATES='$FASTSPECFIT_TEMPLATES
+echo 'DUST_DIR='$DUST_DIR
