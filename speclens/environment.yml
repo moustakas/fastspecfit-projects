@@ -1,0 +1,24 @@
+name: fastspecfit
+channels:
+   - defaults
+dependencies:
+   # Core requirements
+   - python=3.8
+   - pip
+   # Other packages
+   - pandas
+   - numpy
+   - scipy
+   - numba
+   - astropy
+   - matplotlib
+   - seaborn
+   # pip install
+   - pip:
+     #- fitsio
+     #- healpy
+     #- speclite
+     - git+https://github.com/desihub/desimodel.git@main#egg=desimodel
+     - git+https://github.com/desihub/desitarget.git@main#egg=desitarget
+     - git+https://github.com/desihub/desispec.git@main#egg=desispec
+     - git+https://github.com/desihub/fastspecfit.git@main#egg=fastspecfit
