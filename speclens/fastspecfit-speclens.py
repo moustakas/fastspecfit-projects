@@ -9,7 +9,7 @@ import os, time, subprocess
 import numpy as np
 import fitsio
 from glob import glob
-from astropy.table import Table
+from astropy.table import Table, vstack
 
 from desiutil.log import get_logger
 log = get_logger()
@@ -170,10 +170,19 @@ def main():
         _out = list(zip(*_out))
         out = Table(np.hstack(_out[0]))
         meta = Table(np.hstack(_out[1]))
+        
+        try:
+            # need to vstack to preserve the wavelength metadata 
+            modelspec = vstack(_out[2], metadata_conflicts='error')
+        except:
+            errmsg = 'Metadata conflict when stacking model spectra.'
+            log.critical(errmsg)
+            raise ValueError(errmsg)
+        
         log.info('Fitting everything took: {:.2f} sec'.format(time.time()-t0))
 
         # Write out.
-        write_fastspecfit(out, meta, outfile=fastfitfile, specprod=Spec.specprod,
+        write_fastspecfit(out, meta, outfile=fastfitfile, modelspectra=modelspec, specprod=Spec.specprod,
                           coadd_type=Spec.coadd_type, fastphot=False)
 
 if __name__ == '__main__':
