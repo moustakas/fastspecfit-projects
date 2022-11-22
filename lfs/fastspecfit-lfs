@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Fit the [OII] electron density sample.
+Analyze the luminosity function BGS samples.
 
 /global/u2/i/ioannis/code/desihub/fastspecfit-projects/lfs/fastspecfit-lfs --build-sample
 
@@ -18,6 +18,8 @@ import os, time, subprocess
 import numpy as np
 import fitsio
 from glob import glob
+
+import astropy.units as u
 from astropy.table import Table, vstack, join
 
 from desiutil.log import get_logger
@@ -42,7 +44,7 @@ def parser():
 
     return args
 
-def build_sample(survey='sv3', target='ELGnotqso'):
+def build_sample(survey='sv3', target='ELGnotqso', CFit=None):
 
     from fastspecfit.io import read_fastspecfit, write_fastspecfit
 
@@ -50,7 +52,8 @@ def build_sample(survey='sv3', target='ELGnotqso'):
 
     # https://data.desi.lbl.gov/desi/survey/catalogs/edav1/sv3/LSScats/
     area = {'ELGnotqso_N': 81.9568, 'ELGnotqso_S': 82.5512,
-            'BGS_BRIGHT_N': 86.2884, 'BGS_BRIGHT_N': 87.204}
+            'BGS_BRIGHT_N': 86.2884, 'BGS_BRIGHT_N': 87.204,
+            'BGS_ANY_N': 86.4016, 'BGS_ANY_S': 87.3556}
 
     catdir = os.path.join(os.environ.get('DESI_ROOT'), 'survey', 'catalogs', 'edav1', survey, 'LSScats', 'clustering')
 
@@ -94,10 +97,37 @@ def build_sample(survey='sv3', target='ELGnotqso'):
         specprod = _metaphot['SPECPROD'][0]
         _metaphot.remove_column('SPECPROD')
 
-        out = join(_fastspec, _fastphot, keys=['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX'])
+        out = join(_fastspec, _fastphot, keys=['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX'],
+                   table_names=['SPEC', 'PHOT'])
         cat.remove_columns(['RA', 'DEC', 'Z'])
         [cat.rename_column(col, col.upper()) for col in cat.colnames]
         out = join(out, cat, keys='TARGETID')
+
+        # compute Vmax
+        zgrid = np.linspace(1e-3, 1, 100)
+        dfactor = (10.0 / CFit.cosmo.luminosity_distance(zgrid).to(u.pc).value)**2
+        zfactor = (CFit.fluxnorm * CFit.massnorm * dfactor / (1.0 + zgrid))#[np.newaxis, np.newaxis]
+        #    zsspflux = sspflux * factor
+        
+        def one_vmax(sspwave, sspflux, coeff, AV, zfactor):
+            atten = CFit.dust_attenuation(sspwave, AV)
+            sspflux *= atten[:, np.newaxis]
+            dsspflux = sspflux.dot(coeff)
+            
+            pdb.set_trace()
+
+        out1 = out[0]
+        one_vmax(CFit.sspwave, CFit.sspflux, out1['CONTINUUM_COEFF_PHOT'] * CFit.massnorm,
+                 out1['CONTINUUM_AV_PHOT'], zfactor)
+        
+        pdb.set_trace()
+        
+        continuum_phot, synthmodelphot = CFit.SSP2data(
+            CFit.sspflux, CFit.sspwave, redshift=out1['CONTINUUM_Z'],
+            synthphot=True, AV=out1['CONTINUUM_AV_PHOT'], 
+            coeff=out1['CONTINUUM_COEFF_PHOT'] * CFit.massnorm)
+
+        pdb.set_trace()
 
         # write out
         if not os.path.isdir(outdir):
@@ -114,17 +144,19 @@ def main():
     Currently only knows about SV1 observations.
 
     """
+    from fastspecfit.continuum import ContinuumFit
     #from fastspecfit.mpi import plan
-    #from fastspecfit.continuum import ContinuumFit
     #from fastspecfit.emlines import EMLineFit
     #from fastspecfit.io import DESISpectra, write_fastspecfit, read_fastspecfit
     #from fastspecfit.fastspecfit import _fastspec_one, fastspec_one, _fastphot_one, fastphot_one, _desiqa_one, desiqa_one
 
     args = parser()
 
+    CFit = ContinuumFit(cache_SSPgrid=False)
+
     if args.build_sample:
-        build_sample(survey='sv3', target='BGS_BRIGHT')
-        build_sample(survey='sv3', target='ELGnotqso')
+        build_sample(survey='sv3', target='BGS_BRIGHT', CFit=CFit)
+        #build_sample(survey='sv3', target='BGS_ANY')
         return
     
     def fit_survey(sample, survey='main', outfile=None, fastphot=False):
