@@ -2,6 +2,7 @@
 
 # setup environment
 source /global/common/software/desi/desi_environment.sh master
+# export PYTHONPATH=/global/homes/n/nrfran/.conda/envs/fastspecfit/lib/python3.8
 conda activate fastspecfit
 
 # set necessary environment variables
@@ -9,4 +10,4 @@ FASTSPECFIT_TEMPLATES=/global/cfs/cdirs/desi/science/gqp/templates/SSP-CKC14z
 DUST_DIR=/global/cfs/cdirs/cosmo/data/dust/v0_1
 
 # run fastspecfit for give spectroscopic lenses
-python3 fastspecfit-speclens.py --zcatfile z_catalog_sv3_bright_25964.fits --preprocess --overwrite
+python3 fastspecfit-speclens.py --zcatfile z_catalog_sv3_bright_25964.fits --preprocess --overwrite --makeqa

@@ -95,13 +95,10 @@ def main():
     
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
-    #parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
-    #parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
     parser.add_argument('--zcatfile', type=str, default=None, help='Path to z-catalog file with observations to process. Should have columns for survey, program, healpix, and targetid')
     
     parser.add_argument('--preprocess', action='store_true', help='Preprocess the files.')
     parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
-    #parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite any existing output files.')
 
     args = parser.parse_args()
@@ -134,6 +131,7 @@ def main():
     EMFit = EMLineFit()
 
     if args.makeqa:
+        print('Making QA Plots...')
         fastfit, metadata, coadd_type, _ = read_fastspecfit(fastfitfile)
         targetids = metadata['TARGETID'].data
 
@@ -156,7 +154,7 @@ def main():
         data = Spec.read_and_unpack(CFit, fastphot=False, synthphot=True, remember_coadd=True)
 
         out, meta = Spec.init_output(CFit=CFit, EMFit=EMFit, fastphot=False)
-        
+
         # Fit in parallel
         t0 = time.time()
         fitargs = [(iobj, data[iobj], out[iobj], meta[iobj], CFit, EMFit, False, False) # verbose and broadlinefit
@@ -170,7 +168,7 @@ def main():
         _out = list(zip(*_out))
         out = Table(np.hstack(_out[0]))
         meta = Table(np.hstack(_out[1]))
-        
+
         try:
             # need to vstack to preserve the wavelength metadata 
             modelspec = vstack(_out[2], metadata_conflicts='error')
@@ -178,7 +176,7 @@ def main():
             errmsg = 'Metadata conflict when stacking model spectra.'
             log.critical(errmsg)
             raise ValueError(errmsg)
-        
+
         log.info('Fitting everything took: {:.2f} sec'.format(time.time()-t0))
 
         # Write out.
