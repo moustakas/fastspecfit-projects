@@ -29,6 +29,7 @@ def main():
     
     # get master lens coordinates as sky coords to compare with desi observations
     masterlens = pd.read_csv('masterlens.tsv', sep='\t', skiprows=1)
+    masterlensNames = masterlens.iloc[:,0].to_numpy() # get list of source names from master lens database
 
     raDeg = np.array(masterlens[' "ra_coord"']).astype(float)
     decDeg = np.array(masterlens[' "dec_coord"']).astype(float)
@@ -68,6 +69,7 @@ def main():
 
             match = checkSep(coordSet, lensCoord, table)
             if match is not None:
+                match['OBJNAME'] = [masterlensNames[ii]]*len(match)
                 matches.append(match)
 
                 count += len(match)
