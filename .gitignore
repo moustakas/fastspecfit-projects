@@ -91,3 +91,9 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+# ignore large files
+*.fits
+*.ecsv
+*.tsv
+*.png
