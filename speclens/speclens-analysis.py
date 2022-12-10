@@ -271,6 +271,13 @@ def main():
     orig = os.path.join(outdir, 'coadd-sv3-bright-25964-out.fits')
     coaddSpec = readCoadd(orig, meta)
     
+    # plot the original spectrum
+    ogSpecPath = 'original-spectrum.png'
+    plotDesiSpectra(coaddSpec, ogSpecPath)
+    
+    # plot the fastspec model
+    plotFastspecModel(frontWave, frontFlux, coaddSpec)
+    
     # subtract the spectra
     sourceSpec, sourceSpecPath = subtract_spectra(coaddSpec, frontFlux, frontWave)
     
@@ -281,13 +288,6 @@ def main():
     
     
     # Do all the plotting if requested
-    
-    # plot the original spectrum
-    ogSpecPath = 'original-spectrum.png'
-    plotDesiSpectra(coaddSpec, ogSpecPath)
-    
-    # plot the fastspec model
-    plotFastspecModel(frontWave, frontFlux, coaddSpec)
     
     # plot the residual with the accepted redshift for emission lines
     # get accepted redshift for our target
