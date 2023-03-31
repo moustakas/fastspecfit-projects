@@ -2,11 +2,11 @@
 """
 Fit the low-mass AGN sample.
 
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 32
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 32 --makeqa
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 128
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 128 --makeqa
 
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 32 --fastphot
-/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 32 --fastphot --makeqa
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 128 --fastphot
+/global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --mp 128 --fastphot --makeqa
 
 /global/u2/i/ioannis/code/desihub/fastspecfit-projects/lowmass-agn/fastspecfit-lowmass-agn --makehtml
 
@@ -23,17 +23,15 @@ from desiutil.log import get_logger
 log = get_logger()
 
 def main():
-    """Main wrapper on fastphot and fastspec.
-
-    Currently only knows about SV1 observations.
+    """Main wrapper
 
     """
     import argparse    
     from fastspecfit.mpi import plan
-    from fastspecfit.continuum import ContinuumFit
-    from fastspecfit.emlines import EMLineFit
-    from fastspecfit.io import DESISpectra, _unpack_one_spectrum, write_fastspecfit, read_fastspecfit
-    from fastspecfit.fastspecfit import _fastspec_one, fastspec_one, _fastphot_one, fastphot_one, _desiqa_one, desiqa_one
+    #from fastspecfit.continuum import ContinuumFit
+    #from fastspecfit.emlines import EMLineFit
+    #from fastspecfit.io import DESISpectra, _unpack_one_spectrum, write_fastspecfit, read_fastspecfit
+    #from fastspecfit.fastspecfit import _fastspec_one, fastspec_one, _fastphot_one, fastphot_one, _desiqa_one, desiqa_one
     
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
@@ -137,14 +135,20 @@ def main():
     if not os.path.isdir(qadir):
         os.makedirs(qadir, exist_ok=True)
 
-    samplefile = os.path.join(outdir, 'fastspecfit_blagn_test.fits')
-    if args.ntargets:
-        rows = np.arange(args.ntargets)
+    if False:
+        samplefile = os.path.join(outdir, 'fastspecfit_blagn_test.fits')
+        if args.ntargets:
+            rows = np.arange(args.ntargets)
+        else:
+            rows = None
+        sample = Table(fitsio.read(samplefile, rows=rows))
+        #sample = sample[(sample['SURVEY'] == 'sv1') * (sample['PROGRAM'] == 'bright')]
     else:
-        rows = None
-    sample = Table(fitsio.read(samplefile, rows=rows))
-
-    #sample = sample[(sample['SURVEY'] == 'sv1') * (sample['PROGRAM'] == 'bright')]
+        sample = Table()
+        sample['SURVEY'] = ['main']
+        sample['PROGRAM'] = ['bright']
+        sample['HEALPIX'] = [26439]
+        sample['TARGETID'] = [39627969039176242]
 
     # select a subset of targets
     if args.targetids:
@@ -198,6 +202,8 @@ def main():
 
         return
 
+    pdb.set_trace()
+    
     Spec = DESISpectra()
     CFit = ContinuumFit()
     EMFit = EMLineFit()
