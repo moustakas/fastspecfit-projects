@@ -60,7 +60,7 @@ def main():
 
         mergefile = os.path.join(args.outdir, f'{prefix}tertiary23.fits')
         if not os.path.isfile(mergefile) and not args.overwrite:
-            fastfiles = glob(os.path.join(outdir, f'{prefix}?????.fits'))
+            fastfiles = glob(os.path.join(outdir, f'{prefix}?????.fits*'))
             _domerge(fastfiles, extname=fcmd.upper(), mergefile=mergefile,
                      fastphot=args.fastphot, mp=args.mp)
         else:
@@ -87,9 +87,11 @@ def main():
                 if args.nolog:
                     err = subprocess.call(cmd.split())
                 else:
-                    logfile = fastfile.replace('.fits', '.log')
+                    logfile = fastfile.replace('.fits', '.log').replace('.gz', '')
                     with open(logfile, 'w') as mylog:
                         err = subprocess.call(cmd.split(), stdout=mylog, stderr=mylog)
+            else:
+                print(f'Output file {fastfile} exists and --overwrite not set.')
 
 if __name__ == '__main__':
     main()
