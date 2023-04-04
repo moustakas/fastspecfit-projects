@@ -1,0 +1,78 @@
+#!/usr/bin/env python
+"""
+MPI wrapper to fit specific targets as part of the 2023 stellar mass challenge.
+
+$HOME/code/desihub/fastspecfit-projects/mstarchallenge/fastspecfit-mstarchallenge
+
+"""
+import pdb # for debugging
+
+import os, time, subprocess
+from glob import glob
+import numpy as np
+import fitsio
+from astropy.table import Table, Table, vstack
+
+from desiutil.log import get_logger
+log = get_logger()
+
+def main():
+    """Main wrapper
+
+    """
+    import argparse    
+
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--nodes', type=int, default=4, help='Number of ranks or nodes.')
+    parser.add_argument('--mp', type=int, default=128, help='Number of multiprocessing processes per MPI rank or node.')
+    parser.add_argument('--fastphot', action='store_true', help='Fit just the broadband photometry.')
+
+    #parser.add_argument('--overwrite', action='store_true', help='Overwrite existing files.')
+    #parser.add_argument('--nolog', action='store_true', help='Do not write a log (useful for debugging).')
+    #parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
+    #parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
+    #parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
+
+    args = parser.parse_args()
+
+    outdir_root = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/mstarchallenge'
+
+    for targ in ['bgs', 'lrg', 'elg', 'qso']:
+
+        outdir_data = os.path.join(outdir_root, targ)
+
+        catfile = '/global/cfs/cdirs/desicollab/science/gqp/stellar_mass_comparison/{}-test.fits'.format(targ)
+        cat = Table(fitsio.read(catfile, columns=['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX', 'Z'], rows=np.arange(10)))
+        print('Read {} targets from {}'.format(len(cat), catfile))
+
+        healpix = ','.join(cat['HEALPIX'].astype(str))
+        targetids = ','.join(cat['TARGETID'].astype(str))
+
+        cmd = f'/global/u2/i/ioannis/code/desihub/fastspecfit/bin/mpi-fastspecfit --healpix {healpix}'
+        cmd += f' --targetids {targetids} --mp {args.mp} --outdir-data {outdir_data}'
+        cmd += f' --ignore-quasarnet --specprod guadalupe'
+        if args.fastphot:
+            cmd += ' --fastphot'
+
+        logfile = os.path.join(outdir_root, f'{targ}.log.%j')
+        slurmfile = os.path.join(outdir_root, f'{targ}.slurm')
+
+        print(f'sbatch {slurmfile}')
+        with open(slurmfile, 'w') as S:
+            S.write('#! /bin/bash\n')
+            S.write('#SBATCH -A desi\n')
+            S.write('#SBATCH -C cpu\n')
+            S.write(f'#SBATCH -o {logfile}\n')
+            S.write('#SBATCH --mail-user=jmoustakas@siena.edu\n')
+            S.write('#SBATCH --mail-type=ALL\n')
+            S.write('#SBATCH -q regular\n')
+            S.write('#SBATCH -t 00:10:00\n')
+            #S.write('#SBATCH -t 01:00:00\n')
+            S.write(f'#SBATCH -N {args.nodes}\n')
+            S.write(f'#SBATCH -n {args.nodes}\n')
+            S.write(f'# sbatch {slurmfile}\n')
+            S.write(f'time srun -n {args.nodes} -c {args.mp} {cmd}\n')
+        print()
+
+if __name__ == '__main__':
+    main()
