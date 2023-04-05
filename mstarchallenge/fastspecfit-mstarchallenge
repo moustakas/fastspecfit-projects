@@ -2,18 +2,32 @@
 """
 MPI wrapper to fit specific targets as part of the 2023 stellar mass challenge.
 
-$HOME/code/desihub/fastspecfit-projects/mstarchallenge/fastspecfit-mstarchallenge --slurm
-$HOME/code/desihub/fastspecfit-projects/mstarchallenge/fastspecfit-mstarchallenge --merge
+$HOME/code/desihub/fastspecfit-projects/mstarchallenge/fastspecfit-mstarchallenge --slurm --mp 128
+$HOME/code/desihub/fastspecfit-projects/mstarchallenge/fastspecfit-mstarchallenge --merge --mp 128
+
+$HOME/code/desihub/fastspecfit-projects/mstarchallenge/fastspecfit-mstarchallenge --slurm --mp 128 --fastphot
+$HOME/code/desihub/fastspecfit-projects/mstarchallenge/fastspecfit-mstarchallenge --merge --mp 128 --fastphot
 
 """
 import pdb # for debugging
 
 import os, subprocess, argparse
+import multiprocessing
 import numpy as np
 from glob import glob
 import fitsio
 from astropy.table import Table
 from fastspecfit.mpi import _domerge
+
+def _fastfit_one(args):
+    return fastfit_one(*args)
+
+def fastfit_one(script, redrockfile, outfile, targetids):
+    import subprocess
+    cmd = f'{script} {redrockfile} -o {outfile} --mp 1 --targetids {targetids} --ignore-quasarnet'
+    err = subprocess.call(cmd.split())
+    if err != 0:
+        print('Warning: Problem with {}'.format(outfile))
 
 def main():
     """Main wrapper
@@ -21,8 +35,9 @@ def main():
     """
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--nodes', type=int, default=1, help='Number of ranks or nodes.')
-    parser.add_argument('--mp', type=int, default=128, help='Number of multiprocessing processes per MPI rank or node.')
+    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
     parser.add_argument('--fastphot', action='store_true', help='Fit just the broadband photometry.')
+    parser.add_argument('--targfit', type=str, choices=['bgs', 'lrg', 'elg', 'qso'], help='Target class to model.')
     parser.add_argument('--slurm', action='store_true', help='Build the slurm files.')
     parser.add_argument('--merge', action='store_true', help='Merge all the catalogs together.')
     args = parser.parse_args()
@@ -32,6 +47,7 @@ def main():
     survey = 'main,special'
     
     outdir_root = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/mstarchallenge'
+    codedir = '/global/u2/i/ioannis/code/desihub'
 
     # Merge everything together!
     if args.merge:
@@ -63,27 +79,64 @@ def main():
                          specprod=specprod, coadd_type=coadd_type, fastphot=args.fastphot, mp=args.mp)
 
     # Fit stuff!
+    if args.targfit:
+        outdir_data = os.path.join(outdir_root, args.targfit)
+
+        catfile = '/global/cfs/cdirs/desicollab/science/gqp/stellar_mass_comparison/{}-test.fits'.format(args.targfit)
+        cat = Table(fitsio.read(catfile, columns=['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX', 'Z']))#, rows=np.arange(10)))
+        print('Read {} targets from {}'.format(len(cat), catfile))
+
+        if args.fastphot:
+            prefix = 'fastphot'
+            fits = '.fits'
+            script = f'{codedir}/fastspecfit/bin/fastphot'
+        else:
+            prefix = 'fastspec'
+            fits = '.fits.gz'
+            script = f'{codedir}/fastspecfit/bin/fastspec'
+
+        mpargs = []
+        for survey in set(cat['SURVEY']):
+            I = np.where(survey == cat['SURVEY'])[0]
+            for program in set(cat['PROGRAM'][I]):
+                J = np.where(program == cat['PROGRAM'][I])[0]
+                for healpix in set(cat['HEALPIX'][I][J]):
+                    K = np.where(healpix == cat['HEALPIX'][I][J])[0]
+
+                    targetids = ','.join(cat['TARGETID'][I][J][K].astype(str))
+
+                    redrockfile = os.path.join(os.environ.get('DESI_ROOT'), 'spectro', 'redux', specprod, 'healpix', survey, program,
+                                               str(healpix//100), str(healpix), f'redrock-{survey}-{program}-{healpix}.fits')
+                    outfile = os.path.join(outdir_data, specprod, 'healpix', survey, program, str(healpix//100),
+                                           str(healpix), f'{prefix}-{survey}-{program}-{healpix}.{fits}')
+                    if not os.path.isfile(outfile):
+                        mpargs.append([script, redrockfile, outfile, targetids])
+
+        if len(mpargs) > 0:
+            print('Still missing {} output catalogs.'.format(len(mpargs)))
+            if args.mp > 1:
+                with multiprocessing.Pool(args.mp) as P:
+                    P.map(_fastfit_one, mpargs)
+            else:
+                [fastfit_one(*mparg) for mparg in mpargs]
+
+        print('All done!')
+        
+    # Build the slurm files.
     if args.slurm:
-        codedir = '/global/u2/i/ioannis/code/desihub'
         logsdir = os.path.join(outdir_root, 'logs')
         if not os.path.isdir(logsdir):
             os.makedirs(logsdir, exist_ok=True)
     
         for targ in ['bgs', 'lrg', 'elg', 'qso']:
-            outdir_data = os.path.join(outdir_root, targ)
-    
-            catfile = '/global/cfs/cdirs/desicollab/science/gqp/stellar_mass_comparison/{}-test.fits'.format(targ)
-            cat = Table(fitsio.read(catfile, columns=['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX', 'Z']))#, rows=np.arange(10)))
-            print('Read {} targets from {}'.format(len(cat), catfile))
-    
             if args.fastphot:
                 slurmfile = os.path.join(logsdir, f'{targ}.fastphot.slurm')
                 logfile = os.path.join(logsdir, f'{targ}.fastphot.log.%j')
-                time = '00:45:00'
+                time = '01:00:00'
             else:
                 slurmfile = os.path.join(logsdir, f'{targ}.slurm')
                 logfile = os.path.join(logsdir, f'{targ}.log.%j')
-                time = '01:30:00'
+                time = '01:00:00'
     
             print(f'sbatch {slurmfile}')
             with open(slurmfile, 'w') as S:
@@ -95,40 +148,18 @@ def main():
                 S.write('#SBATCH --mail-type=ALL\n')
                 S.write('#SBATCH --qos regular\n')
                 S.write(f'#SBATCH --time={time}\n')
-                #S.write('#SBATCH --time=00:10:00\n')
                 S.write(f'#SBATCH -N {args.nodes}\n')
                 S.write(f'#SBATCH -n {args.nodes}\n')
                 S.write(f'# sbatch {slurmfile}\n')
-    
                 S.write('source /global/cfs/cdirs/desi/software/desi_environment.sh 23.1\n')
                 S.write('module swap desispec/0.57.0\n')
-                #S.write('module load fastspecfit/2.1.1\n')
+                #S.write('module load fastspecfit/2.1.2\n')
                 S.write(f'export PATH={codedir}/fastspecfit/bin:$PATH\n')
                 S.write(f'export PYTHONPATH={codedir}/fastspecfit/py:$PYTHONPATH\n')
-    
-                for survey in set(cat['SURVEY']):
-                    I = np.where(survey == cat['SURVEY'])[0]
-                    for program in set(cat['PROGRAM'][I]):
-                        J = np.where(program == cat['PROGRAM'][I])[0]
-                        for healpix in set(cat['HEALPIX'][I][J]):
-                            K = np.where(healpix == cat['HEALPIX'][I][J])[0]
-        
-                            targetids = ','.join(cat['TARGETID'][I][J][K].astype(str))
-    
-                            # build the command
-                            cmd = f'{codedir}/fastspecfit/bin/mpi-fastspecfit'
-                            cmd += f' --mp {args.mp} --outdir-data {outdir_data}'
-                            cmd += f' --ignore-quasarnet --specprod {specprod}'
-                            if args.fastphot:
-                                cmd += ' --fastphot'
-    
-                            cmd += f' --survey {survey} --program {program} --healpix {healpix}'
-                            cmd += f' --targetids {targetids}'
-                            
-                            S.write(f'time srun -n {args.nodes} -c {args.mp} {cmd}\n')
-                            #S.write(f'time srun -n {args.nodes} -c {args.mp} {cmd}\n')
-    
-            print()
+                cmd = f'{codedir}/fastspecfit-projects/mstarchallenge/fastspecfit-mstarchallenge --targfit {targ} --mp {args.mp}'
+                if args.fastphot:
+                    cmd += ' --fastphot'
+                S.write(f'time srun -n {args.nodes} -c {args.mp} {cmd}\n')
 
 if __name__ == '__main__':
     main()
