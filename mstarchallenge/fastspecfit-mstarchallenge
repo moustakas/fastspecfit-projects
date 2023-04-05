@@ -2,77 +2,133 @@
 """
 MPI wrapper to fit specific targets as part of the 2023 stellar mass challenge.
 
-$HOME/code/desihub/fastspecfit-projects/mstarchallenge/fastspecfit-mstarchallenge
+$HOME/code/desihub/fastspecfit-projects/mstarchallenge/fastspecfit-mstarchallenge --slurm
+$HOME/code/desihub/fastspecfit-projects/mstarchallenge/fastspecfit-mstarchallenge --merge
 
 """
 import pdb # for debugging
 
-import os, time, subprocess
-from glob import glob
+import os, subprocess, argparse
 import numpy as np
+from glob import glob
 import fitsio
-from astropy.table import Table, Table, vstack
-
-from desiutil.log import get_logger
-log = get_logger()
+from astropy.table import Table
+from fastspecfit.mpi import _domerge
 
 def main():
     """Main wrapper
 
     """
-    import argparse    
-
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--nodes', type=int, default=4, help='Number of ranks or nodes.')
+    parser.add_argument('--nodes', type=int, default=1, help='Number of ranks or nodes.')
     parser.add_argument('--mp', type=int, default=128, help='Number of multiprocessing processes per MPI rank or node.')
     parser.add_argument('--fastphot', action='store_true', help='Fit just the broadband photometry.')
-
-    #parser.add_argument('--overwrite', action='store_true', help='Overwrite existing files.')
-    #parser.add_argument('--nolog', action='store_true', help='Do not write a log (useful for debugging).')
-    #parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
-    #parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
-    #parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
-
+    parser.add_argument('--slurm', action='store_true', help='Build the slurm files.')
+    parser.add_argument('--merge', action='store_true', help='Merge all the catalogs together.')
     args = parser.parse_args()
 
+    specprod = 'guadalupe'
+    coadd_type = 'healpix'
+    survey = 'main,special'
+    
     outdir_root = '/global/cfs/cdirs/desi/users/ioannis/fastspecfit/mstarchallenge'
 
-    for targ in ['bgs', 'lrg', 'elg', 'qso']:
+    # Merge everything together!
+    if args.merge:
+        for targ in ['bgs', 'lrg', 'elg', 'qso']:
+            outdir_data = os.path.join(outdir_root, targ)
 
-        outdir_data = os.path.join(outdir_root, targ)
+            # merge individual catalogs
+            cmd = f'mpi-fastspecfit --merge --mp {args.mp} --outdir-data {outdir_data}'
+            cmd += f' --survey {survey} --specprod {specprod} --merge-suffix {targ} --overwrite'
+            if args.fastphot:
+                cmd += ' --fastphot'
+            
+            print(cmd)
+            err = subprocess.call(cmd.split())
 
-        catfile = '/global/cfs/cdirs/desicollab/science/gqp/stellar_mass_comparison/{}-test.fits'.format(targ)
-        cat = Table(fitsio.read(catfile, columns=['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX', 'Z'], rows=np.arange(10)))
-        print('Read {} targets from {}'.format(len(cat), catfile))
+            # merge everything
+            if args.fastphot:
+                outprefix = 'fastphot'
+                extname = 'FASTPHOT'
+            else:
+                outprefix = 'fastspec'
+                extname = 'FASTSPEC'
+            
+            catfiles = glob(os.path.join(outdir_data, specprod, 'catalogs', f'{outprefix}-*.fits'))
+            if len(catfiles) > 0:
+                print('Merging {:,d} {} catalogs'.format(len(catfiles), targ))
+                mergefile = os.path.join(outdir_root, f'{outprefix}-{targ}.fits')
+                _domerge(catfiles, extname=extname, mergefile=mergefile, outprefix=outprefix,
+                         specprod=specprod, coadd_type=coadd_type, fastphot=args.fastphot, mp=args.mp)
 
-        healpix = ','.join(cat['HEALPIX'].astype(str))
-        targetids = ','.join(cat['TARGETID'].astype(str))
-
-        cmd = f'/global/u2/i/ioannis/code/desihub/fastspecfit/bin/mpi-fastspecfit --healpix {healpix}'
-        cmd += f' --targetids {targetids} --mp {args.mp} --outdir-data {outdir_data}'
-        cmd += f' --ignore-quasarnet --specprod guadalupe'
-        if args.fastphot:
-            cmd += ' --fastphot'
-
-        logfile = os.path.join(outdir_root, f'{targ}.log.%j')
-        slurmfile = os.path.join(outdir_root, f'{targ}.slurm')
-
-        print(f'sbatch {slurmfile}')
-        with open(slurmfile, 'w') as S:
-            S.write('#! /bin/bash\n')
-            S.write('#SBATCH -A desi\n')
-            S.write('#SBATCH -C cpu\n')
-            S.write(f'#SBATCH -o {logfile}\n')
-            S.write('#SBATCH --mail-user=jmoustakas@siena.edu\n')
-            S.write('#SBATCH --mail-type=ALL\n')
-            S.write('#SBATCH -q regular\n')
-            S.write('#SBATCH -t 00:10:00\n')
-            #S.write('#SBATCH -t 01:00:00\n')
-            S.write(f'#SBATCH -N {args.nodes}\n')
-            S.write(f'#SBATCH -n {args.nodes}\n')
-            S.write(f'# sbatch {slurmfile}\n')
-            S.write(f'time srun -n {args.nodes} -c {args.mp} {cmd}\n')
-        print()
+    # Fit stuff!
+    if args.slurm:
+        codedir = '/global/u2/i/ioannis/code/desihub'
+        logsdir = os.path.join(outdir_root, 'logs')
+        if not os.path.isdir(logsdir):
+            os.makedirs(logsdir, exist_ok=True)
+    
+        for targ in ['bgs', 'lrg', 'elg', 'qso']:
+            outdir_data = os.path.join(outdir_root, targ)
+    
+            catfile = '/global/cfs/cdirs/desicollab/science/gqp/stellar_mass_comparison/{}-test.fits'.format(targ)
+            cat = Table(fitsio.read(catfile, columns=['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX', 'Z']))#, rows=np.arange(10)))
+            print('Read {} targets from {}'.format(len(cat), catfile))
+    
+            if args.fastphot:
+                slurmfile = os.path.join(logsdir, f'{targ}.fastphot.slurm')
+                logfile = os.path.join(logsdir, f'{targ}.fastphot.log.%j')
+                time = '00:45:00'
+            else:
+                slurmfile = os.path.join(logsdir, f'{targ}.slurm')
+                logfile = os.path.join(logsdir, f'{targ}.log.%j')
+                time = '01:30:00'
+    
+            print(f'sbatch {slurmfile}')
+            with open(slurmfile, 'w') as S:
+                S.write('#! /bin/bash\n')
+                S.write('#SBATCH -A desi\n')
+                S.write('#SBATCH -C cpu\n')
+                S.write(f'#SBATCH --output {logfile}\n')
+                S.write('#SBATCH --mail-user=jmoustakas@siena.edu\n')
+                S.write('#SBATCH --mail-type=ALL\n')
+                S.write('#SBATCH --qos regular\n')
+                S.write(f'#SBATCH --time={time}\n')
+                #S.write('#SBATCH --time=00:10:00\n')
+                S.write(f'#SBATCH -N {args.nodes}\n')
+                S.write(f'#SBATCH -n {args.nodes}\n')
+                S.write(f'# sbatch {slurmfile}\n')
+    
+                S.write('source /global/cfs/cdirs/desi/software/desi_environment.sh 23.1\n')
+                S.write('module swap desispec/0.57.0\n')
+                #S.write('module load fastspecfit/2.1.1\n')
+                S.write(f'export PATH={codedir}/fastspecfit/bin:$PATH\n')
+                S.write(f'export PYTHONPATH={codedir}/fastspecfit/py:$PYTHONPATH\n')
+    
+                for survey in set(cat['SURVEY']):
+                    I = np.where(survey == cat['SURVEY'])[0]
+                    for program in set(cat['PROGRAM'][I]):
+                        J = np.where(program == cat['PROGRAM'][I])[0]
+                        for healpix in set(cat['HEALPIX'][I][J]):
+                            K = np.where(healpix == cat['HEALPIX'][I][J])[0]
+        
+                            targetids = ','.join(cat['TARGETID'][I][J][K].astype(str))
+    
+                            # build the command
+                            cmd = f'{codedir}/fastspecfit/bin/mpi-fastspecfit'
+                            cmd += f' --mp {args.mp} --outdir-data {outdir_data}'
+                            cmd += f' --ignore-quasarnet --specprod {specprod}'
+                            if args.fastphot:
+                                cmd += ' --fastphot'
+    
+                            cmd += f' --survey {survey} --program {program} --healpix {healpix}'
+                            cmd += f' --targetids {targetids}'
+                            
+                            S.write(f'time srun -n {args.nodes} -c {args.mp} {cmd}\n')
+                            #S.write(f'time srun -n {args.nodes} -c {args.mp} {cmd}\n')
+    
+            print()
 
 if __name__ == '__main__':
     main()
