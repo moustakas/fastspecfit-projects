@@ -10,7 +10,10 @@ time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 18 --merge
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 18 --fastphot
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 18 --fastphot --merge
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --tertiary 18 --vi-redshifts
+
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --tertiary 18 --vi-redshifts --mp 24
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --tertiary 18 --vi-redshifts --merge --mp 24
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --tertiary 18 --vi-redshifts --makeqa --mp 24
 
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 23
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 23 --merge
@@ -61,16 +64,70 @@ def main():
     if args.fastphot:
         fcmd = 'fastphot'
         prefix = 'fastphot-'
+        fits = 'fits'
         outdir = os.path.join(args.outdir, tertiary, 'fastphot')
     else:
         fcmd = 'fastspec'
         prefix = 'fastspec-'
+        fits = 'fits.gz'
         outdir = os.path.join(args.outdir, tertiary, 'fastspec')
 
     if not os.path.isdir(outdir):
         os.makedirs(outdir, exist_ok=True)
 
-    if args.merge:
+    if args.vi_redshifts:
+        # Fit at the VI redshifts (only for Tertiary 18).
+        if args.tertiary == '18':
+            if args.merge:
+                from fastspecfit.mpi import _domerge
+        
+                mergefile = os.path.join(args.outdir, tertiary, f'{prefix}vi-{tertiary}.fits')
+                if not os.path.isfile(mergefile) and not args.overwrite:
+                    fastfiles = glob(os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-?????.fits*'))
+                    _domerge(fastfiles, extname=fcmd.upper(), mergefile=mergefile,
+                             fastphot=args.fastphot, mp=args.mp)
+                else:
+                    print(f'Output file {mergefile} exists; use --overwrite to, well, overwrite.')
+            elif args.makeqa:
+                outdir = os.path.join(args.outdir, tertiary, f'{prefix}vi')
+                fastfiles = glob(os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-?????.fits*'))
+                for fastfile in fastfiles:
+                    healpix = os.path.basename(fastfile).split('-')[2].split('.')[0]
+                    redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
+                    cmd = f'fastspecfit-qa {fastfile} -o {outdir} --redrockfiles {redrockfile} --mp {args.mp}'
+                    if args.overwrite:
+                        cmd += ' --overwrite'
+                    print(cmd)
+                    err = subprocess.call(cmd.split())
+                    pdb.set_trace()
+            elif args.makehtml:
+                raise NotImplementedError
+            else:
+                # Fit!
+                vifile = os.path.join(args.outdir, tertiary, 'LAE_targets.csv')
+                vi = Table.read(vifile)
+                print('Read {} objects from {}'.format(len(vi), vifile))
+    
+                mm = Table(fitsio.read(os.path.join(args.outdir, tertiary, 'fastphot-tertiary18.fits'), 'METADATA'))
+                I = np.hstack([np.where(mm['TARGETID'] == tid)[0] for tid in vi['TARGETID']])
+                mm = mm[I]
+                I = np.hstack([np.where(vi['TARGETID'] == tid)[0] for tid in mm['TARGETID']])
+                vi = vi[I]
+                print(mm)
+                print(vi)
+    
+                for healpix in set(mm['HEALPIX']):
+                    I = healpix == mm['HEALPIX']
+
+                    targetids = ','.join(mm['TARGETID'][I].astype(str))
+                    input_redshifts = ','.join(vi['VI_redshift'][I].astype(str))
+                    redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
+                    outfile = os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-{healpix}.{fits}')
+    
+                    cmd = f'fastspec {redrockfile} -o {outfile} --targetids {targetids} --input-redshifts {input_redshifts} --mp {args.mp}'
+                    print(cmd)
+                    err = subprocess.call(cmd.split())
+    elif args.merge:
         from fastspecfit.mpi import _domerge
 
         mergefile = os.path.join(args.outdir, tertiary, f'{prefix}{tertiary}.fits')
@@ -80,37 +137,6 @@ def main():
                      fastphot=args.fastphot, mp=args.mp)
         else:
             print(f'Output file {mergefile} exists; use --overwrite to, well, overwrite.')
-    elif args.vi_redshifts:
-        # Fit at the VI redshifts (only for Tertiary 18).
-        if args.tertiary == '18':
-            vifile = os.path.join(args.outdir, tertiary, 'LAE_targets.csv')
-            vi = Table.read(vifile)
-            print('Read {} objects from {}'.format(len(vi), vifile))
-
-            mm = Table(fitsio.read(os.path.join(args.outdir, tertiary, 'fastphot-tertiary18.fits'), 'METADATA'))
-            I = np.hstack([np.where(mm['TARGETID'] == tid)[0] for tid in vi['TARGETID']])
-            mm = mm[I]
-            I = np.hstack([np.where(vi['TARGETID'] == tid)[0] for tid in mm['TARGETID']])
-            vi = vi[I]
-            print(mm)
-            print(vi)
-
-            for healpix in set(mm['HEALPIX']):
-                I = healpix == mm['HEALPIX']
-                
-                targetids = ','.join(mm['TARGETID'][I].astype(str))
-                input_redshifts = ','.join(vi['VI_redshift'][I].astype(str))
-                
-                redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
-                outfile = os.path.join(args.outdir, tertiary, 'test.fits')
-
-                cmd = f'fastspec {redrockfile} -o {outfile} --targetids {targetids} --input-redshifts {input_redshifts}'
-                print(cmd)
-
-                #fastspecfit-qa test.fits -o /global/cfs/cdirs/desi/users/ioannis/tmp --redrockfiles /global/cfs/cdirs/desi/users/raichoor/laelbg/daily/healpix/tertiary18-thru20230112/redrock-17688.fits
-            
-                pdb.set_trace()
-        
     elif args.makeqa:
         raise NotImplementedError
     elif args.makehtml:
