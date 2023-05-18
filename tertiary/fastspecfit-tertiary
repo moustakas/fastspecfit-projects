@@ -80,9 +80,9 @@ def main():
         if args.tertiary == '18':
             if args.merge:
                 from fastspecfit.mpi import _domerge
-        
+
                 mergefile = os.path.join(args.outdir, tertiary, f'{prefix}vi-{tertiary}.fits')
-                if not os.path.isfile(mergefile) and not args.overwrite:
+                if not os.path.isfile(mergefile) or args.overwrite:
                     fastfiles = glob(os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-?????.fits*'))
                     _domerge(fastfiles, extname=fcmd.upper(), mergefile=mergefile,
                              fastphot=args.fastphot, mp=args.mp)
@@ -99,12 +99,11 @@ def main():
                         cmd += ' --overwrite'
                     print(cmd)
                     err = subprocess.call(cmd.split())
-                    pdb.set_trace()
             elif args.makehtml:
                 raise NotImplementedError
             else:
                 # Fit!
-                vifile = os.path.join(args.outdir, tertiary, 'LAE_targets.csv')
+                vifile = os.path.join(args.outdir, tertiary, 'WIRO_LAE_targets.csv')
                 vi = Table.read(vifile)
                 print('Read {} objects from {}'.format(len(vi), vifile))
     
@@ -131,7 +130,7 @@ def main():
         from fastspecfit.mpi import _domerge
 
         mergefile = os.path.join(args.outdir, tertiary, f'{prefix}{tertiary}.fits')
-        if not os.path.isfile(mergefile) and not args.overwrite:
+        if not os.path.isfile(mergefile) or args.overwrite:
             fastfiles = glob(os.path.join(outdir, f'{prefix}?????.fits*'))
             _domerge(fastfiles, extname=fcmd.upper(), mergefile=mergefile,
                      fastphot=args.fastphot, mp=args.mp)
