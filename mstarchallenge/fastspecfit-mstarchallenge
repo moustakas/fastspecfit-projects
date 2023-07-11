@@ -108,7 +108,7 @@ def main():
                     redrockfile = os.path.join(os.environ.get('DESI_ROOT'), 'spectro', 'redux', specprod, 'healpix', survey, program,
                                                str(healpix//100), str(healpix), f'redrock-{survey}-{program}-{healpix}.fits')
                     outfile = os.path.join(outdir_data, specprod, 'healpix', survey, program, str(healpix//100),
-                                           str(healpix), f'{prefix}-{survey}-{program}-{healpix}.{fits}')
+                                           str(healpix), f'{prefix}-{survey}-{program}-{healpix}{fits}')
                     if not os.path.isfile(outfile):
                         mpargs.append([script, redrockfile, outfile, targetids])
 
