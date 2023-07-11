@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 """
 Fit the DESI-II Tertiary tiles / observations--
-  https://data.desi.lbl.gov/desi/users/raichoor/tertiary-status/tertiary-status.html
+  https://desi.lbl.gov/trac/wiki/SurveyOps/TertiaryPrograms#TertiaryPrograms
 
 --Tertiary 18 - ODIN + WIRO LAEs
 --Tertiary 23 - COSMOS
---Tertiary 26 - LBG/LAE/ELG - COSMOS
 
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 18
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 18 --merge
@@ -40,7 +39,7 @@ def main():
     import argparse    
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--tertiary', type=str, choices=['18', '23', '26'], help='Tertiary program to model.')
+    parser.add_argument('--tertiary', type=str, choices=['18', '23'], help='Tertiary program to model.')
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
     parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
     parser.add_argument('--outdir', type=str, default='/global/cfs/cdirs/desi/users/ioannis/tertiary', help='Output directory.')
@@ -59,7 +58,6 @@ def main():
     datadirs = {
         '18': '/global/cfs/cdirs/desi/users/raichoor/laelbg/daily/healpix/tertiary18-thru20230112',
         '23': '/global/cfs/cdirs/desi/users/raichoor/laelbg/daily/healpix/tertiary23-thru20230326',
-        '26': '/global/cfs/cdirs/desi/users/raichoor/laelbg/daily/healpix/tertiary26-thru20230416',
         }
     datadir = datadirs[args.tertiary]
 
