@@ -1,24 +1,13 @@
 #!/usr/bin/env python
 """
-Fit the DESI-II Tertiary tiles / observations--
-  https://desi.lbl.gov/trac/wiki/SurveyOps/TertiaryPrograms#TertiaryPrograms
+https://desi.lbl.gov/trac/wiki/SurveyOps/TertiaryPrograms#TertiaryPrograms
 
---Tertiary 18 - ODIN + WIRO LAEs
---Tertiary 23 - COSMOS
+Analyze the Tertiary-26 metal-poor galaxies identified by Arjun.
+  /global/cfs/cdirs/desicollab/users/ioannis/fastspecfit/metalpoor
 
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 18
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 18 --merge
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 18 --fastphot
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 18 --fastphot --merge
-
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --tertiary 18 --vi-redshifts --mp 24
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --tertiary 18 --vi-redshifts --merge --mp 24
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --tertiary 18 --vi-redshifts --makeqa --mp 24
-
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 23
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 23 --merge
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 23 --fastphot
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 23 --fastphot --merge
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/metalpoor/analyze-metalpoor --build-fastspec
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/metalpoor/analyze-metalpoor --makeqa
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/metalpoor/analyze-metalpoor --abundances
 
 """
 import pdb # for debugging
@@ -27,7 +16,10 @@ import os, time, subprocess
 from glob import glob
 import numpy as np
 import fitsio
-from astropy.table import Table, vstack
+from astropy.table import Table
+import pyneb as pn
+
+from fastspecfit.io import read_fastspecfit
 
 from desiutil.log import get_logger
 log = get_logger()
@@ -39,130 +31,189 @@ def main():
     import argparse    
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--tertiary', type=str, choices=['18', '23'], help='Tertiary program to model.')
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
-    parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
-    parser.add_argument('--outdir', type=str, default='/global/cfs/cdirs/desi/users/ioannis/tertiary', help='Output directory.')
-    parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
-    parser.add_argument('--fastphot', action='store_true', help='Fit just the broadband photometry.')
-    parser.add_argument('--vi-redshifts', action='store_true', help='Refit at the VI redshifts.')
-    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing files.')
-    parser.add_argument('--nolog', action='store_true', help='Do not write a log (useful for debugging).')
-    parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
+    parser.add_argument('--abundances', action='store_true', help='Estimate abundances.')
+    parser.add_argument('--build-fastspec', action='store_true', help='Build the fastspec catalog.')
     parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
     parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')
     args = parser.parse_args()
 
-    tertiary = f'tertiary{args.tertiary}'
+    metaldir = '/global/cfs/cdirs/desicollab/users/ioannis/fastspecfit/metalpoor'
+    if not os.path.isdir(metaldir):
+        os.makedirs(metaldir, exist_ok=True)
+
+    fastdir = '/global/cfs/cdirs/desi/users/ioannis/tertiary/tertiary26'
+    datadir = '/global/cfs/cdirs/desi/users/raichoor/laelbg/daily/healpix/tertiary26-thru20230416'
+
+    fastfile = os.path.join(metaldir, 'tertiary26-metalpoor-fastspec.fits')
+    abundfile = os.path.join(metaldir, 'tertiary26-metalpoor-conditions.fits')
+
+    if args.build_fastspec:
+        from fastspecfit.io import write_fastspecfit
+
+        # Read Arjun's catalog + the merged fastspecfit results
+        cat = Table.read(os.path.join(metaldir, 'tertiary26-metalpoor.csv'))
     
-    datadirs = {
-        '18': '/global/cfs/cdirs/desi/users/raichoor/laelbg/daily/healpix/tertiary18-thru20230112',
-        '23': '/global/cfs/cdirs/desi/users/raichoor/laelbg/daily/healpix/tertiary23-thru20230326',
-        }
-    datadir = datadirs[args.tertiary]
+        fullfastfile = os.path.join(fastdir, 'fastspec-tertiary26.fits')
+        fast, meta, _, _ = read_fastspecfit(fullfastfile)
+    
+        I = np.isin(meta['TARGETID'], cat['TARGETID'])
+        fast = fast[I]
+        meta = meta[I]
 
-    if args.fastphot:
-        fcmd = 'fastphot'
-        prefix = 'fastphot-'
-        fits = 'fits'
-        outdir = os.path.join(args.outdir, tertiary, 'fastphot')
-    else:
-        fcmd = 'fastspec'
-        prefix = 'fastspec-'
-        fits = 'fits.gz'
-        outdir = os.path.join(args.outdir, tertiary, 'fastspec')
+        write_fastspecfit(fast, meta, outfile=fastfile)
 
-    if not os.path.isdir(outdir):
-        os.makedirs(outdir, exist_ok=True)
+    if args.makeqa:
+        fast, meta, _, _ = read_fastspecfit(fastfile)
+        for healpix in set(fast['HEALPIX']):
+            I = healpix == fast['HEALPIX']
+            targetids = ','.join(fast['TARGETID'][I].astype(str))
+            
+            fastfile = os.path.join(fastdir, 'fastspec', f'fastspec-{healpix}.fits.gz')
+            redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
+            qadir = os.path.join(metaldir, 'qa')
+            
+            cmd = f'fastspecfit-qa {fastfile} -o {qadir} --redrockfiles {redrockfile} --targetids {targetids} --mp {args.mp}'
+            if args.overwrite:
+                cmd += ' --overwrite'
+            print(cmd)
+            err = subprocess.call(cmd.split())
+                    
+    if args.makehtml:
+        raise NotImplementedError
 
-    if args.vi_redshifts:
-        # Fit at the VI redshifts (only for Tertiary 18).
-        if args.tertiary == '18':
-            if args.merge:
-                from fastspecfit.mpi import _domerge
+    if args.abundances:
+        from fastspecfit.emlines import read_emlines
+        from fastspecfit.util import TabulatedDESI
 
-                mergefile = os.path.join(args.outdir, tertiary, f'{prefix}vi-{tertiary}.fits')
-                if not os.path.isfile(mergefile) or args.overwrite:
-                    fastfiles = glob(os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-?????.fits*'))
-                    _domerge(fastfiles, extname=fcmd.upper(), mergefile=mergefile,
-                             fastphot=args.fastphot, mp=args.mp)
+        cosmo = TabulatedDESI()
+        linetable = read_emlines()
+        
+        fast, meta, _, _ = read_fastspecfit(fastfile)
+        ngal = len(meta)
+
+        out = meta['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX', 'RA', 'DEC', 'Z']
+        out['LOGMSTAR'] = fast['LOGMSTAR']
+        out['ABSMAG_SDSS_R'] = fast['ABSMAG_SDSS_R']
+        lines = ['OII_3726', 'OII_3729', 'OIII_4363', 'OIII_4959', 'OIII_5007', 'NII_5755',
+                 'NII_6584', 'SII_6716', 'SII_6731', 'HALPHA', 'HBETA']
+        linewaves = []
+        for line in lines:
+            out[line] = fast[f'{line}_FLUX']
+            linewaves.append(linetable[linetable['name'] == line.lower()]['restwave'])
+        linewaves = np.hstack(linewaves)
+
+        #out['HAHB'] = np.zeros(ngal, 'f4')
+        #out['CHBETA'] = np.zeros(ngal, 'f4')
+        out['SFR_HA'] = np.zeros(ngal, 'f4')
+        out['EBV_HAHB'] = np.zeros(ngal, 'f4')
+        out['DENS_OII'] = np.zeros(ngal, 'f4')
+        out['DENS_SII'] = np.zeros(ngal, 'f4')
+        out['TEMP_OII'] = np.zeros(ngal, 'f4')
+        out['TEMP_OIII'] = np.zeros(ngal, 'f4')
+        #out['LOGOH_OIII'] = np.zeros(ngal, 'f4')
+        #out['LOGOH_OII'] = np.zeros(ngal, 'f4')
+        out['12LOGOH'] = np.zeros(ngal, 'f4')
+
+        # extinction - https://github.com/Morisset/PyNeb_devel/blob/master/examples/Notebooks/PyNeb_manual_5.ipynb
+        rc = pn.RedCorr()
+        rc.law = 'CCM89 oD94'
+
+        hahb = fast['HALPHA_FLUX'] / fast['HBETA_FLUX']
+        #out['HAHB'] = hahb
+
+        # Get the theoretical Balmer decrement
+        # https://github.com/Morisset/PyNeb_devel/blob/master/examples/Notebooks/PyNeb_manual_4.ipynb
+        H1 = pn.RecAtom('H', 1)
+        hahb_nodust = ( H1.getEmissivity(tem=1e4, den=1e3, lev_i=3, lev_j=2) / 
+                        H1.getEmissivity(tem=1e4, den=1e3, lev_i=4, lev_j=2) )
+        #print(hahb_nodust)
+        
+        for igal in range(ngal):
+            rc.setCorr(obs_over_theo=hahb[igal] / hahb_nodust, wave1=6563., wave2=4861.)
+            #print(hahb[igal], rc.cHbeta, rc.E_BV)
+            #out['CHBETA'][igal] = rc.cHbeta
+            if rc.E_BV < 0.:
+                rc.E_BV = 0.0
+            out['EBV_HAHB'][igal] = rc.E_BV
+
+            for linewave, line in zip(linewaves, lines):
+                out[line][igal] *= rc.getCorr(linewave)
+
+        # SFR(Ha)
+        lum_ha = out['HALPHA'] * 1e-17 * 4 * np.pi * (cosmo.luminosity_distance(out['Z']) * 3.0856776e+24)**2
+        out['SFR_HA'] = np.float32(lum_ha * 7.9e-42) # [Msun/yr]
+
+        # iteratively determine the density and temperature
+        diags = pn.Diagnostics()
+        O2 = pn.Atom('O', 2)
+        O3 = pn.Atom('O', 3)
+        S2 = pn.Atom('S', 2)
+        niter = 1
+
+        for igal in range(ngal):
+            temp_init, dens_init = 1e4, 1e2
+            temp, dens = temp_init, dens_init
+            for iter1 in range(niter):
+                #diags.getCrossTemDen('[OIII] 4363/5007', '[OII] 3726/3729', 1.1482047/44.234493, 0.93705434)
+                #oii_dens = diags.getCrossTemDen('[OII] 3726/3729', out['OII_3726'][igal] / out['OII_3729'][igal])
+
+                if (out['OII_3726'][igal] > 0) * (out['OII_3729'][igal] > 0):
+                    oii_dens = O2.getTemDen(out['OII_3726'][igal] / out['OII_3729'][igal], tem=temp,
+                                            wave1=3726., wave2=3729.)
+                    if np.isnan(oii_dens):
+                        oii_dens = dens_init
                 else:
-                    print(f'Output file {mergefile} exists; use --overwrite to, well, overwrite.')
-            elif args.makeqa:
-                outdir = os.path.join(args.outdir, tertiary, f'{prefix}vi')
-                fastfiles = glob(os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-?????.fits*'))
-                for fastfile in fastfiles:
-                    healpix = os.path.basename(fastfile).split('-')[2].split('.')[0]
-                    redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
-                    cmd = f'fastspecfit-qa {fastfile} -o {outdir} --redrockfiles {redrockfile} --mp {args.mp}'
-                    if args.overwrite:
-                        cmd += ' --overwrite'
-                    print(cmd)
-                    err = subprocess.call(cmd.split())
-            elif args.makehtml:
-                raise NotImplementedError
-            else:
-                # Fit!
-                vifile = os.path.join(args.outdir, tertiary, 'WIRO_LAE_targets.csv')
-                vi = Table.read(vifile)
-                print('Read {} objects from {}'.format(len(vi), vifile))
-    
-                mm = Table(fitsio.read(os.path.join(args.outdir, tertiary, 'fastphot-tertiary18.fits'), 'METADATA'))
-                I = np.hstack([np.where(mm['TARGETID'] == tid)[0] for tid in vi['TARGETID']])
-                mm = mm[I]
-                I = np.hstack([np.where(vi['TARGETID'] == tid)[0] for tid in mm['TARGETID']])
-                vi = vi[I]
-                print(mm)
-                print(vi)
-    
-                for healpix in set(mm['HEALPIX']):
-                    I = healpix == mm['HEALPIX']
+                    oii_dens = dens_init
+                    
+                if (out['SII_6716'][igal] > 0) * (out['SII_6731'][igal] > 0):
+                    sii_dens = S2.getTemDen(out['SII_6716'][igal] / out['SII_6731'][igal], tem=temp,
+                                            wave1=6716., wave2=6731.)
+                    if np.isnan(sii_dens):
+                        sii_dens = dens_init
+                else:
+                    sii_dens = dens_init
 
-                    targetids = ','.join(mm['TARGETID'][I].astype(str))
-                    input_redshifts = ','.join(vi['VI_redshift'][I].astype(str))
-                    redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
-                    outfile = os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-{healpix}.{fits}')
-    
-                    cmd = f'fastspec {redrockfile} -o {outfile} --targetids {targetids} --input-redshifts {input_redshifts} --mp {args.mp}'
-                    print(cmd)
-                    err = subprocess.call(cmd.split())
-    elif args.merge:
-        from fastspecfit.mpi import _domerge
+                dens_final = sii_dens
 
-        mergefile = os.path.join(args.outdir, tertiary, f'{prefix}{tertiary}.fits')
-        if not os.path.isfile(mergefile) or args.overwrite:
-            fastfiles = glob(os.path.join(outdir, f'{prefix}?????.fits*'))
-            _domerge(fastfiles, extname=fcmd.upper(), mergefile=mergefile,
-                     fastphot=args.fastphot, mp=args.mp)
-        else:
-            print(f'Output file {mergefile} exists; use --overwrite to, well, overwrite.')
-    elif args.makeqa:
-        raise NotImplementedError
-    elif args.makehtml:
-        raise NotImplementedError
-    else:
-        # fit!
-        redrockfiles = glob(os.path.join(datadir, 'redrock-?????.fits'))
-        for redrockfile in redrockfiles:
-            fastfile = os.path.join(outdir, os.path.basename(redrockfile).replace('redrock-', prefix))
-            if not args.fastphot:
-                fastfile += '.gz'
+                if (out['OIII_5007'][igal] > 0) * (out['OIII_4363'][igal] > 0):
+                    oiii_temp = O3.getTemDen(out['OIII_4363'][igal] / out['OIII_5007'][igal], den=dens_final,
+                                             wave1=4363., wave2=5007.)
+                    if np.isnan(oiii_temp):
+                        oiii_temp = temp_init
+                else:
+                    oiii_temp = temp_init
+
+                # Rogers+21, equation 6 (probably not the best relation)
+                oii_temp = 0.79 * oiii_temp + 0.16e4
+
+                if (out['OIII_5007'][igal] > 0) * (out['HBETA'][igal] > 0):
+                    OH_OIII = O3.getIonAbundance(int_ratio=out['OIII_5007'][igal] / out['HBETA'][igal],
+                                                 Hbeta=1.0, tem=oiii_temp, den=dens_final, wave=5007.)
+                else:
+                    OH_OIII = 0.0
+
+                if (out['OII_3729'][igal] > 0) * (out['HBETA'][igal] > 0):
+                    OH_OII = O2.getIonAbundance(int_ratio=out['OII_3729'][igal] / out['HBETA'][igal],
+                                                Hbeta=1.0, tem=oii_temp, den=dens_final, wave=3729.)
+                else:
+                    OH_OII = 0.0
+                    
+                out['DENS_OII'][igal] = oii_dens
+                out['DENS_SII'][igal] = sii_dens
+                out['TEMP_OII'][igal] = oii_temp
+                out['TEMP_OIII'][igal] = oiii_temp
+                out['12LOGOH'][igal] = 12 + np.log10(OH_OIII + OH_OII)
                 
-            if not os.path.isfile(fastfile) and not args.overwrite:
-                cmd = f'{fcmd} {redrockfile} -o {fastfile} --mp {args.mp}'
-                if args.ntargets:
-                    cmd += ' --ntargets {}'.format(args.ntargets)
-                if args.targetids:
-                    cmd += ' --targetids {}'.format(args.targetids)
-                print(cmd)
-                if args.nolog:
-                    err = subprocess.call(cmd.split())
-                else:
-                    logfile = fastfile.replace('.fits', '.log').replace('.gz', '')
-                    with open(logfile, 'w') as mylog:
-                        err = subprocess.call(cmd.split(), stdout=mylog, stderr=mylog)
-            else:
-                print(f'Output file {fastfile} exists and --overwrite not set.')
+                #print(igal, oii_dens, sii_dens, oiii_temp, LOG12OH)
 
+        print(f'Writing {abundfile}')
+        out.write(abundfile, overwrite=True)
+
+        print(out['TARGETID', 'Z', 'LOGMSTAR', 'ABSMAG_SDSS_R', 'SFR_HA', '12LOGOH'])
+
+        pdb.set_trace()
+        
 if __name__ == '__main__':
     main()
