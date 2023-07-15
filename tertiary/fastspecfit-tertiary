@@ -3,9 +3,11 @@
 Fit the DESI-II Tertiary tiles / observations--
   https://data.desi.lbl.gov/desi/users/raichoor/tertiary-status/tertiary-status.html
 
---Tertiary 18 - ODIN + WIRO LAEs
---Tertiary 23 - COSMOS
---Tertiary 26 - LBG/LAE/ELG - COSMOS
+--Tertiary 15 - XMM - LAE/LBG
+--Tertiary 18 - XMM-LSS - ODIN + WIRO LAE
+--Tertiary 23 - COSMOS - 4+1
+--Tertiary 26 - COSMOS - LBG/LAE/ELG
+--Tertiary 34,35 - NGC4993
 
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 18
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 18 --merge
@@ -60,6 +62,7 @@ def main():
     tertiary = f'tertiary{args.tertiary}'
     
     datadirs = {
+        '15': '/global/cfs/cdirs/desi/users/raichoor/laelbg/daily/healpix/tertiary15-thru20221216',
         '18': '/global/cfs/cdirs/desi/users/raichoor/laelbg/daily/healpix/tertiary18-thru20230112',
         '23': '/global/cfs/cdirs/desi/users/raichoor/laelbg/daily/healpix/tertiary23-thru20230326',
         '26': '/global/cfs/cdirs/desi/users/raichoor/laelbg/daily/healpix/tertiary26-thru20230416',
@@ -70,6 +73,8 @@ def main():
 
     if args.tertiary == '34' or args.tertiary == '35':
         fphotodir = os.getenv('DESI_ROOT')+'/external/legacysurvey/dr10' # NGC4993 fields
+        #fphotodir = os.getenv('FPHOTO_DIR')
+        fphotoinfo = '/global/u2/i/ioannis/code/desihub/fastspecfit/py/fastspecfit/data/legacysurvey-dr10.yaml'
     else:
         fphotodir = os.getenv('FPHOTO_DIR')
 
@@ -174,7 +179,8 @@ def main():
             if not args.fastphot:
                 fastfile += '.gz'
             if not os.path.isfile(fastfile) and not args.overwrite:
-                cmd = f'{fcmd} {redrockfile} -o {fastfile} --mp {args.mp} --fphotodir {fphotodir}'
+                print('HACK!')
+                cmd = f'{fcmd} {redrockfile} -o {fastfile} --mp {args.mp} --fphotodir {fphotodir} --fphotoinfo {fphotoinfo}'
                 if args.ntargets:
                     cmd += ' --ntargets {}'.format(args.ntargets)
                 if args.targetids:
