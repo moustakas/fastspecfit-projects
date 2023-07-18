@@ -219,8 +219,12 @@ def main():
     elif args.redrock:
         outdir = os.path.join(args.outdir, tertiary)
         print('Hack -- just refitting a small subset of objects!')
-        mergefile = os.path.join(outdir, 'fastspec-vi-tertiary26.fits')
-        mm = Table(fitsio.read(mergefile, 'METADATA'))
+        #mergefile = os.path.join(outdir, 'fastspec-vi-tertiary26.fits')
+        #mm = Table(fitsio.read(mergefile, 'METADATA'))
+        mergefile = os.path.join(outdir, 'VI_dey_Subaru.fits.gz')
+        mm = Table(fitsio.read(mergefile))
+        mm.rename_column('VI_TARGETID', 'TARGETID')
+        mm['HEALPIX'] = radec2pix(64, mm['RA'], mm['DEC'])        
 
         for healpix in sorted(set(mm['HEALPIX'])):
             I = mm['HEALPIX'] == healpix
@@ -231,7 +235,6 @@ def main():
 
             cmd = f'rrdesi -i {coaddfile} -o {redrockfile} --targetids {targetids} --mp {args.mp}'
             print(cmd)
-            pdb.set_trace()
             err = subprocess.call(cmd.split())            
 
     elif args.makehtml:
