@@ -25,6 +25,8 @@ time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 23 --fastphot
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 23 --fastphot --merge
 
+rrdesi -i $DESI_ROOT/users/raichoor/laelbg/daily/healpix/tertiary26-thru20230416/coadd-27238.fits -o ./redrock-nmf-27238.fits --targetids 39089837499746048,39089837499745286 --details ./redrock-nmf-27238.h5 --mp 1
+
 """
 import pdb # for debugging
 
@@ -49,12 +51,13 @@ def main():
     parser.add_argument('--tertiary', type=str, choices=['18', '23', '26', '34', '35'], help='Tertiary program to model.')
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
     parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
-    parser.add_argument('--outdir', type=str, default='/global/cfs/cdirs/desi/users/ioannis/tertiary', help='Output directory.')
+    parser.add_argument('--outdir', type=str, default=None, help='Output directory.')
     parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
     parser.add_argument('--fastphot', action='store_true', help='Fit just the broadband photometry.')
     parser.add_argument('--vi-redshifts', action='store_true', help='Refit at the VI redshifts.')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing files.')
     parser.add_argument('--nolog', action='store_true', help='Do not write a log (useful for debugging).')
+    parser.add_argument('--redrock', action='store_true', help='Run Redrock.')
     parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
     parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
     parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
@@ -62,34 +65,33 @@ def main():
 
     tertiary = f'tertiary{args.tertiary}'
 
-    pdir = '/global/cfs/cdirs/desi/users'
+    desi_root = os.getenv('DESI_ROOT')
 
-    ############
-    print('Working on mac')
-    pdir = '/Users/ioannis/work/desi'
-    args.outdir = '/Users/ioannis/work/desi/ioannis/tertiary'
-    ############
+    if args.outdir is None:
+        args.outdir = os.path.join(desi_root, 'users', 'ioannis', 'tertiary')
 
     datadirs = {
-        '15': pdir+'/raichoor/laelbg/daily/healpix/tertiary15-thru20221216',
-        '18': pdir+'/raichoor/laelbg/daily/healpix/tertiary18-thru20230112',
-        '23': pdir+'/raichoor/laelbg/daily/healpix/tertiary23-thru20230326',
-        '26': pdir+'/raichoor/laelbg/daily/healpix/tertiary26-thru20230416',
-        '34': pdir+'/raichoor/laelbg/daily/healpix/tertiary34-thru20230617',
-        '35': pdir+'/raichoor/laelbg/daily/healpix/tertiary35-thru20230618',
+        '15': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary15-thru20221216',
+        '18': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary18-thru20230112',
+        '23': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary23-thru20230326',
+        '26': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary26-thru20230416',
+        '34': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary34-thru20230617',
+        '35': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary35-thru20230618',
         }
 
     datadir = datadirs[args.tertiary]
 
+    maxphotwave = 35. # [micron]
     if args.tertiary == '34' or args.tertiary == '35':
-        fphotodir = os.getenv('DESI_ROOT')+'/external/legacysurvey/dr10' # NGC4993 fields
+        fphotodir = desi_root+'/external/legacysurvey/dr10' # NGC4993 fields
         fphotoinfo = resources.files('fastspecfit').joinpath('data/legacysurvey-dr10.yaml')
-    elif args.tertiary == '36':
-        
-        '/Users/ioannis/research/projects/fastspecfit/laelbg-templates/subaru-tractor-tertiary26-thru20230416.fits'
-
+    elif args.tertiary == '26':
+        fphotodir = desi_root+'/users/ioannis/fastspecfit/laelbg-templates/subaru-tractor-tertiary26-thru20230416.fits'
+        fphotoinfo = desi_root+'/users/ioannis/fastspecfit/laelbg-templates/subaru-tractor-photoinfo.yaml'
+        maxphotwave = 8. # [micron]
     else:
         fphotodir = os.getenv('FPHOTO_DIR')
+        fphotoinfo = resources.files('fastspecfit').joinpath('data/legacysurvey-dr9.yaml')
 
     if args.fastphot:
         fcmd = 'fastphot'
@@ -117,14 +119,20 @@ def main():
             else:
                 print(f'Output file {mergefile} exists; use --overwrite to, well, overwrite.')
         elif args.makeqa:
-            outdir = os.path.join(args.outdir, tertiary, f'{prefix}vi')
+            outdir = os.path.join(args.outdir, tertiary, f'{prefix}vi', 'qa')
             fastfiles = glob(os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-?????.fits*'))
-            for fastfile in fastfiles:
+            for fastfile in fastfiles:#[0:1]:
                 healpix = os.path.basename(fastfile).split('-')[2].split('.')[0]
                 redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
-                cmd = f'fastspecfit-qa {fastfile} -o {outdir} --redrockfiles {redrockfile} --mp {args.mp}'
+                cmd = f'fastspecfit-qa {fastfile} -o {outdir} --redrockfiles {redrockfile} --mp {args.mp} '
+                cmd += f'--fphotodir {fphotodir} --fphotoinfo {fphotoinfo} --maxphotwave {maxphotwave} '
+                cmd += f'--emline_snrmin 1.0 --nsmoothspec 2'
+                if args.ntargets:
+                    cmd += ' --ntargets {}'.format(args.ntargets)
                 if args.overwrite:
                     cmd += ' --overwrite'
+                #print('HACK!!!')
+                #cmd += ' --targetids 39089837499745334'
                 print(cmd)
                 err = subprocess.call(cmd.split())
         elif args.makehtml:
@@ -140,15 +148,15 @@ def main():
                 vifile = os.path.join(args.outdir, tertiary, 'VI_dey_Subaru.fits.gz')
                 vi = Table(fitsio.read(vifile))
                 # trim
-                iqso = ['qso' in comment.lower() or 'agn' in comment.lower() for comment in vi['VI_COMMENT']]
-                I = np.logical_not(iqso) * (vi['VI_QUALITY'] >=3) * (vi['VI_Z'] > 2.4) * (vi['VI_Z'] < 3.5)
+                #iqso = ['qso' in comment.lower() or 'agn' in comment.lower() for comment in vi['VI_COMMENT']]
+                #I = np.logical_not(iqso) * (vi['VI_QUALITY'] >=3) * (vi['VI_Z'] > 2.4) * (vi['VI_Z'] < 3.5)
+                I = (vi['VI_QUALITY'] >=3) * (vi['TERTIARY_TARGET'] == 'LAE_SUBARU ') * (vi['VI_Z'] > 2.4)#1e-3)
                 print('Trimming to {} high-quality VI redshifts.'.format(np.sum(I)))
                 vi = vi[I]
                 vi.rename_column('VI_TARGETID', 'TARGETID')
     
             print('Read {} objects from {}'.format(len(vi), vifile))
             mm = Table(fitsio.read(os.path.join(datadir, 'merge-{}.fits'.format(os.path.basename(datadir)))))
-            #mm = Table(fitsio.read(os.path.join(args.outdir, tertiary, f'fastphot-{tertiary}.fits'), 'METADATA'))
             mm['HEALPIX'] = radec2pix(64, mm['TARGET_RA'], mm['TARGET_DEC'])
             
             I = np.hstack([np.where(mm['TARGETID'] == tid)[0] for tid in vi['TARGETID']])
@@ -159,7 +167,15 @@ def main():
             #print(mm)
             #print(vi)
 
-            for healpix in set(mm['HEALPIX']):
+            #phot = Table(fitsio.read(fphotodir))
+            #I = np.hstack([np.where(phot['TARGETID'] == tid)[0] for tid in vi['TARGETID']])
+            #phot = phot[I]
+            #assert(np.all(phot['TARGETID'] == vi['TARGETID']))
+            #pdb.set_trace()
+
+            #print('HACK! - just 1 healpix!')
+            #for healpix in [27245]:#set(mm['HEALPIX']):#[:1]):
+            for healpix in sorted(set(mm['HEALPIX'])):
                 I = healpix == mm['HEALPIX']
 
                 targetids = ','.join(mm['TARGETID'][I].astype(str))
@@ -167,7 +183,16 @@ def main():
                 redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
                 outfile = os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-{healpix}.{fits}')
 
-                cmd = f'fastspec {redrockfile} -o {outfile} --targetids {targetids} --input-redshifts {input_redshifts} --mp {args.mp}'
+                #targetids = '39089837499745334'
+
+                cmd = f'fastspec {redrockfile} -o {outfile} --targetids {targetids} --input-redshifts {input_redshifts} '
+                cmd += f'--mp {args.mp} --fphotodir {fphotodir} --fphotoinfo {fphotoinfo} '
+                if args.ntargets:
+                    cmd += ' --ntargets {}'.format(args.ntargets)
+                if args.targetids:
+                    cmd += ' --targetids {}'.format(args.targetids)
+                if args.tertiary == '26':
+                    cmd += ' --no-smooth-continuum --constrain-age'
                 print(cmd)
                 err = subprocess.call(cmd.split())
     elif args.merge:
@@ -185,28 +210,47 @@ def main():
         for fastfile in fastfiles:
             healpix = os.path.basename(fastfile).split('-')[1].split('.')[0]
             redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
-            cmd = f'fastspecfit-qa {fastfile} -o {outdir} --redrockfiles {redrockfile} --mp {args.mp} --fphotodir {fphotodir} --fphotoinfo {fphotoinfo}'
+            cmd = f'fastspecfit-qa {fastfile} -o {outdir} --redrockfiles {redrockfile} --mp {args.mp} '
+            cmd += '--fphotodir {fphotodir} --fphotoinfo {fphotoinfo} --maxphotwave {maxphotwave}'
             if args.overwrite:
                 cmd += ' --overwrite'
             print(cmd)
             err = subprocess.call(cmd.split())
+    elif args.redrock:
+        outdir = os.path.join(args.outdir, tertiary)
+        print('Hack -- just refitting a small subset of objects!')
+        mergefile = os.path.join(outdir, 'fastspec-vi-tertiary26.fits')
+        mm = Table(fitsio.read(mergefile, 'METADATA'))
+
+        for healpix in sorted(set(mm['HEALPIX'])):
+            I = mm['HEALPIX'] == healpix
+            targetids = ','.join(mm['TARGETID'][I].astype(str))
+
+            coaddfile = os.path.join(datadir, f'coadd-{healpix}.fits')
+            redrockfile = os.path.join(outdir, f'redrock-nmf-{healpix}.fits')
+
+            cmd = f'rrdesi -i {coaddfile} -o {redrockfile} --targetids {targetids} --mp {args.mp}'
+            print(cmd)
+            pdb.set_trace()
+            err = subprocess.call(cmd.split())            
+
     elif args.makehtml:
         raise NotImplementedError
     else:
         # fit!
         redrockfiles = glob(os.path.join(datadir, 'redrock-?????.fits'))
-        print('HACK! - just 1 redrockfile and ntargets=10!')
-        for redrockfile in redrockfiles[:1]:
+        for redrockfile in redrockfiles:
             fastfile = os.path.join(outdir, os.path.basename(redrockfile).replace('redrock-', prefix))
             if not args.fastphot:
                 fastfile += '.gz'
-            if not os.path.isfile(fastfile) and not args.overwrite:
-                print('HACK!')
+            if not os.path.isfile(fastfile) or args.overwrite:
                 cmd = f'{fcmd} {redrockfile} -o {fastfile} --mp {args.mp} --fphotodir {fphotodir} --fphotoinfo {fphotoinfo}'
                 if args.ntargets:
                     cmd += ' --ntargets {}'.format(args.ntargets)
                 if args.targetids:
                     cmd += ' --targetids {}'.format(args.targetids)
+                if args.tertiary == '26':
+                    cmd += ' --no-smooth-continuum --constrain-age'
                 print(cmd)
                 if args.nolog:
                     err = subprocess.call(cmd.split())

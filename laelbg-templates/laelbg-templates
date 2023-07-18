@@ -1,0 +1,416 @@
+#!/usr/bin/env python
+
+"""Build new templates.
+
+Synthesize photometry in five medium-band filters (centered around g-band)
+using the FastSpecFit/Iron SV3 models.
+
+source /global/cfs/cdirs/desi/software/desi_environment.sh 23.1
+module swap desispec/0.57.0
+module load fastspecfit/2.1.1
+
+cd /global/cfs/cdirs/desicollab/users/ioannis/desi2-filters
+time python build-photoz-sample --mp 128
+
+"""
+import os, pdb
+import numpy as np
+from time import time
+import fitsio
+import argparse    
+from astropy.table import Table
+import multiprocessing
+import seaborn as sns
+import matplotlib.pyplot as plt
+from astropy.io import fits
+import matplotlib.ticker as ticker
+from fastspecfit.continuum import ContinuumTools
+from fastspecfit.util import TabulatedDESI
+from fastspecfit.io import read_fastspecfit, write_fastspecfit, cache_templates, FLUXNORM
+from NonnegMFPy import nmf        
+
+sns.set(context='talk', style='ticks', font_scale=0.9)#, rc=rc)
+
+#def _rebuild_one(args):
+#    return rebuild_one(*args)
+#
+#def rebuild_one(igal, redshift, dlum, coeff):
+#    print('Rebuilding {}'.format(igal))
+#    templatecache = cache_templates()
+#
+#    CTools = ContinuumTools(continuum_pixkms=templatecache['continuum_pixkms'],
+#                            pixkms_wavesplit=templatecache['pixkms_wavesplit'])
+#
+#    sedwave = templatecache['templatewave'] * (1 + redshift)
+#    T = CTools.transmission_Lyman(redshift, sedwave)
+#    T *= CTools.massnorm * (10.0 / (1e6 * dlum))**2 / (1.0 + redshift)
+#
+#    sedmodel = coeff.dot(templatecache['templateflux'].T)
+#    sedmodel *= T
+#
+#    return sedmodel
+    
+def add_bitnames(meta):
+
+    desi_bitnames = np.zeros(len(meta), dtype='U300')
+    bgs_bitnames = np.zeros(len(meta), dtype='U300')
+    mws_bitnames = np.zeros(len(meta), dtype='U300')
+    scnd_bitnames = np.zeros(len(meta), dtype='U300')
+    cmx_bitnames = np.zeros(len(meta), dtype='U300')
+    targetclass = np.zeros(len(meta), dtype='U300')
+
+    def get_targetclass(targetclass, name):
+        for cc in ['BGS', 'LRG', 'ELG', 'QSO', 'MWS', 'SCND', 'STD']:
+            if cc in name:
+                for iobj, tclass in enumerate(targetclass):
+                    if tclass == '':
+                        targetclass[iobj] = cc
+                    else:
+                        if not cc in tclass: # only once
+                            targetclass[iobj] = ' '.join([tclass, cc])
+        return targetclass
+    
+    for survey, prefix in zip(['SV3'], ['SV3_']):
+    #for survey, prefix in zip(['CMX', 'SV1', 'SV2', 'SV3', 'MAIN'], ['CMX_', 'SV1_', 'SV2_', 'SV3_', '']):
+        I = meta['SURVEY'] == survey.lower()
+        if np.sum(I) > 0:
+            if survey == 'MAIN':
+                from desitarget.targetmask import desi_mask, bgs_mask, mws_mask, scnd_mask
+            elif survey == 'SV1':
+                from desitarget.sv1.sv1_targetmask import desi_mask, bgs_mask, mws_mask, scnd_mask
+            elif survey == 'SV2':
+                from desitarget.sv2.sv2_targetmask import desi_mask, bgs_mask, mws_mask, scnd_mask
+            elif survey == 'SV3':
+                from desitarget.sv3.sv3_targetmask import desi_mask, bgs_mask, mws_mask, scnd_mask
+            elif survey == 'CMX':
+                from desitarget.cmx.cmx_targetmask import cmx_mask
+
+            if survey == 'CMX':
+                for name in cmx_mask.names():
+                    J = np.where(meta['CMX_TARGET'.format(prefix)] & cmx_mask.mask(name) != 0)[0]
+                    if len(J) > 0:
+                        cmx_bitnames[J] = [' '.join([bit, name]) for bit in cmx_bitnames[J]]
+                        #if 'QSO' in name:
+                        #    pdb.set_trace()
+                        #print(name, targetclass[J])
+                        targetclass[J] = get_targetclass(targetclass[J], name)
+            else:
+                for name in desi_mask.names():
+                    J = np.where(meta['{}DESI_TARGET'.format(prefix)] & desi_mask.mask(name) != 0)[0]
+                    if len(J) > 0:
+                        desi_bitnames[J] = [' '.join([bit, name]) for bit in desi_bitnames[J]]
+                        targetclass[J] = get_targetclass(targetclass[J], name)
+                        
+                for name in bgs_mask.names():
+                    J = np.where(meta['{}BGS_TARGET'.format(prefix)] & bgs_mask.mask(name) != 0)[0]
+                    if len(J) > 0:
+                        bgs_bitnames[J] = [' '.join([bit, name]) for bit in bgs_bitnames[J]]
+                        targetclass[J] = get_targetclass(targetclass[J], name)
+                        
+                for name in mws_mask.names():
+                    J = np.where(meta['{}MWS_TARGET'.format(prefix)] & mws_mask.mask(name) != 0)[0]
+                    if len(J) > 0:
+                        mws_bitnames[J] = [' '.join([bit, name]) for bit in mws_bitnames[J]]
+                        targetclass[J] = get_targetclass(targetclass[J], name)
+                        
+                for name in scnd_mask.names():
+                    J = np.where(meta['{}SCND_TARGET'.format(prefix)] & scnd_mask.mask(name) != 0)[0]
+                    if len(J) > 0:
+                        scnd_bitnames[J] = [' '.join([bit, name]) for bit in scnd_bitnames[J]]
+                        targetclass[J] = get_targetclass(targetclass[J], name)
+
+    meta['DESI_BITNAMES'] = desi_bitnames
+    meta['BGS_BITNAMES'] = bgs_bitnames
+    meta['MWS_BITNAMES'] = mws_bitnames
+    meta['SCND_BITNAMES'] = scnd_bitnames
+    meta['CMX_BITNAMES'] = cmx_bitnames
+    meta['TARGETCLASS'] = targetclass
+
+def restframe_templates(fast, meta, outfile):
+
+    ngal = len(meta)
+
+    templatecache = cache_templates()        
+    templatewave = templatecache['templatewave']
+    T = np.where(templatewave < 6e4)[0]
+
+    templates = fast['COEFF'].data.dot(templatecache['templateflux'].T)
+
+    # normalize at 5500 A
+    for igal in range(ngal):
+        templates[igal, :] /= np.interp(5500., templatewave, templates[igal, :])
+ 
+    fitsio.write(outfile, templates[:, T], clobber=True, extname='FLUX')
+    fitsio.write(outfile, templatewave[T], extname='WAVE')
+    fitsio.write(outfile, meta.as_array(), extname='METADATA')
+    fitsio.write(outfile, fast.as_array(), extname='FASTSPEC')
+    print(f'Wrote {outfile}')
+ 
+    #I = np.where((templatewave > 3500) * (templatewave < 11000))[0]
+    fig, ax = plt.subplots()
+    for igal in range(ngal):
+        ax.plot(templatewave/1e4, templatewave * templates[igal, :], alpha=0.5)
+        #ax.plot(templatewave[I], templates[igal, I])
+    ax.set_ylabel(r'Normalized $\lambda F_{\lambda}$')
+    ax.set_xlabel(r'Rest-frame Wavelength ($\mu$m)')
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_ylim(1e-8, 1e7)
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: '{:g}'.format(y)))
+    ax.margins(0)
+    fig.tight_layout()
+
+    pngfile = outfile.replace('.fits', '.png')
+
+    fig.savefig(pngfile)
+    print('Wrote '+pngfile)
+
+def main():
+    """Main wrapper."""
+
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--fuji-templates', action='store_true', help='Fuji sample.')
+    parser.add_argument('--lae-templates', action='store_true', help='LAE/COSMOS sample.')
+    parser.add_argument('--nmf-templates', action='store_true', help='Find the NMF basis templates.')
+    parser.add_argument('--template-qa', action='store_true', help='Build some QA.')
+    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
+    args = parser.parse_args()
+
+    desi_root = os.getenv('DESI_ROOT')
+    outdir = desi_root+'/users/ioannis/fastspecfit/laelbg-templates'
+    tertiarydir = desi_root+'/users/ioannis/tertiary/tertiary26'
+
+    nmf_outfile = outdir+'/rrtemplate-nmf-galaxy.fits'        
+
+    specprod = 'fuji'
+    version = 'v2.0'
+
+    if args.fuji_templates:
+        ntemp = 100
+        
+        catdir = os.path.join(desi_root, 'spectro', 'fastspecfit', 
+                              specprod, version, 'catalogs')
+        
+        fastfile = os.path.join(catdir, 'fastspec-{}.fits'.format(specprod))
+        
+        metacols = ['SURVEY', 'PROGRAM', 'ZWARN', 'COADD_FIBERSTATUS', 'Z',
+                    'SV3_DESI_TARGET', 'SV3_BGS_TARGET', 'SV3_MWS_TARGET', 
+                    'SV3_SCND_TARGET', 'FLUX_G', 'FLUX_R', 'FLUX_Z',
+                    'DELTACHI2', 'SPECTYPE']
+        fastcols = ['RCHI2', 'APERCORR']
+        
+        meta = fitsio.read(fastfile, 'METADATA', columns=metacols)
+        fast = fitsio.read(fastfile, 'FASTSPEC', columns=fastcols)
+    
+        # select a parent sample
+        rows = np.where(np.logical_or(meta['PROGRAM'] == 'dark', meta['PROGRAM'] == 'bright') *
+                        (meta['SURVEY'] == 'sv3') * (meta['ZWARN'] == 0) * 
+                        (meta['DELTACHI2'] > 40) * (meta['SPECTYPE'] != 'QSO') *
+                        (meta['COADD_FIBERSTATUS'] == 0) * (meta['SV3_SCND_TARGET'] == 0) *
+                        (meta['FLUX_G'] > 0) * (meta['FLUX_R'] > 0) * (meta['FLUX_Z'] > 0) * 
+                        (fast['RCHI2'] < 10) * (fast['APERCORR'] > 1) * (fast['APERCORR'] < 3) * 
+                        (meta['Z'] > 0.05) * (meta['Z'] < 1.6))[0]
+        rows = rows[np.argsort(rows)]
+        print('Selecting a parent sample of {} objects'.format(len(rows)))
+        
+        meta = Table(fitsio.read(fastfile, 'METADATA', rows=rows))
+        add_bitnames(meta)
+    
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+        print('Parent selection:')
+        for target in ['BGS', 'ELG', 'LRG']:
+            #I = meta['TARGETCLASS'] == target
+            I = np.isin(meta['TARGETCLASS'], target)
+            print(target, np.sum(I))
+            ax1.scatter(meta['Z'][I], 22.5-2.5*np.log10(meta['FLUX_R'][I]), 
+                        s=10, marker='s', label=target, alpha=0.5)
+    
+        print('Refined selection:')
+        S, targetclass = [], []
+        for target in ['BGS', 'ELG', 'LRG']:
+            if target == 'BGS':
+                J = ((meta['TARGETCLASS'] == 'BGS') * (meta['FLUX_R'] > 10**(0.4*(22.5-20))) *
+                     (meta['Z'] < 0.7))
+    
+            elif target == 'ELG':
+                J = (np.isin(meta['TARGETCLASS'], 'ELG') * (meta['FLUX_R'] > 10**(0.4*(22.5-24))) *
+                     (meta['Z'] > 0.6) * (meta['Z'] < 1.5))
+            elif target == 'LRG':
+                J = ((meta['TARGETCLASS'] == 'LRG') * (meta['FLUX_R'] > 10**(0.4*(22.5-24))) *
+                     (meta['Z'] > 0.2) * (meta['Z'] < 1.5))
+            else:
+                J = None
+    
+            if J is not None:
+                print(target, np.sum(J))
+                J = np.where(J)[0]
+                S.append(J)
+                targetclass.append([target] * len(J))
+                ax2.scatter(meta['Z'][J], 22.5-2.5*np.log10(meta['FLUX_R'][J]), 
+                            s=10, marker='s', label=target, alpha=0.5)
+    
+        # select a subset of the refined sample
+        S = np.hstack(S)
+        targetclass = np.hstack(targetclass)
+        _, uindx = np.unique(S, return_index=True)
+        S = S[uindx]
+        targetclass = targetclass[uindx]
+        print('Refined sample: N={}'.format(len(S)))
+    
+        #rows = rows[S]
+        rand = np.random.RandomState(seed=1)
+        R = [] # final index
+        for target in ['BGS', 'ELG', 'LRG']:
+            T = np.where(targetclass == target)[0]
+            size = int(0.1*len(T))
+            if size > ntemp:
+                size = ntemp
+            C = rand.choice(len(T), size=size, replace=False)
+            print(target, len(C))
+            R.append(T[C])
+    
+            ax3.scatter(meta['Z'][S][T][C], 22.5-2.5*np.log10(meta['FLUX_R'][S][T][C]), 
+                        s=20, marker='s', label=target, alpha=0.5)
+    
+        for ax in [ax1, ax2, ax3]:
+            ax.set_ylim(14, 25)
+            ax.set_ylabel('r (AB mag)')
+            ax.set_xscale('log')
+        ax3.legend(markerscale=2, prop={'size': 12})
+        ax3.set_xlabel('Redshift')
+    
+        fig.subplots_adjust(bottom=0.1, right=0.95, left=0.15, top=0.95, hspace=0.07)
+        fig.savefig(outdir+f'/{specprod}-{version}-parent.png')
+ 
+        #R = np.hstack(R)
+        #ngal = len(R)
+        
+        # loop on each sample
+        for oneclass, indx in zip(['BGS', 'ELG', 'LRG'], R):
+            finalfast, finalmeta, coadd_type, _ = read_fastspecfit(fastfile, rows=rows[S][indx])
+    
+            outfile = outdir+f'/{specprod}-{version}-{oneclass}.fits'
+            #write_fastspecfit(finalfast, finalmeta, outfile=outfile, 
+            #                  specprod=specprod, coadd_type=coadd_type)
+ 
+            # build the rest-frame templates
+            restframe_templates(finalfast, finalmeta, outfile)
+
+
+    if args.lae_templates:
+        # see fastspecfit-projects/tertiary/fastspecfit-tertiary
+        fastfile = os.path.join(tertiarydir, 'fastspec-vi-tertiary26.fits')
+        fast, meta, _, _ = read_fastspecfit(fastfile)
+
+        # one galaxy has all zero coefficients
+        I = np.sum(fast['COEFF'].data, axis=1) > 0
+
+        outfile = outdir+'/fastspec-vi-tertiary26-templates.fits'
+        restframe_templates(fast[I], meta[I], outfile)
+
+
+    if args.nmf_templates:
+        # read the basis templates
+        templatewave = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'WAVE')
+
+        templateflux = []
+        templateflux.append(fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'FLUX'))
+        for oneclass in ['BGS', 'ELG', 'LRG']:
+            templateflux.append(fitsio.read(outdir+f'/{specprod}-{version}-{oneclass}.fits', 'FLUX'))
+        templateflux = np.vstack(templateflux) # [ngal, npix]
+
+        #T = np.where(templatewave < 6e4)[0]
+        #templatewave = templatewave[T]
+        #templateflux = templateflux[T, :]
+
+        dw = 0.5
+        wave = np.arange(550., 1e4, dw)
+        npix = len(wave)
+        ngal = templateflux.shape[0]
+
+        flux = np.zeros((ngal, npix))
+        for igal in range(ngal):
+            flux[igal, :] = np.interp(wave, templatewave, templateflux[igal, :])
+
+        ncomp = 10
+        g = nmf.NMF(flux, n_components=ncomp) # input matrix should be [ngal, npix]
+        chi2, time_used = g.SolveNMF(maxiters=1000, tol=1e-3)
+        
+        nmf_eigenvec = g.H # [nc, npix]
+        nmf_eigencoeff = g.W # [ngal, nc]
+        nmf_model = nmf_eigencoeff.dot(nmf_eigenvec) # [ngal, npix]
+
+        header = fits.Header()
+        header['CRVAL1'] = (wave[0], 'restframe starting wavelength [Angstroms]')
+        header['CDELT1'] = dw
+        header['RRTYPE']   = 'GALAXY'
+        header['RRSUBTYP'] = ''
+        header['RRVER'] = 'ver' # redrock.__version__
+        header['VERSION'] = ('TBD', 'Template version')
+        #header['INSPEC'] = os.environ['DESI_BASIS_TEMPLATES']
+        #header['SEED'] = opts.seed
+        header['EXTNAME'] = 'BASIS_VECTORS'
+        
+        hdus = fits.HDUList()
+        hdus.append(fits.PrimaryHDU(nmf_eigenvec, header=header))
+        hdus.append(fits.ImageHDU(nmf_eigencoeff, name='ARCHETYPE_COEFF'))
+        
+        hdus.writeto(nmf_outfile, overwrite=True)
+        print(f'Wrote {nmf_outfile}')
+
+
+    if args.template_qa:
+        hdr = fitsio.read_header(nmf_outfile, ext='BASIS_VECTORS')
+        ncomp = hdr['NAXIS2']
+        wave = np.arange(hdr['NAXIS1']) * hdr['CDELT1'] + hdr['CRVAL1']
+
+        nmf_eigenvec = fitsio.read(nmf_outfile, ext='BASIS_VECTORS')     # H matrix
+        nmf_eigencoeff = fitsio.read(nmf_outfile, ext='ARCHETYPE_COEFF') # W matrix
+
+        nmf_model = nmf_eigencoeff.dot(nmf_eigenvec) # [ngal, npix]
+
+        if True:
+            # read the basis templates
+            templatewave = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'WAVE')
+            templateflux = []
+            templateflux.append(fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'FLUX'))
+            for oneclass in ['BGS', 'ELG', 'LRG']:
+                templateflux.append(fitsio.read(outdir+f'/{specprod}-{version}-{oneclass}.fits', 'FLUX'))
+            templateflux = np.vstack(templateflux) # [ngal, npix]
+
+            wmin, wmax = 3500, 5500 # 6500, 6600
+            I = np.where((wave > wmin) * (wave < wmax))[0]
+            J = np.where((templatewave > wmin) * (templatewave < wmax))[0]
+
+            pngfile = outdir+'/rrtemplate-nmf-galaxy-models.png'
+            fig, ax = plt.subplots(10, 1, figsize=(6, 20), sharex=True)
+
+            for ii in range(10):
+                ax[ii].plot(templatewave[J], templateflux[ii, J], label='Data', lw=2)
+                ax[ii].plot(wave[I], nmf_model[ii, I], alpha=0.5, label='NMF')
+                ax[ii].legend()
+                ax[ii].set_ylim(0, np.max((np.max(nmf_model[ii, I]), np.max(templateflux[ii, J]))))
+            fig.tight_layout()
+            fig.savefig(pngfile)
+            print(f'Wrote {pngfile}')
+
+        pdb.set_trace()
+
+        pngfile = outdir+'/rrtemplate-nmf-galaxy.png'
+
+        I = np.where((wave > 1000) * (wave < 6e4))[0]
+
+        fig, ax = plt.subplots()#figsize=(8, 5))
+        for ic in range(ncomp):
+            #I = np.where(nmf_eigenvec[ic, :] > 0)[0]
+            ax.plot(wave[I], nmf_eigenvec[ic, I] + ic)
+        ax.set_ylim(-1, 15)
+        ax.margins(x=0)
+        #ax.set_yscale('log')
+        fig.savefig(pngfile)
+        print(f'Wrote {pngfile}')
+
+
+if __name__ == '__main__':
+    main()
+
