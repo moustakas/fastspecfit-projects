@@ -360,6 +360,9 @@ def main():
 
 
     if args.template_qa:
+        
+        # NMF templates
+
         hdr = fitsio.read_header(nmf_outfile, ext='BASIS_VECTORS')
         ncomp = hdr['NAXIS2']
         wave = np.arange(hdr['NAXIS1']) * hdr['CDELT1'] + hdr['CRVAL1']
@@ -369,7 +372,7 @@ def main():
 
         nmf_model = nmf_eigencoeff.dot(nmf_eigenvec) # [ngal, npix]
 
-        if True:
+        if False:
             # read the basis templates
             templatewave = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'WAVE')
             templateflux = []
@@ -394,21 +397,82 @@ def main():
             fig.savefig(pngfile)
             print(f'Wrote {pngfile}')
 
-        pdb.set_trace()
-
         pngfile = outdir+'/rrtemplate-nmf-galaxy.png'
 
-        I = np.where((wave > 1000) * (wave < 6e4))[0]
+        from speclite import filters
+        filt = filters.load_filters('decam2014-g', 'decam2014-r')
+        padflux, padwave = filt.pad_spectrum(nmf_eigenvec, wave, axis=0, method='edge')
+        mags = filt.get_ab_magnitudes(padflux, padwave) # speclite.filters wants an [nmodel,npix] array
+        gr = mags['decam2014-g'] - mags['decam2014-r']
+        srt = np.argsort(gr)
 
         fig, ax = plt.subplots()#figsize=(8, 5))
-        for ic in range(ncomp):
+        I = np.where((wave > 0.5) * (wave < 6e4))[0]
+        for ii, ic in enumerate(srt):
             #I = np.where(nmf_eigenvec[ic, :] > 0)[0]
-            ax.plot(wave[I], nmf_eigenvec[ic, I] + ic)
+            ax.plot(wave[I]/1e4, nmf_eigenvec[ic, I] + ii)
         ax.set_ylim(-1, 15)
+        ax.set_xlim(0.1, 1)
+        ax.set_yticklabels([])
+        ax.set_xlabel(r'Rest-frame Wavelength ($\mu$m)')
+        ax.set_ylabel(r'Normalized Flux (+offsets)')
         ax.margins(x=0)
         #ax.set_yscale('log')
+        fig.tight_layout()
         fig.savefig(pngfile)
         print(f'Wrote {pngfile}')
+
+
+        pdb.set_trace()
+
+
+        # 4-panel SED figure
+        templatewave = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'WAVE')
+
+        sns.set(context='talk', style='ticks', font_scale=0.6)#, rc=rc)
+        fig, ax = plt.subplots(2, 2, sharex=True, sharey=True)
+        for ii, (xx, oneclass) in enumerate(zip(ax.flat, ['BGS', 'LRG', 'ELG', ''])):
+            if ii == 3:
+                continue
+            flux = fitsio.read(outdir+f'/{specprod}-{version}-{oneclass}.fits', 'FLUX')
+            meta = fitsio.read(outdir+f'/{specprod}-{version}-{oneclass}.fits', 'METADATA')
+            #print(oneclass, np.median(meta['Z']))
+            for igal in range(flux.shape[0]):
+                xx.plot(templatewave/1e4, templatewave * flux[igal, :], alpha=0.5)
+            xx.text(0.1, 0.85, f'{oneclass}', ha='left', va='center', transform=xx.transAxes)
+            xx.text(0.92, 0.15, r'$\langle z\rangle={:.2f}$'.format(np.median(meta['Z'])), 
+                    ha='right', va='center', transform=xx.transAxes)
+
+            #inset = fig.add_axes([0.66, 0.6, 0.25, 0.27])
+            #inset.hist(meta['Z'], density=True, bins=100)
+                
+        flux = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'FLUX')
+        meta = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'METADATA')
+        #print('LAE', np.median(meta['Z']))
+        for igal in range(flux.shape[0]):
+            ax[1, 1].plot(templatewave/1e4, templatewave * flux[igal, :], alpha=0.5)
+        xx = ax[1, 1]
+        xx.text(0.1, 0.85, 'LAE', ha='left', va='center', transform=xx.transAxes)
+        xx.text(0.92, 0.15, r'$\langle z\rangle={:.2f}$'.format(np.median(meta['Z'])), 
+                ha='right', va='center', transform=xx.transAxes)
+        #inset = fig.add_axes([0.66, 0.6, 0.25, 0.27])
+        #inset.hist(meta['Z'], density=True, bins=100)
+
+        for xx in (ax[0, 0], ax[1, 0]):
+            xx.set_ylabel(r'Normalized $\lambda F_{\lambda}$')
+        for xx in (ax[1, 0], ax[1, 1]):
+            xx.set_xlabel(r'Rest-frame Wavelength ($\mu$m)')
+        for xx in ax.flat:
+            xx.set_xscale('log')
+            xx.set_yscale('log')
+            xx.set_ylim(1e-8, 1e7)
+            xx.xaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: '{:g}'.format(y)))
+            xx.margins(0)
+        fig.tight_layout()
+        pngfile = outdir+f'/nmf-parent-templates.png'
+        fig.savefig(pngfile)
+        print(f'Wrote {pngfile}')
+
 
 
 if __name__ == '__main__':
