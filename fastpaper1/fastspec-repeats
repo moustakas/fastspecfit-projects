@@ -1,0 +1,81 @@
+#!/usr/bin/env python
+
+"""Fit Fuji repeat observations to address
+https://github.com/desihub/fastspecfit/issues/127
+
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fastspec-repeats --build-parent
+
+"""
+import os, pdb
+import numpy as np
+import fitsio
+from astropy.table import Table, join
+from desitarget.sv3.sv3_targetmask import bgs_mask
+
+def main():
+
+    import argparse    
+
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
+    parser.add_argument('--build-parent', action='store_true', help='Build the parent sample.')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')
+    args = parser.parse_args()
+
+    paperdir = '/global/cfs/cdirs/desicollab/users/ioannis/fastspecfit/fastpaper1'
+    repeatsdir = paperdir+'/repeats'
+    if not os.path.isdir(repeatsdir):
+        os.makedirs(repeatsdir, exist_ok=True)
+
+    repeatsfile = repeatsdir+'/repeats-parent.fits'
+
+    survey = 'sv3'
+    program = 'bright'
+    specprod = 'fuji'
+
+    if args.build_parent:
+        # build the parent sample
+        
+        zcatfile = f'/global/cfs/cdirs/desi/spectro/redux/{specprod}/zcatalog/ztile-{survey}-{program}-perexp.fits'
+        #nspec = fitsio.read(zcatfile, columns='ZCAT_NSPEC')
+        zcat = Table(fitsio.read(zcatfile, columns=['TARGETID', 'NIGHT', 'EXPID', 'TILEID', 'PETAL_LOC', 'SPECTYPE', 'Z',
+                                                    'TARGET_RA', 'TARGET_DEC', 'ZCAT_NSPEC', 'ZCAT_PRIMARY', 'SV3_BGS_TARGET']))
+        I = (zcat['ZCAT_NSPEC'] > 1) * (zcat['SV3_BGS_TARGET'] & bgs_mask.BGS_BRIGHT != 0)
+        #I = (zcat['ZCAT_NSPEC'] > 1) * (zcat['SPECTYPE'] == 'GALAXY')
+        #I = (zcat['ZCAT_NSPEC'] > 1) * (zcat['ZCAT_PRIMARY'] == 1) * (zcat['SPECTYPE'] == 'GALAXY')
+        zcat = zcat[I]
+
+        fastfile = f'/global/cfs/cdirs/desi/spectro/fastspecfit/{specprod}/catalogs/fastspec-{specprod}.fits'
+        fast = Table(fitsio.read(fastfile, columns=['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX']))
+        #fast = fitsio.read(fastfile, columns=['SURVEY', 'PROGRAM'])
+        I = (fast['SURVEY'] == survey) * (fast['PROGRAM'] == program)
+        fast = fast[I]
+
+        repeats = join(zcat, fast, keys='TARGETID')
+        #print(out[out['ZCAT_NSPEC'].argmax()])
+        print('Writing {:,d} repeats of {:,d} unique galaxies to {}'.format(
+            len(repeats), len(np.unique(repeats['TARGETID'])), repeatsfile))
+
+        repeats.write(repeatsfile, overwrite=True)
+
+    cat = Table(fitsio.read(repeatsfile))
+    redrockfiles = []
+    for tileid in set(cat['TILEID']):
+        I = np.where(tileid == cat['TILEID'])[0]
+        for expid in set(cat['EXPID'][I]):
+            J = np.where(expid == cat['EXPID'][I])[0]
+            for petal in set(cat['PETAL_LOC'][I][J]):
+                K = np.where(petal == cat['PETAL_LOC'][I][J])[0]
+                sexpid = '{:08d}'.format(expid)
+                redrockfile = os.getenv('DESI_ROOT')+f'/spectro/redux/{specprod}/tiles/perexp/{tileid}/{sexpid}/redrock-{petal}-{tileid}-exp{sexpid}.fits'
+                if not os.path.isfile(redrockfile):
+                    print(f'Problem with {redrockfile}!')
+                redrockfiles.append(redrockfile)
+
+    redrockfiles = sorted(set(redrockfiles))
+        
+    pdb.set_trace()
+
+if __name__ == '__main__':
+   main()
+

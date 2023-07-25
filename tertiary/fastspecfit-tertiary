@@ -119,12 +119,14 @@ def main():
             else:
                 print(f'Output file {mergefile} exists; use --overwrite to, well, overwrite.')
         elif args.makeqa:
-            outdir = os.path.join(args.outdir, tertiary, f'{prefix}vi', 'qa')
+            qadir = os.path.join(args.outdir, tertiary, f'{prefix}vi', 'qa')
+            if not os.path.isdir(qadir):
+                os.makedirs(qadir, exist_ok=True)
             fastfiles = glob(os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-?????.fits*'))
             for fastfile in fastfiles:#[0:1]:
                 healpix = os.path.basename(fastfile).split('-')[2].split('.')[0]
                 redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
-                cmd = f'fastspecfit-qa {fastfile} -o {outdir} --redrockfiles {redrockfile} --mp {args.mp} '
+                cmd = f'fastspecfit-qa {fastfile} -o {qadir} --redrockfiles {redrockfile} --mp {args.mp} '
                 cmd += f'--fphotodir {fphotodir} --fphotoinfo {fphotoinfo} --maxphotwave {maxphotwave} '
                 cmd += f'--emline_snrmin 1.0 --nsmoothspec 2'
                 if args.ntargets:
@@ -205,20 +207,24 @@ def main():
         else:
             print(f'Output file {mergefile} exists; use --overwrite to, well, overwrite.')
     elif args.makeqa:
-        outdir = os.path.join(args.outdir, tertiary, f'{fcmd}')
+        qadir = os.path.join(args.outdir, tertiary, f'{fcmd}', 'qa')
+        if not os.path.isdir(qadir):
+            os.makedirs(qadir, exist_ok=True)
         fastfiles = glob(os.path.join(args.outdir, tertiary, f'{fcmd}', f'{prefix}?????.fits*'))
         for fastfile in fastfiles:
             healpix = os.path.basename(fastfile).split('-')[1].split('.')[0]
             redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
-            cmd = f'fastspecfit-qa {fastfile} -o {outdir} --redrockfiles {redrockfile} --mp {args.mp} '
-            cmd += '--fphotodir {fphotodir} --fphotoinfo {fphotoinfo} --maxphotwave {maxphotwave}'
+            cmd = f'fastspecfit-qa {fastfile} -o {qadir} --redrockfiles {redrockfile} --mp {args.mp} '
+            cmd += f'--fphotodir {fphotodir} --fphotoinfo {fphotoinfo} --maxphotwave {maxphotwave}'
+            if args.ntargets:
+                cmd += f' --ntargets {args.ntargets}'
             if args.overwrite:
                 cmd += ' --overwrite'
             print(cmd)
             err = subprocess.call(cmd.split())
     elif args.redrock:
         outdir = os.path.join(args.outdir, tertiary)
-        print('Hack -- just refitting a small subset of objects!')
+        #print('Hack -- just refitting a small subset of objects!')
         #mergefile = os.path.join(outdir, 'fastspec-vi-tertiary26.fits')
         #mm = Table(fitsio.read(mergefile, 'METADATA'))
         mergefile = os.path.join(outdir, 'VI_dey_Subaru.fits.gz')
@@ -236,7 +242,6 @@ def main():
             cmd = f'rrdesi -i {coaddfile} -o {redrockfile} --targetids {targetids} --mp {args.mp}'
             print(cmd)
             err = subprocess.call(cmd.split())            
-
     elif args.makehtml:
         raise NotImplementedError
     else:
