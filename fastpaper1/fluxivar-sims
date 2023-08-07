@@ -217,7 +217,7 @@ def sims(sim_number=1, niter=100):
                     txt = '\n'.join(txt)
                     ax.text(0.02, 0.95, txt, transform=ax.transAxes, ha='left', va='top', fontsize=11)
                 
-                    txt = 'Amp(true) = {:.0f}\nF(true)={:.3f}\n$\sigma(true)={:.0f}$ km/s'.format(
+                    txt = 'Amp(true) = {:.0f}\nF(true)={:.3f}\n$\sigma_{{\mathrm{{line}}}}={:.0f}$ km/s'.format(
                         res['TRUEAMP'][iline], res['TRUEFLUX'][iline], res['TRUESIGMA'][iline])
                     ax.text(0.95, 0.95, txt, transform=ax.transAxes, ha='right', va='top', fontsize=11)
                 
@@ -417,8 +417,8 @@ def qa_snr():
               data_kwargs={'color': colors[3], 'alpha': 0.5, 'ms': 5})
     ax2.set_xlim(xlim)
     ax2.set_ylim(ylim)
-    ax2.set_xlabel(r'$\log_{10}$ Amp / $\sigma(\mathrm{Amp})$')
-    ax2.set_ylabel(r'$\sigma$F(Box) / $\sigma$F(Gauss)')
+    ax2.set_xlabel(r'$\log_{10}$ Amp / $\sigma_{\mathrm{Amp}}$')
+    ax2.set_ylabel(r'$\sigma_{F(\mathrm{Box})}$ / $\sigma_{F(\mathrm{Gauss})}$')
 
     #col = colors[3]
     #xlim = [-15, +15]
@@ -462,5 +462,5 @@ if __name__ == '__main__':
         sims(sim_number=2, niter=5000)
 
     if args.qa:
-        #qa_sims()
+        qa_sims()
         qa_snr()
