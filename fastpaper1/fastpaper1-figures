@@ -1,0 +1,281 @@
+#!/usr/bin/env python
+
+"""Figures for FastSpecFit paper 1.
+
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures
+
+"""
+import os, pdb
+import numpy as np
+import fitsio
+from astropy.table import Table, vstack
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+
+paperdir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'fastpaper1')
+figdir = os.path.join(paperdir, 'figures')
+datadir = os.path.join(paperdir, 'data')
+
+@ticker.FuncFormatter
+def major_formatter(x, pos):
+    if x >= 0:
+        return '{:.0f}'.format(10**x)
+    else:
+        return '{:.1f}'.format(10**x)
+
+def plot_style(font_scale=1.2, paper=False, talk=True):
+
+    import seaborn as sns
+    rc = {'font.family': 'serif'}#, 'text.usetex': True}
+    #rc = {'font.family': 'serif', 'text.usetex': True,
+    #       'text.latex.preamble': r'\boldmath'})
+    palette, context = 'Set2', 'talk'
+    
+    if paper:
+        context = 'paper'
+        palette = 'deep'
+        rc.update({'text.usetex': False})
+    
+    if talk:
+        context = 'talk'
+        palette = 'deep'
+        #rc.update({'text.usetex': True})
+
+    sns.set(context=context, style='ticks', font_scale=font_scale, rc=rc)
+    sns.set_palette(palette, 12)
+
+    colors = sns.color_palette()
+    #sns.reset_orig()
+
+    return sns, colors
+
+def fig_broadline(png=None):
+
+    import corner as cn
+    from fastspecfit.io import read_fastspecfit
+    from fastspecfit.io import write_fastspecfit
+
+    sns, colors = plot_style(talk=True, font_scale=0.8)
+
+    # build / read the sample
+    ragafile = os.path.join(datadir, 'lowmass-blcandidates.fits')
+    raga = Table(fitsio.read(ragafile, ext=1, upper=True)) # from Raga
+    raga = raga[(raga['SURVEY'] == 'sv1')*(raga['PROGRAM'] == 'bright')]
+    print('Read {} objects from {}'.format(len(raga), ragafile))
+
+    fastfile = os.path.join(datadir, 'fastspec-fuji-lowmass-blcandidates.fits')
+    if os.path.isfile(fastfile):
+        fast, meta, _, _ = read_fastspecfit(fastfile)
+    else:
+        fast, meta = [], []
+        for survey in set(raga['SURVEY']):
+            J = np.where(survey == raga['SURVEY'])[0]
+            for program in set(raga['PROGRAM'][J]):
+                K = np.where(program == raga['PROGRAM'][J])[0]
+
+                survey = survey.strip()
+                program = program.strip()
+
+                fastfile1 = '/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/'+f'fastspec-fuji-{survey}-{program}.fits'
+                #fastfile1 = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', 'fuji', 'catalogs', f'fastspec-fuji-{survey}-{program}.fits')
+                targetids = fitsio.read(fastfile1, ext='METADATA', columns='TARGETID')
+                I = np.where(np.isin(targetids, raga[J][K]['TARGETID']))[0]
+                
+                fast1, meta1, _, _ = read_fastspecfit(fastfile1, rows=I)
+                fast.append(fast1)
+                meta.append(meta1)
+
+        fast = vstack(fast)
+        meta = vstack(meta)
+
+        I = np.hstack([np.where(meta['TARGETID'] == tid)[0] for tid in raga['TARGETID']])
+        fast = fast[I]
+        meta = meta[I]
+        assert(np.all(meta['TARGETID'] == raga['TARGETID']))
+
+        write_fastspecfit(fast, meta, outfile=fastfile)
+
+    I = fast['HALPHA_BROAD_SIGMA'] > 0
+    print(fast['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'HALPHA_AMP', 'HALPHA_BROAD_AMP', 'HALPHA_SIGMA', 'HALPHA_BROAD_SIGMA'][I])
+    print(raga['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'HA_N_AMPLITUDE', 'HA_B_AMPLITUDE', 'HA_N_SIGMA_FITS', 'HA_B_SIGMA_FITS'][I])
+    
+    pdb.set_trace()
+
+
+def fig_vdisp(png=None):
+
+    import corner as cn
+    from fastspecfit.io import read_fastspecfit
+    from fastspecfit.io import write_fastspecfit
+
+    sns, colors = plot_style(talk=True, font_scale=0.8)
+
+    # build / read the sample
+    fpfile = os.path.join(datadir, 'fuji_FP.fits')
+    fp = Table(fitsio.read(fpfile, ext=1, upper=True)) # from Khaled
+    print('Read {} from {}'.format(len(fp), fpfile))
+
+    fastfile = os.path.join(datadir, 'fastspec-fuji_FP.fits')
+    if os.path.isfile(fastfile):
+        fast, meta, _, _ = read_fastspecfit(fastfile)
+    else:
+        fast, meta = [], []
+        for survey in set(fp['SURVEY']):
+            J = np.where(survey == fp['SURVEY'])[0]
+            for program in set(fp['PROGRAM'][J]):
+                K = np.where(program == fp['PROGRAM'][J])[0]
+
+                survey = survey.strip()
+                program = program.strip()
+
+                fastfile1 = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', 'fuji', 'catalogs', f'fastspec-fuji-{survey}-{program}.fits')
+                targetids = fitsio.read(fastfile1, ext='METADATA', columns='TARGETID')
+                I = np.where(np.isin(targetids, fp[J][K]['TARGETID']))[0]
+                
+                fast1, meta1, _, _ = read_fastspecfit(fastfile1, rows=I)
+                fast.append(fast1)
+                meta.append(meta1)
+
+        fast = vstack(fast)
+        meta = vstack(meta)
+
+        I = np.hstack([np.where(meta['TARGETID'] == tid)[0] for tid in fp['TARGETID']])
+        fast = fast[I]
+        meta = meta[I]
+        assert(np.all(meta['TARGETID'] == fp['TARGETID']))
+
+        write_fastspecfit(fast, meta, outfile=fastfile)
+
+    I = np.where((fast['VDISP'] != 125.) * (fp['PPXF_SIGMA'] / fp['PPXF_SIGMA_ERROR'] > 2))[0]
+    #I = np.where(fast['VDISP'] != 125.)[0]
+    print(len(fast), len(I))
+    #I = np.arange(len(fast))
+    fast['VDISP_ERR'] = np.zeros(len(fast), 'f4') + 100
+    fast['VDISP_ERR'][I] = 1 / np.sqrt(fast['VDISP_IVAR'][I])
+
+    # make the plot
+    vdisplim = np.array([75, 325])
+    redlim = [0.0, 0.22]
+    snrlim = np.log10([1, 150])
+    mstarlim = [9.5, 12]
+    residlim = np.array([-120, 120])
+
+    col = colors[0]
+    levels = [0.5, 0.75, 0.95]
+    contour_kwargs = {'colors': col, 'alpha': 0.5}
+    data_kwargs = {'color': col, 'alpha': 0.5, 'ms': 4}
+    smooth = 1.5
+
+    vresid = fast['VDISP'][I] - fp['PPXF_SIGMA'][I]
+    pdb.set_trace()
+    
+    #fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 10))
+    fig = plt.figure(figsize=(8, 8))
+    gs = fig.add_gridspec(nrows=2, ncols=3, height_ratios=[1, 0.4], width_ratios=[0.5, 0.5, 0.5])
+
+    #from sklearn import linear_model
+    #ransac = linear_model.RANSACRegressor()
+    #ransac.fit((fp['PPXF_SIGMA'][I].data-vdispoff).reshape(len(I), 1), fast['VDISP'][I].data)
+
+    npix = 100
+    vdispoff = 200. # [km/s]
+    vdispaxis = np.linspace(vdisplim[0], vdisplim[1], npix)
+
+    import statsmodels.api as sm
+    rlm = sm.RLM(fast['VDISP'][I].data, sm.add_constant(fp['PPXF_SIGMA'][I].data-vdispoff)).fit()
+
+    #vdispmodel = ransac.predict((vdispaxis-vdispoff).reshape(npix, 1))
+    #vcoeff = np.hstack([ransac.estimator_.coef_, ransac.estimator_.intercept_])
+    vcoeff = [rlm.params[1], rlm.params[0]]
+    vdispmodel = np.polyval(vcoeff, vdispaxis-vdispoff)
+
+    #vcoeff = np.polyfit(fp['PPXF_SIGMA'][I], fast['VDISP'][I], 1)
+    print(vcoeff)
+
+    bigax = fig.add_subplot(gs[0, :]) # rows x cols
+
+    cn.hist2d(fp['PPXF_SIGMA'][I], fast['VDISP'][I],
+              bins=100, color=col, smooth=smooth, levels=levels,
+              range=[vdisplim, vdisplim], ax=bigax, contour_kwargs=contour_kwargs,
+              data_kwargs=data_kwargs)
+    #bigax.errorbar(fp['PPXF_SIGMA'][I], fast['VDISP'][I], xerr=fp['PPXF_SIGMA_ERROR'][I],
+    #               yerr=fast['VDISP_ERR'][I], fmt='s', color=colors[1], ecolor=colors[1], 
+    #               markersize=1, capthick=2, capsize=1, alpha=0.2)
+    txt = r'$\sigma_{{\mathrm{{fastspec}}}} = {:.3f}(\sigma_{{\mathrm{{pPXF}}}}-200) + {:.0f}$ km/s'.format(vcoeff[0], vcoeff[1])
+    bigax.plot(vdispaxis, vdispmodel, lw=2, ls='--', color='k', label=txt)
+    #bigax.plot(vdispaxis, np.polyval(vcoeff, vdispaxis), lw=2, ls='--', color='k')
+    #bigax.scatter(fp['PPXF_SIGMA'][I], fast['VDISP'][I], s=1)
+    bigax.plot(vdisplim, vdisplim, color='k', ls='-', alpha=0.6)
+    #bigax.plot(vdisplim, vdisplim+10, color='k', ls='--', alpha=0.6)
+    bigax.set_xlim(vdisplim)
+    bigax.set_ylim(vdisplim)
+    bigax.legend(loc='lower right', frameon=False, fontsize=11)
+    bigax.set_xlabel(r'$\sigma$ [pPXF, km/s]')
+    bigax.set_ylabel(r'$\sigma$ [fastspec, km/s]')
+
+    ax1 = fig.add_subplot(gs[1, 0]) # rows x cols
+    cn.hist2d(fast['Z'][I], vresid, 
+              bins=100, color=col, smooth=smooth, levels=levels,
+              range=[redlim, residlim], ax=ax1,
+              contour_kwargs=contour_kwargs, data_kwargs=data_kwargs)
+    #ax1.scatter(fast['Z'][I], vresid, s=1)
+    ax1.axhline(y=0, color='k', ls='-')
+    ax1.set_xlim(redlim)
+    ax1.set_ylim(residlim)
+    ax1.set_ylabel(r'$\Delta\sigma$ (km/s)')
+    ax1.set_xlabel('Redshift')
+
+    ax2 = fig.add_subplot(gs[1, 1])
+    cn.hist2d(fast['LOGMSTAR'][I], vresid, 
+              bins=100, color=col, smooth=smooth, levels=levels,
+              range=[mstarlim, residlim], ax=ax2,
+              contour_kwargs=contour_kwargs, data_kwargs=data_kwargs)
+    #ax2.scatter(fast['LOGMSTAR'][I], vresid, s=1)
+    ax2.axhline(y=0, color='k', ls='-')
+    ax2.set_xlim(mstarlim)
+    ax2.set_ylim(residlim)
+    ax2.set_yticklabels([])
+    ax2.set_xlabel(r'$\log_{10} (M/M_{\odot})$')
+
+    ax3 = fig.add_subplot(gs[1, 2])
+    cn.hist2d(np.log10(fast['SNR_B'][I]), vresid, 
+              bins=100, color=col, smooth=smooth, levels=levels,
+              range=[snrlim, residlim], ax=ax3,
+              contour_kwargs=contour_kwargs, data_kwargs=data_kwargs)
+    #ax3.scatter(fast['SNR_B'][I], vresid, s=1)
+    ax3.axhline(y=0, color='k', ls='-')
+    #ax3.set_xscale('log')
+    ax3.xaxis.set_major_formatter(major_formatter)    
+    ax3.set_xlim(snrlim)
+    ax3.set_ylim(residlim)
+    ax3.set_yticklabels([])
+    ax3.set_xlabel(r'$S/N_{b}$ (pixel$^{-1}$)')
+
+    if png:
+        pngfile = os.path.join(figdir, png)
+        print('Writing {}'.format(pngfile))
+        #fig.subplots_adjust(bottom=0.15, right=0.85, top=0.95)
+        fig.tight_layout()
+        fig.savefig(pngfile)#, bbox_inches='tight')
+        plt.close(fig)
+
+def main():
+
+    import argparse    
+
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
+    parser.add_argument('--broadline', action='store_true', help='Compare with Ragas broad-line fitting.')
+    parser.add_argument('--vdisp', action='store_true', help='Velocity dispersion comparison.')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')
+    args = parser.parse_args()
+
+    if args.broadline:
+        fig_broadline(png='broadline.png')
+
+    if args.vdisp:
+        fig_vdisp(png='ppxf-vdisp.png')
+
+if __name__ == '__main__':
+   main()
+

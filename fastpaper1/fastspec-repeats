@@ -82,24 +82,30 @@ def main():
         cols = ['TARGETID', 'TILEID', 'LASTNIGHT', 'PETAL_LOC', 'Z', 'ZWARN', 'TARGET_RA',
                 'TARGET_DEC', 'ZCAT_NSPEC', 'ZCAT_PRIMARY', 'SV3_BGS_TARGET']
         cumulative_zcat = Table(fitsio.read(cumulative_zcatfile, 'ZCATALOG', columns=cols))            
-        I = np.where(cumulative_zcat['ZCAT_PRIMARY'] * (cumulative_zcat['Z'] > 1e-3) * (cumulative_zcat['ZWARN'] == 0) *
-                     (cumulative_zcat['ZCAT_NSPEC'] > 1) * (cumulative_zcat['SV3_BGS_TARGET'] & bgs_mask.BGS_BRIGHT != 0))[0]
+        I = np.where(cumulative_zcat['ZCAT_PRIMARY'] * (cumulative_zcat['Z'] > 1e-3) * (cumulative_zcat['Z'] < 0.5) *
+                     (cumulative_zcat['ZWARN'] == 0) * (cumulative_zcat['ZCAT_NSPEC'] > 2) *
+                     (cumulative_zcat['SV3_BGS_TARGET'] & bgs_mask.BGS_BRIGHT != 0))[0]
         cumulative_zcat = cumulative_zcat[I]
         #cumulative_zcat = cumulative_zcat[cumulative_zcat['ZCAT_NSPEC'] > 5]
         
-        cumulative_exp = Table(fitsio.read(cumulative_zcatfile, 'EXP_FIBERMAP', columns=['TARGETID', 'NIGHT', 'EXPID', 'TILEID', 'PETAL_LOC']))
-        
+        #cumulative_exp = Table(fitsio.read(cumulative_zcatfile, 'EXP_FIBERMAP', columns=['TARGETID', 'NIGHT', 'EXPID', 'TILEID', 'PETAL_LOC']))        
         #nspec = [np.sum(cumulative_exp['TARGETID'] == tid) for tid in cumulative_zcat['TARGETID']]
         #cumulative_zcat['NSPEC'] = int(nspec)
 
         perexp_zcatfile = f'/global/cfs/cdirs/desi/spectro/redux/{specprod}/zcatalog/ztile-{survey}-{program}-perexp.fits'
         cols = ['TARGETID', 'Z', 'ZWARN', 'NIGHT', 'EXPID', 'TILEID', 'PETAL_LOC']
         perexp_zcat = Table(fitsio.read(perexp_zcatfile, 'ZCATALOG', columns=cols))
+
+        # demand ZWARN==0 on the per-exposure; e.g., 39627745461799834 has 4
+        # exposures but three of them are bunk.
+        perexp_zcat = perexp_zcat[perexp_zcat['ZWARN'] == 0]
         perexp_zcat = perexp_zcat[np.isin(perexp_zcat['TARGETID'], cumulative_zcat['TARGETID'])]
-        
+
         nspec = [int(np.sum(perexp_zcat['TARGETID'] == tid)) for tid in cumulative_zcat['TARGETID']]
         cumulative_zcat['NSPEC'] = nspec
         assert(np.sum(nspec) == len(perexp_zcat))
+
+        pdb.set_trace()
 
         print('Writing {:,d} cumulative coadds to {}'.format(len(cumulative_zcat), parent_cumulative))
         cumulative_zcat.write(parent_cumulative, overwrite=True)
@@ -110,8 +116,7 @@ def main():
     if args.fastspec_cumulative:
         # multiprocess the cumulative coadds
         cumulative_zcat = Table(fitsio.read(parent_cumulative))
-        cumulative_zcat = cumulative_zcat[cumulative_zcat['NSPEC'] > 8]
-        pdb.set_trace()
+        #cumulative_zcat = cumulative_zcat[cumulative_zcat['NSPEC'] > 8]
 
         fitargs = []
         for tileid in np.unique(cumulative_zcat['TILEID']):
@@ -130,9 +135,12 @@ def main():
     if args.fastspec_perexp:
         # multiprocess the perexp coadds
         cumulative_zcat = Table(fitsio.read(parent_cumulative))
-        cumulative_zcat = cumulative_zcat[cumulative_zcat['NSPEC'] > 8]
         perexp_zcat = Table(fitsio.read(parent_perexp))
-        
+
+        ## temporary hack
+        #cumulative_zcat = cumulative_zcat[cumulative_zcat['NSPEC'] > 8]
+        #perexp_zcat = perexp_zcat[np.isin(perexp_zcat['TARGETID'], cumulative_zcat['TARGETID'])]
+
         for tileid in np.unique(perexp_zcat['TILEID']):
             I = np.where(tileid == perexp_zcat['TILEID'])[0]
             for expid in np.unique(perexp_zcat['EXPID'][I]):
@@ -173,28 +181,73 @@ def main():
     if args.merge:
         from fastspecfit.mpi import _domerge
 
-        cumulative_files = glob(repeatsdir+f'/{specprod}/tiles/cumulative/*/*/*.fits.gz')
-        _domerge(cumulative_files, mergefile=fastspec_cumulative, extname='FASTSPEC',
-                 specprod=specprod, coadd_type='cumulative', mp=args.mp)
-        
         perexp_files = glob(repeatsdir+f'/{specprod}/tiles/perexp/*/*/*.fits.gz')
         _domerge(perexp_files, mergefile=fastspec_perexp, extname='FASTSPEC',
                  specprod=specprod, coadd_type='perexp', mp=args.mp)
         
+        cumulative_files = glob(repeatsdir+f'/{specprod}/tiles/cumulative/*/*/*.fits.gz')
+        _domerge(cumulative_files, mergefile=fastspec_cumulative, extname='FASTSPEC',
+                 specprod=specprod, coadd_type='cumulative', mp=args.mp)
+
     if args.qa:
         from fastspecfit.io import read_fastspecfit
 
         cumulative_fast, cumulative_meta, _, _ = read_fastspecfit(fastspec_cumulative)
         perexp_fast, perexp_meta, _, _ = read_fastspecfit(fastspec_perexp)
 
-        stats = {'OIII_5007_EW': [], 'HALPHA_EW': [], 'DN4000': [], 'VDISP': []}
-        for gal in cumulative_fast:
-            I = np.where(gal['TARGETID'] == perexp_fast['TARGETID'])[0]
-            if len(I) == 0:
-                continue
-            for key in stats.keys():
-                stats[key].append((perexp_fast[I][key].data - gal[key]) * np.sqrt(gal[f'{key}_IVAR']))
+        I = np.isin(cumulative_meta['TARGETID'], perexp_meta['TARGETID'])
+        cumulative_meta = cumulative_meta[I]
+        cumulative_fast = cumulative_fast[I]
+
+        # some cleanup code - keep
+        
+        #cumulative_zcat = Table(fitsio.read(parent_cumulative))
+        #cumulative_zcat = cumulative_zcat[cumulative_zcat['NSPEC'] > 8]
+        #cumulative_meta['PETAL'] = cumulative_meta['FIBER'] // 500
+        #I = ~np.isin(cumulative_meta['TARGETID'], cumulative_zcat['TARGETID'])
+        #ff = []
+        #for petal, tile, night in zip(cumulative_meta['PETAL'][I], cumulative_meta['TILEID'][I], cumulative_meta['NIGHT'][I]):
+        #    ff.append(repeatsdir+f'/fuji/tiles/cumulative/{tile}/{night}/'+f'fastspec-{petal}-{tile}-thru{night}.fits.gz')
+        #ff = np.unique(ff)
+        #for f in ff:
+        #    if os.path.isfile(f):
+        #        os.remove(f)
+
+        #perexp_zcat = Table(fitsio.read(parent_perexp))
+        #perexp_meta['PETAL'] = perexp_meta['FIBER'] // 500
+        #I = ~np.isin(perexp_meta['TARGETID'], perexp_zcat['TARGETID'])
+        #ff = []
+        #for petal, tile, expid in zip(perexp_meta['PETAL'][I], perexp_meta['TILEID'][I], perexp_meta['EXPID'][I]):
+        #    sexpid = '{:08d}'.format(expid)
+        #    ff.append(repeatsdir+f'/fuji/tiles/perexp/{tile}/{sexpid}/'+f'fastspec-{petal}-{tile}-exp{sexpid}.fits.gz')
+        #ff = np.unique(ff)
+        #for f in ff:
+        #    if os.path.isfile(f):
+        #        os.remove(f)
+
+        ngal = len(cumulative_fast)
+        stats = Table()
+        stats['OIII_5007_EW'] = np.zeros(ngal, 'f4')
+        stats['HALPHA_EW'] = np.zeros(ngal, 'f4')
+        stats['OIII_5007_AMP'] = np.zeros(ngal, 'f4')
+        stats['HALPHA_AMP'] = np.zeros(ngal, 'f4')
+        stats['DN4000'] = np.zeros(ngal, 'f4')
+        stats['VDISP'] = np.zeros(ngal, 'f4')
             
+        for igal, gal in enumerate(cumulative_fast):
+            if igal % 100 == 0:
+                print(igal, len(cumulative_fast))
+            I = gal['TARGETID'] == perexp_fast['TARGETID']
+            if np.sum(I) > 1:
+                pdb.set_trace()
+                for col in stats.colnames:
+                    stats[col][igal] = (perexp_fast[I][col].data - gal[col]) * np.sqrt(gal[f'{col}_IVAR'])
+                pdb.set_trace()
+
+        #bb = np.hstack(stats['OIII_5007_EW'])
+        bb = np.hstack(stats['DN4000'])
+        plt.clf() ; _ = plt.hist(bb[I], bins=100, range=(-10, 10)) ; plt.savefig('desi-users/ioannis/tmp/junk.png')
+                
         pdb.set_trace()
 
 if __name__ == '__main__':
