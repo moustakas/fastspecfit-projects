@@ -173,7 +173,6 @@ def main():
             #I = np.hstack([np.where(phot['TARGETID'] == tid)[0] for tid in vi['TARGETID']])
             #phot = phot[I]
             #assert(np.all(phot['TARGETID'] == vi['TARGETID']))
-            #pdb.set_trace()
 
             #print('HACK! - just 1 healpix!')
             #for healpix in [27245]:#set(mm['HEALPIX']):#[:1]):
@@ -246,7 +245,8 @@ def main():
         raise NotImplementedError
     else:
         # fit!
-        redrockfiles = glob(os.path.join(datadir, 'redrock-?????.fits'))
+        redrockfiles = glob(os.path.join(datadir, 'redrock-27333.fits'))
+        #redrockfiles = glob(os.path.join(datadir, 'redrock-?????.fits'))
         for redrockfile in redrockfiles:
             fastfile = os.path.join(outdir, os.path.basename(redrockfile).replace('redrock-', prefix))
             if not args.fastphot:
@@ -260,6 +260,7 @@ def main():
                 if args.tertiary == '26':
                     cmd += ' --no-smooth-continuum --constrain-age'
                 print(cmd)
+                pdb.set_trace()
                 if args.nolog:
                     err = subprocess.call(cmd.split())
                 else:

@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 
-import os, sys, pdb
+"""Simulations to assess flux uncertainties.
+
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fluxivar-sims --sims --qa
+
+"""
+import os, pdb
 import numpy as np
 import fitsio
 from astropy.table import Table, vstack
@@ -75,7 +80,7 @@ def wave_edges(centers):
     edges = (a + b) / 2
     return edges
 
-def sims(sim_number=1, niter=100):
+def sims(sim_number=1, niter=100, snr=10):
     """
     sim_number 1 - one single line
     sim_number 2 - two blended lines
@@ -115,13 +120,15 @@ def sims(sim_number=1, niter=100):
         redshift=redshift)
 
     init_parameters = np.hstack([lineamps, linevshifts, linesigmas])
-    Ifree = np.arange(len(lineamps), dtype=int) # just amplitudes
+    #Ifree = np.arange(len(lineamps), dtype=int) # just amplitudes
+    Ifree = np.arange(len(init_parameters), dtype=int) # everything
 
     out = [] # results over iterations
     for iter in range(niter):
-        emlinesigma = np.random.normal(scale=np.ones_like(emlinewave))
+        emlinesigma = np.random.normal(scale=np.zeros_like(emlinewave) + lineamps[0] / snr)
         emlineflux = emlineflux_nonoise + emlinesigma
-        emlineivar = 1 / emlinesigma**2
+        emlineivar = 1 / (np.zeros_like(emlinewave) + lineamps[0] / snr)**2
+        #emlineivar = 1 / emlinesigma**2
 
         #fig, ax = plt.subplots()
         #ax.scatter(emlinewave, emlineflux)
@@ -159,9 +166,12 @@ def sims(sim_number=1, niter=100):
         res['BOXFLUX'] = np.zeros(nline, 'f4')
         res['BOXFLUX_ERR'] = np.zeros(nline, 'f4')
         #res['BOXFLUX_IVAR'] = np.zeros(nline, 'f4')
+        res['LINESIGMA'] = np.zeros(nline, 'f4')
+        res['LINEVSHIFT'] = np.zeros(nline, 'f4')
         res['TRUEFLUX'] = truefluxes.astype('f4')
         res['TRUEAMP'] = lineamps.astype('f4')
         res['TRUESIGMA'] = linesigmas.astype('f4')
+        res['TRUEVSHIFT'] = linevshifts.astype('f4')
 
         for iline, (lineamp, linevshift, linesigma, linewave) in enumerate(
                 zip(fit_lineamps, fit_linevshifts, fit_linesigmas, linewaves)):
@@ -185,10 +195,17 @@ def sims(sim_number=1, niter=100):
             linemodel = lineamp * np.exp(-0.5 * (linelog10wave-linez10wave)**2 / log10sigma**2)
             lineprofile = trapz_rebin(10**linelog10wave, linemodel, emlinewave)            
 
-            lineweight = np.sum(lineprofile[lineindx])**2
-            flux_ivar = lineweight / np.sum(lineprofile[lineindx]**2 / emlineivar[lineindx])
-
             amp_sigma = np.diff(np.percentile(emlineflux_nolines[lineindx], [25, 75]))[0] / 1.349 # robust sigma
+
+            if True:
+                lineweight = np.sum(lineprofile[lineindx])**2
+                flux_ivar = lineweight / np.sum(lineprofile[lineindx]**2 / emlineivar[lineindx])
+            else:
+                #flux_ivar = boxflux_ivar
+                flux_err = np.sqrt(2 * np.pi) * linezwave / C_LIGHT * np.sqrt((amp_sigma * linesigma)**2 + (lineamp*0.1*linesigma)**2)
+                flux_ivar = 1 / flux_err**2
+                
+            pdb.set_trace()
 
             res['AMP'][iline] = lineamp
             res['AMP_ERR'][iline] = amp_sigma
@@ -199,6 +216,8 @@ def sims(sim_number=1, niter=100):
             res['BOXFLUX'][iline] = boxflux
             res['BOXFLUX_ERR'][iline] = 1/np.sqrt(boxflux_ivar)
             #res['BOXFLUX_IVAR'][iline] = boxflux_ivar
+            res['LINESIGMA'][iline] = linesigma
+            res['LINEVSHIFT'][iline] = linevshift
 
             if iter == 0:
                 def lineplot(ax, ylabel=True):
@@ -213,12 +232,14 @@ def sims(sim_number=1, niter=100):
                     ax.axvline(x=linezwave+3*linesigma_ang, color='k', ls='--', alpha=0.5)
                     txt = ['Amp $= {:.3f}\pm{:.3f}$'.format(res['AMP'][iline], res['AMP_ERR'][iline]),
                            'F(Box) $= {:.3f}\pm{:.4f}$'.format(res['BOXFLUX'][iline], res['BOXFLUX_ERR'][iline]),
-                           'F(Gauss) $= {:.3f}\pm{:.4f}$'.format(res['FLUX'][iline], res['FLUX_ERR'][iline])]
+                           'F(Gauss) $= {:.3f}\pm{:.4f}$'.format(res['FLUX'][iline], res['FLUX_ERR'][iline]),
+                           '$\sigma_{\mathrm{line}}$ '+'$= {:.1f}$ km/s'.format(linesigma),
+                           '$\Delta v = {:.1f}$ km/s'.format(linevshift),
+                           ]
                     txt = '\n'.join(txt)
                     ax.text(0.02, 0.95, txt, transform=ax.transAxes, ha='left', va='top', fontsize=11)
                 
-                    txt = 'Amp(true) = {:.0f}\nF(true)={:.3f}\n$\sigma_{{\mathrm{{line}}}}={:.0f}$ km/s'.format(
-                        res['TRUEAMP'][iline], res['TRUEFLUX'][iline], res['TRUESIGMA'][iline])
+                    txt = 'Amp(true) = {:.0f}\nF(true)={:.3f}\n$\sigma_{{\mathrm{{line}}}}(\mathrm{{true}})={:.0f}$ km/s\n$\Delta v_{{\mathrm{{line}}}}(\mathrm{{true}})={:.0f}$ km/s'.format(res['TRUEAMP'][iline], res['TRUEFLUX'][iline], res['TRUESIGMA'][iline], res['TRUEVSHIFT'][iline])
                     ax.text(0.95, 0.95, txt, transform=ax.transAxes, ha='right', va='top', fontsize=11)
                 
                     ax.set_xlabel('Wavelength (Angstrom)')
@@ -243,6 +264,8 @@ def sims(sim_number=1, niter=100):
                         pngfile = os.path.join(datadir, 'fluxivar-sims', 'qa-realization-sim{:02d}.png'.format(sim_number))
                         print(f'Writing {pngfile}')
                         fig.savefig(pngfile)
+                        
+                #pdb.set_trace()
 
         out.append(res)
 
@@ -263,7 +286,9 @@ def qa_sims():
 
     sim2a = sim2[sim2['LINE'] == 0]
     sim2b = sim2[sim2['LINE'] == 1]
-
+    print(np.mean(sim1['LINESIGMA']), np.std(sim1['LINESIGMA']), np.mean(sim1['LINESIGMA'])/np.std(sim1['LINESIGMA']))
+    print(np.mean(sim1['LINEVSHIFT']), np.std(sim1['LINEVSHIFT']), np.mean(sim1['LINEVSHIFT'])/np.std(sim1['LINEVSHIFT']))
+    #pdb.set_trace()
     xlabel = 'pull = (x - x$_{true}$) / $\sigma$'
 
     xlim = np.array([-5, 5])
@@ -385,7 +410,7 @@ def qa_snr():
     #fig, ax1 = plt.subplots(1, 1, figsize=(7, 6))
 
     xlim = np.log10([3, 1e2])
-    ylim = np.log10([3, 2e3])
+    ylim = np.log10([3, 1e2])
 
     cn.hist2d(np.log10(sim1['AMP'] / sim1['AMP_ERR']), np.log10(sim1['FLUX'] / sim1['FLUX_ERR']),
               bins=100, color=colors[0], smooth=2, levels=[0.25, 0.5, 0.75, 0.95],
@@ -408,8 +433,9 @@ def qa_snr():
     ax1.set_ylabel(r'$\log_{10}$ (F / $\sigma$F)')
     #ax1.set_ylabel(r'F(Gauss) / $\sigma$F(Gauss)')
     #ax1.set_xlabel(r'$\log_{10}$ Amp / $\sigma(\mathrm{Amp})$')
+    ax1.margins(0)
 
-    ylim = [0, 30]
+    ylim = [-1, 2] # 0, 30]
     cn.hist2d(np.log10(sim1['AMP'] / sim1['AMP_ERR']), sim1['BOXFLUX_ERR'] / sim1['FLUX_ERR'],
               bins=100, color=colors[3], smooth=2, levels=[0.25, 0.5, 0.75, 0.95],
               range=[xlim, ylim], 
@@ -458,8 +484,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.sims:
-        sims(sim_number=1, niter=5000)
-        sims(sim_number=2, niter=5000)
+        sims(sim_number=1, niter=500, snr=10)
+        sims(sim_number=2, niter=500, snr=10)
 
     if args.qa:
         qa_sims()

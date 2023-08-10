@@ -12,6 +12,10 @@ from astropy.table import Table, vstack
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
+from desitarget import geomask
+from desiutil.log import get_logger
+log = get_logger()
+
 paperdir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'fastpaper1')
 figdir = os.path.join(paperdir, 'figures')
 datadir = os.path.join(paperdir, 'data')
@@ -49,7 +53,132 @@ def plot_style(font_scale=1.2, paper=False, talk=True):
 
     return sns, colors
 
-def fig_broadline(png=None):
+def compare_zouhu(png=None):
+    """Compare with the Hu Zou VAC."""
+
+    from fastspecfit.io import read_fastspecfit
+
+    zouhufile = '/global/cfs/cdirs/desi/users/zouhu/vac/edr/edr_galaxy_stellarmass_lineinfo_v1.0.fits'
+    zouhu = Table(fitsio.read(zouhufile))
+    _, uindx = np.unique(zouhu['TARGETID'], return_index=True)
+    zouhu = zouhu[uindx]
+
+    darkfile = '/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/fastspec-fuji-sv3-dark.fits'
+    brightfile = '/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/fastspec-fuji-sv3-bright.fits'
+    fastbright, metabright, _, _ = read_fastspecfit(brightfile)
+    fastdark, metadark, _, _ = read_fastspecfit(darkfile)
+
+    fast = vstack((fastbright, fastdark))
+    meta = vstack((metabright, metadark))
+    del fastbright, metabright, fastdark, metadark
+
+    _, uindx = np.unique(fast['TARGETID'], return_index=True)
+    fast = fast[uindx]
+    meta = meta[uindx]
+
+    indx_fast, indx_zouhu = geomask.match(fast['TARGETID'], zouhu['TARGETID'])
+    fast = fast[indx_fast]
+    meta = meta[indx_fast]
+    zouhu = zouhu[indx_zouhu]
+    assert(np.all(meta['TARGETID'] == zouhu['TARGETID']))
+    
+    I = ((fast['HALPHA_FLUX'] > 0) * (fast['HALPHA_FLUX_IVAR'] > 0) *
+         (fast['HALPHA_BOXFLUX'] > 0) * (fast['HALPHA_BOXFLUX_IVAR'] > 0) *
+         (fast['HALPHA_BROAD_FLUX_IVAR'] == 0) *
+         (zouhu['HALPHA_FLUX'] > 0) * (zouhu['HALPHA_FLUXERR'] > 0) *
+         np.isfinite(zouhu['HALPHA_FLUX']) * np.isfinite(zouhu['HALPHA_FLUXERR']) )
+
+    fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(10, 12))
+
+    ax1.scatter(np.log10(fast['HALPHA_FLUX'][I]), np.log10(zouhu['HALPHA_FLUX'][I]), s=1)
+    ax2.scatter(np.log10(fast['HALPHA_BOXFLUX'][I]), np.log10(zouhu['HALPHA_FLUX'][I]), s=1)
+
+    B = ((np.log10(fast['HALPHA_BOXFLUX'][I]) > 3) *
+         (np.log10(zouhu['HALPHA_FLUX'][I]) > 2) * (np.log10(zouhu['HALPHA_FLUX'][I]) < 3))
+    ax2.scatter(np.log10(fast['HALPHA_BOXFLUX'][I][B]), np.log10(zouhu['HALPHA_FLUX'][I][B]), s=1, color='orange')
+
+    ax3.scatter(np.log10(1/np.sqrt(fast['HALPHA_FLUX_IVAR'][I])), np.log10(zouhu['HALPHA_FLUXERR'][I]), s=1)
+    ax4.scatter(np.log10(1/np.sqrt(fast['HALPHA_BOXFLUX_IVAR'][I])), np.log10(zouhu['HALPHA_FLUXERR'][I]), s=1)
+
+    ax5.scatter(np.log10(fast['HALPHA_FLUX'][I]*np.sqrt(fast['HALPHA_FLUX_IVAR'][I])),
+                np.log10(zouhu['HALPHA_FLUX'][I]/zouhu['HALPHA_FLUXERR'][I]), s=1)
+    ax6.scatter(np.log10(fast['HALPHA_FLUX'][I]*np.sqrt(fast['HALPHA_BOXFLUX_IVAR'][I])),
+                np.log10(zouhu['HALPHA_FLUX'][I]/zouhu['HALPHA_FLUXERR'][I]), s=1)
+
+    ax1.set_ylabel('log Flux [Hu Zou / mpfit]')
+    ax1.set_xlabel('log Flux [fastspec, Gauss]')
+    ax2.set_xlabel('log Flux [fastspec, Box]')
+    for xx in [ax1, ax2]:
+        xx.set_xlim(-2, 4)
+        xx.set_ylim(-2, 4)
+        xx.plot([-2, 4], [-2, 4], color='k')
+
+    ax3.set_ylabel('log Flux Error [Hu Zou / mpfit]')
+    ax3.set_xlabel('log Flux Error [fastspec, Gauss]')
+    ax4.set_xlabel('log Flux Error [fastspec, Box]')
+    for xx in [ax3, ax4]:
+        xx.set_xlim(-2, 2.5)
+        xx.set_ylim(-2, 2.5)
+        xx.plot([-2, 2.5], [-2, 2.5], color='k')
+
+    ax5.set_ylabel('log Flux S/N [Hu Zou / mpfit]')
+    ax5.set_xlabel('log Flux S/N [fastspec, Gauss]')
+    ax6.set_xlabel('log Flux S/N [fastspec, Box]')
+    for xx in [ax5, ax6]:
+        xx.set_xlim(-1.5, 3.5)
+        xx.set_ylim(-1.5, 3.5)
+        xx.plot([-1.5, 3.5], [-1.5, 3.5], color='k')
+        
+    fig.tight_layout()
+    fig.savefig('desi-users/ioannis/tmp/junk.png')
+
+    pdb.set_trace()
+
+def match_lss(overwrite=False):
+    """Match to the LSS catalogs (full and clustering)."""
+
+    from fastspecfit.io import read_fastspecfit
+    from fastspecfit.io import write_fastspecfit
+    #from desispec.validredshifts import actually_validate
+    #actually_validate(cat, fiberstatus_cut=True, ignore_emline=True)
+    #https://github.com/desihub/LSS/blob/main/py/LSS/main/cattools.py#L2968
+
+    # read the clustering catalogs
+    lssdir = '/global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats'
+    for targtype in ['BGS_ANY', 'LRG', 'ELG', 'QSO']:
+
+        fastfile = os.path.join(datadir, f'fastspec-clustering-{targtype}.fits')
+        lssfile = os.path.join(datadir, f'lss-clustering-{targtype}.fits')
+        #lssfullfile = os.path.join(datadir, 'full', f'lss-full-{targtype}.fits')
+
+        if os.path.isfile(fastfile) and os.path.isfile(lssfile) and not overwrite:
+            log.info(f'fastspecfit file {fastfile} exists')
+            log.info(f'LSS clustering file {lssfile} exists')
+        else:
+            lssN = fitsio.read(os.path.join(lssdir, 'clustering', f'{targtype}_N_clustering.dat.fits'))
+            lssS = fitsio.read(os.path.join(lssdir, 'clustering', f'{targtype}_S_clustering.dat.fits'))
+            lss = Table(np.concatenate((lssN, lssS)))
+            del lssN, lssS
+    
+            if targtype == 'BGS_ANY':
+                sv3file = '/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/fastspec-fuji-sv3-bright.fits'
+                fast, meta, _, _ = read_fastspecfit(fastfile)
+            else:
+                sv3file = '/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/fastspec-fuji-sv3-dark.fits'
+                fast, meta, _, _ = read_fastspecfit(fastfile)
+    
+            indx_fast, indx_lss = geomask.match(fast['TARGETID'], lss['TARGETID'])
+            fast = fast[indx_fast]
+            meta = meta[indx_fast]
+            lss = lss[indx_lss]
+            assert(np.all(meta['TARGETID'] == lss['TARGETID']))
+    
+            write_fastspecfit(fast, meta, outfile=fastfile)
+    
+            lss.write(lssfile, overwrite=True)
+            log.info(f'Wrote {len(lss)} objects to {lssfile}')
+
+def fig_broadline(overwrite=False, png=None):
 
     import corner as cn
     from fastspecfit.io import read_fastspecfit
@@ -99,10 +228,7 @@ def fig_broadline(png=None):
     print(fast['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'HALPHA_AMP', 'HALPHA_BROAD_AMP', 'HALPHA_SIGMA', 'HALPHA_BROAD_SIGMA'][I])
     print(raga['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'HA_N_AMPLITUDE', 'HA_B_AMPLITUDE', 'HA_N_SIGMA_FITS', 'HA_B_SIGMA_FITS'][I])
     
-    pdb.set_trace()
-
-
-def fig_vdisp(png=None):
+def fig_vdisp(overwrite=False, png=None):
 
     import corner as cn
     from fastspecfit.io import read_fastspecfit
@@ -113,10 +239,10 @@ def fig_vdisp(png=None):
     # build / read the sample
     fpfile = os.path.join(datadir, 'fuji_FP.fits')
     fp = Table(fitsio.read(fpfile, ext=1, upper=True)) # from Khaled
-    print('Read {} from {}'.format(len(fp), fpfile))
+    log.info('Read {} from {}'.format(len(fp), fpfile))
 
     fastfile = os.path.join(datadir, 'fastspec-fuji_FP.fits')
-    if os.path.isfile(fastfile):
+    if os.path.isfile(fastfile) and not overwrite:
         fast, meta, _, _ = read_fastspecfit(fastfile)
     else:
         fast, meta = [], []
@@ -128,7 +254,8 @@ def fig_vdisp(png=None):
                 survey = survey.strip()
                 program = program.strip()
 
-                fastfile1 = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', 'fuji', 'catalogs', f'fastspec-fuji-{survey}-{program}.fits')
+                fastfile1 = f'/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/fastspec-fuji-{survey}-{program}.fits'
+                #fastfile1 = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', 'fuji', 'catalogs', f'fastspec-fuji-{survey}-{program}.fits')
                 targetids = fitsio.read(fastfile1, ext='METADATA', columns='TARGETID')
                 I = np.where(np.isin(targetids, fp[J][K]['TARGETID']))[0]
                 
@@ -148,7 +275,7 @@ def fig_vdisp(png=None):
 
     I = np.where((fast['VDISP'] != 125.) * (fp['PPXF_SIGMA'] / fp['PPXF_SIGMA_ERROR'] > 2))[0]
     #I = np.where(fast['VDISP'] != 125.)[0]
-    print(len(fast), len(I))
+    log.info(len(fast), len(I))
     #I = np.arange(len(fast))
     fast['VDISP_ERR'] = np.zeros(len(fast), 'f4') + 100
     fast['VDISP_ERR'][I] = 1 / np.sqrt(fast['VDISP_IVAR'][I])
@@ -167,7 +294,6 @@ def fig_vdisp(png=None):
     smooth = 1.5
 
     vresid = fast['VDISP'][I] - fp['PPXF_SIGMA'][I]
-    pdb.set_trace()
     
     #fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 10))
     fig = plt.figure(figsize=(8, 8))
@@ -190,7 +316,7 @@ def fig_vdisp(png=None):
     vdispmodel = np.polyval(vcoeff, vdispaxis-vdispoff)
 
     #vcoeff = np.polyfit(fp['PPXF_SIGMA'][I], fast['VDISP'][I], 1)
-    print(vcoeff)
+    log.info(vcoeff)
 
     bigax = fig.add_subplot(gs[0, :]) # rows x cols
 
@@ -253,11 +379,47 @@ def fig_vdisp(png=None):
 
     if png:
         pngfile = os.path.join(figdir, png)
-        print('Writing {}'.format(pngfile))
+        log.info('Writing {}'.format(pngfile))
         #fig.subplots_adjust(bottom=0.15, right=0.85, top=0.95)
         fig.tight_layout()
         fig.savefig(pngfile)#, bbox_inches='tight')
         plt.close(fig)
+
+def fig_mstar(overwrite=False, png=None):
+
+    from fastspecfit.io import read_fastspecfit
+
+    sns, colors = plot_style(talk=True, font_scale=0.8)
+
+    data = {}
+    for targtype in ['BGS_ANY', 'LRG', 'ELG']:        
+        fastfile = os.path.join(datadir, f'fastspec-clustering-{targtype}.fits')
+        if not os.path.isfile(fastfile):
+            log.info(f'{fastfile} not found.')
+        else:
+            fast, meta, _, _ = read_fastspecfit(fastfile)
+            lssfile = os.path.join(datadir, f'lss-clustering-{targtype}.fits')
+            lss = Table(fitsio.read(lssfile))
+            log.info(f'Read {len(lss)} objects from {lssfile}')
+            data[targtype] = {'fast': fast, 'meta': meta, 'lss': lss}
+
+    if not bool(data):
+        return
+        
+    fig, ax = plt.subplots()
+    ax.scatter(data['BGS_ANY']['fast']['Z'], data['BGS_ANY']['fast']['LOGMSTAR'], s=1)
+    ax.scatter(data['LRG']['fast']['Z'], data['LRG']['fast']['LOGMSTAR'], s=1)
+    ax.scatter(data['ELG']['fast']['Z'], data['ELG']['fast']['LOGMSTAR'], s=1)
+
+    if png:
+        pngfile = os.path.join(figdir, png)
+        log.info('Writing {}'.format(pngfile))
+        #fig.subplots_adjust(bottom=0.15, right=0.85, top=0.95)
+        fig.tight_layout()
+        fig.savefig(pngfile)#, bbox_inches='tight')
+        plt.close(fig)
+
+    pdb.set_trace()
 
 def main():
 
@@ -265,16 +427,28 @@ def main():
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
-    parser.add_argument('--broadline', action='store_true', help='Compare with Ragas broad-line fitting.')
     parser.add_argument('--vdisp', action='store_true', help='Velocity dispersion comparison.')
+    parser.add_argument('--mstar', action='store_true', help='Stellar mass plots.')
+    parser.add_argument('--broadline', action='store_true', help='Compare with Ragas broad-line fitting.')
+    parser.add_argument('--compare-zouhu', action='store_true', help='Compare with the zouhu VAC.')    
+    parser.add_argument('--match-lss', action='store_true', help='Match to the LSS catalogs (no figures, just catalogs).')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')
     args = parser.parse_args()
 
-    if args.broadline:
-        fig_broadline(png='broadline.png')
+    if args.match_lss:
+        match_lss(overwrite=args.overwrite)
+
+    if args.compare_zouhu:
+        compare_zouhu()
+
+    if args.mstar:
+        fig_mstar(overwrite=args.overwrite, png='mstar.png')
 
     if args.vdisp:
-        fig_vdisp(png='ppxf-vdisp.png')
+        fig_vdisp(overwrite=args.overwrite, png='ppxf-vdisp.png')
+
+    if args.broadline:
+        fig_broadline(overwrite=args.overwrite, png='broadline.png')
 
 if __name__ == '__main__':
    main()
