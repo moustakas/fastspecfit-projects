@@ -2,7 +2,8 @@
 
 """Simulations to assess flux uncertainties.
 
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fluxivar-sims --sims --qa
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fluxivar-sims --sims --qa --niter 5000 --snr 5
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fluxivar-sims --sims --qa --niter 5000 --snr 10 
 
 """
 import os, pdb
@@ -130,12 +131,6 @@ def sims(sim_number=1, niter=100, snr=10):
         emlineivar = 1 / (np.zeros_like(emlinewave) + lineamps[0] / snr)**2
         #emlineivar = 1 / emlinesigma**2
 
-        #fig, ax = plt.subplots()
-        #ax.scatter(emlinewave, emlineflux)
-        #ax.plot(modelwave, modelflux, color='k')
-        #fig.tight_layout()
-        #fig.savefig('junk2.png')
-    
         # Fit the data
         weights = np.sqrt(emlineivar)
         farg = (emlinewave, emlineflux, weights, redshift, dlog10wave, init_parameters, Ifree, linewaves)
@@ -161,6 +156,7 @@ def sims(sim_number=1, niter=100, snr=10):
         res['AMP_ERR'] = np.zeros(nline, 'f4')
         #res['AMP_IVAR'] = np.zeros(nline, 'f4')
         res['FLUX'] = np.zeros(nline, 'f4')
+        #res['FLUX2'] = np.zeros(nline, 'f4')
         res['FLUX_ERR'] = np.zeros(nline, 'f4')
         #res['FLUX_IVAR'] = np.zeros(nline, 'f4')
         res['BOXFLUX'] = np.zeros(nline, 'f4')
@@ -173,14 +169,19 @@ def sims(sim_number=1, niter=100, snr=10):
         res['TRUESIGMA'] = linesigmas.astype('f4')
         res['TRUEVSHIFT'] = linevshifts.astype('f4')
 
+        nsigma = 3
+        from scipy.special import erf
+        corr = erf(3/np.sqrt(2)) # correct for the flux outside of +/-nsigma
+
         for iline, (lineamp, linevshift, linesigma, linewave) in enumerate(
                 zip(fit_lineamps, fit_linevshifts, fit_linesigmas, linewaves)):
             # integrated flux
             linezwave = linewave * (1. + redshift + linevshift / C_LIGHT)
-            flux = np.sqrt(2 * np.pi) * lineamp * linesigma * linezwave / C_LIGHT 
+            _flux = np.sqrt(2 * np.pi) * lineamp * linesigma * linezwave / C_LIGHT 
 
             linesigma_ang = linesigma * linezwave / C_LIGHT # [Angstrom]
-            lineindx = np.where((emlinewave >= (linezwave - 3*linesigma_ang)) * (emlinewave <= (linezwave + 3*linesigma_ang)))[0]
+            lineindx = np.where((emlinewave >= (linezwave - nsigma*linesigma_ang)) *
+                                (emlinewave <= (linezwave + nsigma*linesigma_ang)))[0]
 
             # boxcar flux
             dwave = np.abs(np.diff(wave_edges(emlinewave[lineindx])))
@@ -198,6 +199,18 @@ def sims(sim_number=1, niter=100, snr=10):
             amp_sigma = np.diff(np.percentile(emlineflux_nolines[lineindx], [25, 75]))[0] / 1.349 # robust sigma
 
             if True:
+                pro_j = lineprofile[lineindx] / np.sum(lineprofile[lineindx])
+                weight_j = (pro_j**2 / dwave**2) * emlineivar[lineindx]
+                flux = np.sum(weight_j * dwave * lineprofile[lineindx] / pro_j) / np.sum(weight_j)
+                flux_ivar = np.sum(weight_j)
+
+                # correction for missing flux
+                flux /= corr
+                flux_ivar *= corr**2
+
+                flux_err = 1. / np.sqrt(flux_ivar)
+                
+            elif False:
                 lineweight = np.sum(lineprofile[lineindx])**2
                 flux_ivar = lineweight / np.sum(lineprofile[lineindx]**2 / emlineivar[lineindx])
             else:
@@ -205,12 +218,11 @@ def sims(sim_number=1, niter=100, snr=10):
                 flux_err = np.sqrt(2 * np.pi) * linezwave / C_LIGHT * np.sqrt((amp_sigma * linesigma)**2 + (lineamp*0.1*linesigma)**2)
                 flux_ivar = 1 / flux_err**2
                 
-            pdb.set_trace()
-
             res['AMP'][iline] = lineamp
             res['AMP_ERR'][iline] = amp_sigma
             #res['AMP_IVAR'][iline] = 1 / amp_sigma**2
             res['FLUX'][iline] = flux
+            #res['FLUX2'][iline] = _flux
             res['FLUX_ERR'][iline] = 1/np.sqrt(flux_ivar)
             #res['FLUX_IVAR'][iline] = flux_ivar
             res['BOXFLUX'][iline] = boxflux
@@ -251,7 +263,7 @@ def sims(sim_number=1, niter=100, snr=10):
                     fig, ax = plt.subplots()
                     lineplot(ax)
                     fig.tight_layout()
-                    pngfile = os.path.join(datadir, 'fluxivar-sims', 'qa-realization-sim{:02d}.png'.format(sim_number))
+                    pngfile = os.path.join(datadir, 'fluxivar-sims', 'qa-realization-sim{:02d}-snr{:.0f}.png'.format(sim_number, snr))
                     print(f'Writing {pngfile}')
                     fig.savefig(pngfile)
                 else:
@@ -261,7 +273,7 @@ def sims(sim_number=1, niter=100, snr=10):
                     else: # assumes just 2 lines
                         lineplot(ax2, ylabel=False)
                         fig.tight_layout()
-                        pngfile = os.path.join(datadir, 'fluxivar-sims', 'qa-realization-sim{:02d}.png'.format(sim_number))
+                        pngfile = os.path.join(datadir, 'fluxivar-sims', 'qa-realization-sim{:02d}-snr{:.0f}.png'.format(sim_number, snr))
                         print(f'Writing {pngfile}')
                         fig.savefig(pngfile)
                         
@@ -270,17 +282,18 @@ def sims(sim_number=1, niter=100, snr=10):
         out.append(res)
 
     out = vstack(out)
-    outfile = os.path.join(datadir, 'fluxivar-sims', 'sim{:02d}.fits'.format(sim_number))
+
+    outfile = os.path.join(datadir, 'fluxivar-sims', 'sim{:02d}-snr{:.0f}.fits'.format(sim_number, snr))
     print(f'Writing {outfile}')
     out.write(outfile, overwrite=True)
 
-def qa_sims():
+def qa_sims(snr=10):
 
     sns.set(context='talk', style='ticks', font_scale=1.0)
     colors = sns.color_palette()
 
-    simfile1 = os.path.join(datadir, 'fluxivar-sims', 'sim01.fits')
-    simfile2 = os.path.join(datadir, 'fluxivar-sims', 'sim02.fits')
+    simfile1 = os.path.join(datadir, 'fluxivar-sims', 'sim01-snr{:.0f}.fits'.format(snr))
+    simfile2 = os.path.join(datadir, 'fluxivar-sims', 'sim02-snr{:.0f}.fits'.format(snr))
     sim1 = Table(fitsio.read(simfile1))
     sim2 = Table(fitsio.read(simfile2))
 
@@ -308,7 +321,7 @@ def qa_sims():
                   bins=30, range=xlim, color=colors[1], alpha=0.8)
     ax[0, 1].hist((sim1['FLUX'] - sim1['TRUEFLUX'][0]) / sim1['FLUX_ERR'], # np.mean(sim1['FLUX_ERR']), 
              bins=30, range=xlim, color=colors[1], alpha=0.8)
-    ax[0, 1].set_title('Isolated Line')
+    ax[0, 1].set_title('Isolated Line - S/N = {:.0f}'.format(snr))
     ax[0, 2].hist((sim1['BOXFLUX'] - sim1['TRUEFLUX'][0]) / sim1['BOXFLUX_ERR'], # np.mean(sim1['BOXFLUX_ERR']), 
              bins=30, range=xlim, color=colors[1], alpha=0.8)
     ymax = [xx.get_ylim()[1] for xx in ax[0, :]]
@@ -334,7 +347,7 @@ def qa_sims():
                   bins=30, range=xlim, color=colors[2], alpha=0.8)
     ax[1, 1].hist((sim2a['FLUX'] - sim2a['TRUEFLUX'][0]) / sim2a['FLUX_ERR'],  # np.mean(sim2a['FLUX_ERR']), 
              bins=30, range=xlim, color=colors[2], alpha=0.8)
-    ax[1, 1].set_title('Blended Line 1')
+    ax[1, 1].set_title('Blended Line 1 - S/N = {:.0f}'.format(snr))
     ax[1, 2].hist((sim2a['BOXFLUX'] - sim2a['TRUEFLUX'][0]) / sim2a['BOXFLUX_ERR'], # np.mean(sim2a['BOXFLUX_ERR']), 
              bins=30, range=xlim+[0, bmn], color=colors[2], alpha=0.8)
     ymax = [xx.get_ylim()[1] for xx in ax[1, :]]
@@ -363,7 +376,7 @@ def qa_sims():
                   bins=30, range=xlim, color=colors[3], alpha=0.8)
     ax[2, 1].hist((sim2b['FLUX'] - sim2b['TRUEFLUX'][0]) / sim2b['FLUX_ERR'], # np.mean(sim2b['FLUX_ERR']), 
              bins=30, range=xlim, color=colors[3], alpha=0.8)
-    ax[2, 1].set_title('Blended Line 2')
+    ax[2, 1].set_title('Blended Line 2 - S/N = {:.0f}'.format(snr))
     ax[2, 2].hist((sim2b['BOXFLUX'] - sim2b['TRUEFLUX'][0]) / sim2b['BOXFLUX_ERR'], # np.mean(sim2b['BOXFLUX_ERR']), 
              bins=30, range=xlim+[0, bmn], color=colors[3], alpha=0.8)
     ymax = [xx.get_ylim()[1] for xx in ax[2, :]]
@@ -382,32 +395,30 @@ def qa_sims():
     ax[2, 0].set_ylabel('Number of Samples')
 
     fig.subplots_adjust(left=0.1, right=0.98, top=0.95, bottom=0.09, hspace=0.4, wspace=0.25)
-    pngfile = os.path.join(datadir, 'fluxivar-sims', 'qa-fluxivar-sims.png')
+    pngfile = os.path.join(datadir, 'fluxivar-sims', 'qa-fluxivar-sims-snr{:.0f}.png'.format(snr))
     print(f'Writing {pngfile}')
     fig.savefig(pngfile)
 
-def qa_snr():
+def qa_snr(snr=10):
 
     from matplotlib.lines import Line2D
 
-    sns.set(context='talk', style='ticks', font_scale=1.0)
+    sns.set(context='talk', style='ticks', font_scale=0.8)
     colors = sns.color_palette()
 
     import corner as cn
 
-    simfile1 = os.path.join(datadir, 'fluxivar-sims', 'sim01.fits')
+    simfile1 = os.path.join(datadir, 'fluxivar-sims', 'sim01-snr{:.0f}.fits'.format(snr))
     sim1 = Table(fitsio.read(simfile1))
 
-    #simfile2 = os.path.join(datadir, 'fluxivar-sims', 'sim02.fits')
-    #sim2 = Table(fitsio.read(simfile2))
-    #sim2a = sim2[sim2['LINE'] == 0]
-    #sim2b = sim2[sim2['LINE'] == 1]
+    simfile2 = os.path.join(datadir, 'fluxivar-sims', 'sim02-snr{:.0f}.fits'.format(snr))
+    sim2 = Table(fitsio.read(simfile2))
+    sim2a = sim2[sim2['LINE'] == 0]
+    sim2b = sim2[sim2['LINE'] == 1]
 
     ftrue = sim1['TRUEFLUX'][0]
 
-    #fig, ax1 = plt.subplots(figsize=(7, 6))
-    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(6, 9))
-    #fig, ax1 = plt.subplots(1, 1, figsize=(7, 6))
+    fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3, sharex=True, figsize=(12, 7))
 
     xlim = np.log10([3, 1e2])
     ylim = np.log10([3, 1e2])
@@ -417,60 +428,73 @@ def qa_snr():
               range=[xlim, ylim], 
               ax=ax1, contour_kwargs={'colors': colors[0], 'alpha': 1, 'linestyles': '-'},
               data_kwargs={'color': colors[0], 'alpha': 0.5, 'ms': 5})
-
     cn.hist2d(np.log10(sim1['AMP'] / sim1['AMP_ERR']), np.log10(sim1['BOXFLUX'] / sim1['BOXFLUX_ERR']),
               bins=100, color=colors[2], smooth=2, levels=[0.25, 0.5, 0.75, 0.95],
               range=[xlim, ylim], 
               ax=ax1, contour_kwargs={'colors': colors[2], 'alpha': 1, 'linestyles': '--'},
               data_kwargs={'color': colors[2], 'alpha': 0.5, 'ms': 5})
-
+    ax1.set_title('Isolated Line - S/N = {:.0f}'.format(snr))
     ax1.legend([Line2D([0], [0], color=colors[0], lw=2, ls='-'),
                 Line2D([0], [0], color=colors[2], lw=2, ls='--')], ['Gauss', 'Box'], 
                loc='upper left', fontsize=14, frameon=True)
 
-    ax1.set_xlim(xlim)
-    ax1.set_ylim(ylim)
-    ax1.set_ylabel(r'$\log_{10}$ (F / $\sigma$F)')
-    #ax1.set_ylabel(r'F(Gauss) / $\sigma$F(Gauss)')
-    #ax1.set_xlabel(r'$\log_{10}$ Amp / $\sigma(\mathrm{Amp})$')
-    ax1.margins(0)
+    cn.hist2d(np.log10(sim2a['AMP'] / sim2a['AMP_ERR']), np.log10(sim2a['FLUX'] / sim2a['FLUX_ERR']),
+              bins=100, color=colors[0], smooth=2, levels=[0.25, 0.5, 0.75, 0.95],
+              range=[xlim, ylim], 
+              ax=ax2, contour_kwargs={'colors': colors[0], 'alpha': 1, 'linestyles': '-'},
+              data_kwargs={'color': colors[0], 'alpha': 0.5, 'ms': 5})
+    cn.hist2d(np.log10(sim2a['AMP'] / sim2a['AMP_ERR']), np.log10(sim2a['BOXFLUX'] / sim2a['BOXFLUX_ERR']),
+              bins=100, color=colors[2], smooth=2, levels=[0.25, 0.5, 0.75, 0.95],
+              range=[xlim, ylim], 
+              ax=ax2, contour_kwargs={'colors': colors[2], 'alpha': 1, 'linestyles': '--'},
+              data_kwargs={'color': colors[2], 'alpha': 0.5, 'ms': 5})
+    ax2.set_title('Blended Line 1 - S/N = {:.0f}'.format(snr))
 
-    ylim = [-1, 2] # 0, 30]
+    cn.hist2d(np.log10(sim2b['AMP'] / sim2b['AMP_ERR']), np.log10(sim2b['FLUX'] / sim2b['FLUX_ERR']),
+              bins=100, color=colors[0], smooth=2, levels=[0.25, 0.5, 0.75, 0.95],
+              range=[xlim, ylim], 
+              ax=ax3, contour_kwargs={'colors': colors[0], 'alpha': 1, 'linestyles': '-'},
+              data_kwargs={'color': colors[0], 'alpha': 0.5, 'ms': 5})
+    cn.hist2d(np.log10(sim2b['AMP'] / sim2b['AMP_ERR']), np.log10(sim2b['BOXFLUX'] / sim2b['BOXFLUX_ERR']),
+              bins=100, color=colors[2], smooth=2, levels=[0.25, 0.5, 0.75, 0.95],
+              range=[xlim, ylim], 
+              ax=ax3, contour_kwargs={'colors': colors[2], 'alpha': 1, 'linestyles': '--'},
+              data_kwargs={'color': colors[2], 'alpha': 0.5, 'ms': 5})
+    ax3.set_title('Blended Line 2 - S/N = {:.0f}'.format(snr))
+
+    for xx in (ax1, ax2, ax3):
+        xx.set_xlim(xlim)
+        xx.set_ylim(ylim)
+    ax1.set_ylabel(r'$\log_{10}$ (F / $\sigma$F)')
+
+    ylim = [0.5, 2] # 0, 30]
     cn.hist2d(np.log10(sim1['AMP'] / sim1['AMP_ERR']), sim1['BOXFLUX_ERR'] / sim1['FLUX_ERR'],
               bins=100, color=colors[3], smooth=2, levels=[0.25, 0.5, 0.75, 0.95],
               range=[xlim, ylim], 
-              ax=ax2, contour_kwargs={'colors': 'gray', 'alpha': 1},
+              ax=ax4, contour_kwargs={'colors': 'gray', 'alpha': 1},
               data_kwargs={'color': colors[3], 'alpha': 0.5, 'ms': 5})
-    ax2.set_xlim(xlim)
-    ax2.set_ylim(ylim)
-    ax2.set_xlabel(r'$\log_{10}$ Amp / $\sigma_{\mathrm{Amp}}$')
-    ax2.set_ylabel(r'$\sigma_{F(\mathrm{Box})}$ / $\sigma_{F(\mathrm{Gauss})}$')
+    cn.hist2d(np.log10(sim2a['AMP'] / sim2a['AMP_ERR']), sim2a['BOXFLUX_ERR'] / sim2a['FLUX_ERR'],
+              bins=100, color=colors[3], smooth=2, levels=[0.25, 0.5, 0.75, 0.95],
+              range=[xlim, ylim], 
+              ax=ax5, contour_kwargs={'colors': 'gray', 'alpha': 1},
+              data_kwargs={'color': colors[3], 'alpha': 0.5, 'ms': 5})
+    cn.hist2d(np.log10(sim2b['AMP'] / sim2b['AMP_ERR']), sim2b['BOXFLUX_ERR'] / sim2b['FLUX_ERR'],
+              bins=100, color=colors[3], smooth=2, levels=[0.25, 0.5, 0.75, 0.95],
+              range=[xlim, ylim], 
+              ax=ax6, contour_kwargs={'colors': 'gray', 'alpha': 1},
+              data_kwargs={'color': colors[3], 'alpha': 0.5, 'ms': 5})
+    
+    for xx in (ax4, ax5, ax6):
+        xx.set_xlim(xlim)
+        xx.set_ylim(ylim)
+        xx.set_xlabel(r'$\log_{10}$ Amp / $\sigma_{\mathrm{Amp}}$')
+    ax4.set_ylabel(r'$\sigma_{F(\mathrm{Box})}$ / $\sigma_{F(\mathrm{Gauss})}$')
 
-    #col = colors[3]
-    #xlim = [-15, +15]
-    #cn.hist2d(sim1['FLUX'] - ftrue, sim1['BOXFLUX'] - ftrue,
-    #          bins=30, color=col, smooth=1, levels=[0.5, 0.75, 0.95],
-    #          range=[xlim, xlim], 
-    #          ax=ax1, contour_kwargs={'colors': 'gray', 'alpha': 1},
-    #          data_kwargs={'color': col, 'alpha': 0.5, 'ms': 10})
-    #ax1.axhline(y=0, color='k', alpha=0.7)
-    #ax1.axvline(x=0, color='k', alpha=0.7)
-    #ax1.set_xlim(xlim)
-    #ax1.set_xlabel('F(Gauss) - F(true)')
-    #ax1.set_ylabel('F(Box) - F(true)')
-
-    #ax2.scatter(sim1['AMP'] / sim1['AMP_ERR'], sim1['FLUX'] / sim1['FLUX_ERR'], s=10)
-    #ax3.scatter(sim1['AMP'] / sim1['AMP_ERR'], sim1['BOXFLUX'] / sim1['BOXFLUX_ERR'], s=10)
-    #xlim = [-15, +15]
-    #cn.hist2d(sim1['FLUX'] - ftrue, sim1['BOXFLUX'] - ftrue,
-    #          bins=30, color=col, smooth=1, levels=[0.5, 0.75, 0.95],
-    #          range=[xlim, xlim], 
-    #          ax=ax1, contour_kwargs={'colors': 'gray', 'alpha': 1},
-    #          data_kwargs={'color': col, 'alpha': 0.5, 'ms': 10})
-
+    for xx in (ax1, ax2, ax3, ax4, ax5, ax6):
+        xx.margins(0)
 
     fig.tight_layout()
-    pngfile = os.path.join(datadir, 'fluxivar-sims', 'qa-fluxivar-snr.png')
+    pngfile = os.path.join(datadir, 'fluxivar-sims', 'qa-fluxivar-snr{:.0f}.png'.format(snr))
     print(f'Writing {pngfile}')
     fig.savefig(pngfile)
 
@@ -479,14 +503,16 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--niter', type=int, default=5000)
+    parser.add_argument('--snr', type=float, default=10.)
     parser.add_argument('--sims', action='store_true')
     parser.add_argument('--qa', action='store_true')
     args = parser.parse_args()
 
     if args.sims:
-        sims(sim_number=1, niter=500, snr=10)
-        sims(sim_number=2, niter=500, snr=10)
+        sims(sim_number=1, niter=args.niter, snr=args.snr)
+        sims(sim_number=2, niter=args.niter, snr=args.snr)
 
     if args.qa:
-        qa_sims()
-        qa_snr()
+        qa_sims(snr=args.snr)
+        qa_snr(snr=args.snr)
