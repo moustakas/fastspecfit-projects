@@ -61,7 +61,7 @@ def main():
     args = parser.parse_args()
 
     paperdir = '/global/cfs/cdirs/desicollab/users/ioannis/fastspecfit/fastpaper1'
-    repeatsdir = paperdir+'/repeats'
+    repeatsdir = paperdir+'/data/repeats'
     if not os.path.isdir(repeatsdir):
         os.makedirs(repeatsdir, exist_ok=True)
 
