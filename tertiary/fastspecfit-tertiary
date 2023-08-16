@@ -72,7 +72,7 @@ def main():
 
     datadirs = {
         '15': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary15-thru20221216',
-        '18': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary18-thru20230112',
+        '18': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary18-thru20230112-v2', # original is missing an exposure
         '23': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary23-thru20230326',
         '26': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary26-thru20230416',
         '34': desi_root+'/users/raichoor/laelbg/daily/healpix/tertiary34-thru20230617',

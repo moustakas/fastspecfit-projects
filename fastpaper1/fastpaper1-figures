@@ -21,6 +21,8 @@ from desitarget import geomask
 from desiutil.log import get_logger
 log = get_logger()
 
+from fastspecfit.util import C_LIGHT
+
 paperdir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'fastpaper1')
 figdir = os.path.join(paperdir, 'figures')
 datadir = os.path.join(paperdir, 'data')
@@ -650,6 +652,590 @@ def fig_example_spectra(png=None):
         fig.savefig(pngfile)#, bbox_inches='tight')
         plt.close(fig)
 
+def _smooth_continuum(wave, flux, ivar, redshift, medbin=150, 
+                      smooth_window=50, smooth_step=10, maskkms_uv=3000.0, 
+                      maskkms_balmer=1000.0, maskkms_narrow=200.0,
+                      linetable=None, emlinesfile=None, linemask=None, png=None,
+                      log=None, verbose=False):
+    """Build a smooth, nonparametric continuum spectrum.
+
+    Parameters
+    ----------
+    wave : :class:`numpy.ndarray` [npix]
+        Observed-frame wavelength array.
+    flux : :class:`numpy.ndarray` [npix]
+        Spectrum corresponding to `wave`.
+    ivar : :class:`numpy.ndarray` [npix]
+        Inverse variance spectrum corresponding to `flux`.
+    redshift : :class:`float`
+        Object redshift.
+    medbin : :class:`int`, optional, defaults to 150 pixels
+        Width of the median-smoothing kernel in pixels; a magic number.
+    smooth_window : :class:`int`, optional, defaults to 50 pixels
+        Width of the sliding window used to compute the iteratively clipped
+        statistics (mean, median, sigma); a magic number. Note: the nominal
+        extraction width (0.8 A) and observed-frame wavelength range
+        (3600-9800 A) corresponds to pixels that are 66-24 km/s. So
+        `smooth_window` of 50 corresponds to 3300-1200 km/s, which is
+        conservative for all but the broadest lines. A magic number. 
+    smooth_step : :class:`int`, optional, defaults to 10 pixels
+        Width of the step size when computing smoothed statistics; a magic
+        number.
+    maskkms_uv : :class:`float`, optional, defaults to 3000 km/s
+        Masking width for UV emission lines. Pixels within +/-3*maskkms_uv
+        are masked before median-smoothing.
+    maskkms_balmer : :class:`float`, optional, defaults to 3000 km/s
+        Like `maskkms_uv` but for Balmer lines.
+    maskkms_narrow : :class:`float`, optional, defaults to 300 km/s
+        Like `maskkms_uv` but for narrow, forbidden lines.
+    linemask : :class:`numpy.ndarray` of type :class:`bool`, optional, defaults to `None`
+        Boolean mask with the same number of pixels as `wave` where `True`
+        means a pixel is (possibly) affected by an emission line
+        (specifically a strong line which likely cannot be median-smoothed).
+    png : :class:`str`, optional, defaults to `None`
+        Generate a simple QA plot and write it out to this filename.
+
+    Returns
+    -------
+    smooth :class:`numpy.ndarray` [npix]
+        Smooth continuum spectrum which can be subtracted from `flux` in
+        order to create a pure emission-line spectrum.
+    smoothsigma :class:`numpy.ndarray` [npix]
+        Smooth one-sigma uncertainty spectrum.
+
+    """
+    from numpy.lib.stride_tricks import sliding_window_view
+    from scipy.ndimage import median_filter
+    from scipy.stats import sigmaclip
+    #from astropy.stats import sigma_clip
+
+    if log is None:
+        from desiutil.log import get_logger, DEBUG
+        if verbose:
+            log = get_logger(DEBUG)
+        else:
+            log = get_logger()
+
+    if linetable is None:
+        from fastspecfit.emlines import read_emlines        
+        linetable = read_emlines(emlinesfile=emlinesfile)
+        
+    npix = len(wave)
+
+    # If we're not given a linemask, make a conservative one.
+    if linemask is None:
+        linemask = np.zeros(npix, bool) # True = (possibly) affected by emission line
+
+        nsig = 3
+
+        # select just strong lines
+        zlinewaves = linetable['restwave'] * (1 + redshift)
+        inrange = (zlinewaves > np.min(wave)) * (zlinewaves < np.max(wave))
+        if np.sum(inrange) > 0:
+            linetable = linetable[inrange]
+            linetable = linetable[linetable['amp'] >= 1]
+            if len(linetable) > 0:
+                for oneline in linetable:
+                    zlinewave = oneline['restwave'] * (1 + redshift)
+                    if oneline['isbroad']:
+                        if oneline['isbalmer']:
+                            sigma = maskkms_balmer
+                        else:
+                            sigma = maskkms_uv
+                    else:
+                        sigma = maskkms_narrow
+                
+                    sigma *= zlinewave / C_LIGHT # [km/s --> Angstrom]
+                    I = (wave >= (zlinewave - nsig*sigma)) * (wave <= (zlinewave + nsig*sigma))
+                    if len(I) > 0:
+                        linemask[I] = True
+
+        # Special: mask Ly-a (1215 A)
+        zlinewave = 1215.0 * (1 + redshift)
+        if (zlinewave > np.min(wave)) * (zlinewave < np.max(wave)):
+            sigma = maskkms_uv * zlinewave / C_LIGHT # [km/s --> Angstrom]
+            I = (wave >= (zlinewave - nsig*sigma)) * (wave <= (zlinewave + nsig*sigma))
+            if len(I) > 0:
+                linemask[I] = True
+
+    if len(linemask) != npix:
+        errmsg = 'Linemask must have the same number of pixels as the input spectrum.'
+        log.critical(errmsg)
+        raise ValueError(errmsg)
+
+    # Build the smooth (line-free) continuum by computing statistics in a
+    # sliding window, accounting for masked pixels and trying to be smart
+    # about broad lines. See:
+    #   https://stackoverflow.com/questions/41851044/python-median-filter-for-1d-numpy-array
+    #   https://numpy.org/devdocs/reference/generated/numpy.lib.stride_tricks.sliding_window_view.html
+    
+    wave_win = sliding_window_view(wave, window_shape=smooth_window)
+    flux_win = sliding_window_view(flux, window_shape=smooth_window)
+    ivar_win = sliding_window_view(ivar, window_shape=smooth_window)
+    noline_win = sliding_window_view(np.logical_not(linemask), window_shape=smooth_window)
+
+    nminpix = 15
+
+    smooth_wave, smooth_flux, smooth_sigma, smooth_mask = [], [], [], []
+    for swave, sflux, sivar, noline in zip(wave_win[::smooth_step],
+                                           flux_win[::smooth_step],
+                                           ivar_win[::smooth_step],
+                                           noline_win[::smooth_step]):
+
+        # if there are fewer than XX good pixels after accounting for the
+        # line-mask, skip this window.
+        sflux = sflux[noline]
+        if len(sflux) < nminpix:
+            smooth_mask.append(True)
+            continue
+        swave = swave[noline]
+        sivar = sivar[noline]
+
+        cflux, _, _ = sigmaclip(sflux, low=2.0, high=2.0)
+        if len(cflux) < nminpix:
+            smooth_mask.append(True)
+            continue
+
+        # Toss out regions with too little good data.
+        if np.sum(sivar > 0) < nminpix:
+            smooth_mask.append(True)
+            continue
+
+        I = np.isin(sflux, cflux) # fragile?
+        sig = np.std(cflux) # simple median and sigma
+        mn = np.median(cflux)
+
+        #if png and mn < -1:# and np.mean(swave[I]) > 7600:
+        #    print(np.mean(swave[I]), mn)
+
+        # One more check for crummy spectral regions.
+        if mn == 0.0:
+            smooth_mask.append(True)
+            continue
+
+        smooth_wave.append(np.mean(swave[I]))
+        smooth_mask.append(False)
+
+        ## astropy is too slow!!
+        #cflux = sigma_clip(sflux, sigma=2.0, cenfunc='median', stdfunc='std', masked=False, grow=1.5)
+        #if np.sum(np.isfinite(cflux)) < 10:
+        #    smooth_mask.append(True)
+        #    continue
+        #I = np.isfinite(cflux) # should never be fully masked!
+        #smooth_wave.append(np.mean(swave[I]))
+        #smooth_mask.append(False)
+        #sig = np.std(cflux[I])
+        #mn = np.median(cflux[I])
+
+        ## inverse-variance weighted mean and sigma
+        #norm = np.sum(sivar[I])
+        #mn = np.sum(sivar[I] * cflux[I]) / norm # weighted mean
+        #sig = np.sqrt(np.sum(sivar[I] * (cflux[I] - mn)**2) / norm) # weighted sigma
+
+        smooth_sigma.append(sig)
+        smooth_flux.append(mn)
+
+    smooth_mask = np.array(smooth_mask)
+    smooth_wave = np.array(smooth_wave)
+    smooth_sigma = np.array(smooth_sigma)
+    smooth_flux = np.array(smooth_flux)
+
+    # For debugging.
+    if png:
+        _smooth_wave = smooth_wave.copy()
+        _smooth_flux = smooth_flux.copy()
+
+    # corner case for very wacky spectra
+    if len(smooth_flux) == 0:
+        smooth_flux = flux
+        smooth_sigma = flux * 0 + np.std(flux)
+    else:
+        smooth_flux = np.interp(wave, smooth_wave, smooth_flux)
+        smooth_sigma = np.interp(wave, smooth_wave, smooth_sigma)
+
+    smooth = median_filter(smooth_flux, medbin, mode='nearest')
+    smoothsigma = median_filter(smooth_sigma, medbin, mode='nearest')
+
+    Z = (flux == 0.0) * (ivar == 0.0)
+    if np.sum(Z) > 0:
+        smooth[Z] = 0.0
+
+    # Optional QA.
+    if png:
+        import matplotlib.pyplot as plt
+
+        minwave, maxwave = 5000, 9000
+        I = (wave > minwave) * (wave < maxwave)
+
+        fig, ax = plt.subplots(2, 1, figsize=(8, 10), sharex=True)
+        ax[0].plot(wave[I], flux[I], alpha=0.5, color='gray')
+        ax[0].scatter(wave[linemask], flux[linemask], s=10, marker='s', color='k', alpha=0.7)#, zorder=2)
+        #ax[0].plot(wave, smooth, color='orange')
+        ax[0].scatter(_smooth_wave, _smooth_flux, color='red', s=50, marker='s')
+        #ax[0].scatter(_smooth_wave, _smooth_flux, color='orange', marker='s', ls='-', s=20)
+
+        ax[1].plot(wave[I], flux[I] - smooth[I], color='gray', alpha=0.5)
+        ax[1].axhline(y=0, color='k', lw=2)
+
+        for xx in ax:
+            xx.set_xlim(minwave, maxwave)
+        #for xx in ax:
+        #    xx.set_ylim(-2.5, 2)
+
+        zlinewaves = linetable['restwave'] * (1 + redshift)
+        linenames = linetable['name']
+        inrange = np.where((zlinewaves > np.min(wave)) * (zlinewaves < np.max(wave)))[0]
+        if len(inrange) > 0:
+            for linename, zlinewave in zip(linenames[inrange], zlinewaves[inrange]):
+                #print(linename, zlinewave)
+                for xx in ax:
+                    xx.axvline(x=zlinewave, color='gray')
+
+        fig.savefig(png)
+
+    return smooth, smoothsigma
+    
+def _smooth_continuum2(wave, flux, ivar, redshift, medbin=150, 
+                       smooth_window=50, smooth_step=20, maskkms_uv=3000.0, 
+                       maskkms_balmer=1000.0, maskkms_narrow=200.0,
+                       linetable=None, emlinesfile=None, linemask=None, png=None,
+                       log=None, verbose=False):
+    """Build a smooth, nonparametric continuum spectrum.
+
+    Parameters
+    ----------
+    wave : :class:`numpy.ndarray` [npix]
+        Observed-frame wavelength array.
+    flux : :class:`numpy.ndarray` [npix]
+        Spectrum corresponding to `wave`.
+    ivar : :class:`numpy.ndarray` [npix]
+        Inverse variance spectrum corresponding to `flux`.
+    redshift : :class:`float`
+        Object redshift.
+    medbin : :class:`int`, optional, defaults to 150 pixels
+        Width of the median-smoothing kernel in pixels; a magic number.
+    smooth_window : :class:`int`, optional, defaults to 50 pixels
+        Width of the sliding window used to compute the iteratively clipped
+        statistics (mean, median, sigma); a magic number. Note: the nominal
+        extraction width (0.8 A) and observed-frame wavelength range
+        (3600-9800 A) corresponds to pixels that are 66-24 km/s. So
+        `smooth_window` of 50 corresponds to 3300-1200 km/s, which is
+        conservative for all but the broadest lines. A magic number. 
+    smooth_step : :class:`int`, optional, defaults to 10 pixels
+        Width of the step size when computing smoothed statistics; a magic
+        number.
+    maskkms_uv : :class:`float`, optional, defaults to 3000 km/s
+        Masking width for UV emission lines. Pixels within +/-3*maskkms_uv
+        are masked before median-smoothing.
+    maskkms_balmer : :class:`float`, optional, defaults to 3000 km/s
+        Like `maskkms_uv` but for Balmer lines.
+    maskkms_narrow : :class:`float`, optional, defaults to 300 km/s
+        Like `maskkms_uv` but for narrow, forbidden lines.
+    linemask : :class:`numpy.ndarray` of type :class:`bool`, optional, defaults to `None`
+        Boolean mask with the same number of pixels as `wave` where `True`
+        means a pixel is (possibly) affected by an emission line
+        (specifically a strong line which likely cannot be median-smoothed).
+    png : :class:`str`, optional, defaults to `None`
+        Generate a simple QA plot and write it out to this filename.
+
+    Returns
+    -------
+    smooth :class:`numpy.ndarray` [npix]
+        Smooth continuum spectrum which can be subtracted from `flux` in
+        order to create a pure emission-line spectrum.
+    smoothsigma :class:`numpy.ndarray` [npix]
+        Smooth one-sigma uncertainty spectrum.
+
+    """
+    from numpy.lib.stride_tricks import sliding_window_view
+    from scipy.ndimage import median_filter
+    from scipy.stats import sigmaclip
+    #from astropy.stats import sigma_clip
+
+    if log is None:
+        from desiutil.log import get_logger, DEBUG
+        if verbose:
+            log = get_logger(DEBUG)
+        else:
+            log = get_logger()
+
+    if linetable is None:
+        from fastspecfit.emlines import read_emlines        
+        linetable = read_emlines(emlinesfile=emlinesfile)
+        
+    npix = len(wave)
+
+    # If we're not given a linemask, make a conservative one.
+    if linemask is None:
+        linemask = np.zeros(npix, bool) # True = (possibly) affected by emission line
+
+        nsig = 3
+
+        # select just strong lines
+        zlinewaves = linetable['restwave'] * (1 + redshift)
+        inrange = (zlinewaves > np.min(wave)) * (zlinewaves < np.max(wave))
+        if np.sum(inrange) > 0:
+            linetable = linetable[inrange]
+            linetable = linetable[linetable['amp'] >= 1]
+            if len(linetable) > 0:
+                for oneline in linetable:
+                    zlinewave = oneline['restwave'] * (1 + redshift)
+                    if oneline['isbroad']:
+                        if oneline['isbalmer']:
+                            sigma = maskkms_balmer
+                        else:
+                            sigma = maskkms_uv
+                    else:
+                        sigma = maskkms_narrow
+                
+                    sigma *= zlinewave / C_LIGHT # [km/s --> Angstrom]
+                    I = (wave >= (zlinewave - nsig*sigma)) * (wave <= (zlinewave + nsig*sigma))
+                    if len(I) > 0:
+                        linemask[I] = True
+
+        # Special: mask Ly-a (1215 A)
+        zlinewave = 1215.0 * (1 + redshift)
+        if (zlinewave > np.min(wave)) * (zlinewave < np.max(wave)):
+            sigma = maskkms_uv * zlinewave / C_LIGHT # [km/s --> Angstrom]
+            I = (wave >= (zlinewave - nsig*sigma)) * (wave <= (zlinewave + nsig*sigma))
+            if len(I) > 0:
+                linemask[I] = True
+
+    if len(linemask) != npix:
+        errmsg = 'Linemask must have the same number of pixels as the input spectrum.'
+        log.critical(errmsg)
+        raise ValueError(errmsg)
+
+    # Build the smooth (line-free) continuum by computing statistics in a
+    # sliding window, accounting for masked pixels and trying to be smart
+    # about broad lines. See:
+    #   https://stackoverflow.com/questions/41851044/python-median-filter-for-1d-numpy-array
+    #   https://numpy.org/devdocs/reference/generated/numpy.lib.stride_tricks.sliding_window_view.html
+    
+    wave_win = sliding_window_view(wave, window_shape=smooth_window)
+    flux_win = sliding_window_view(flux, window_shape=smooth_window)
+    ivar_win = sliding_window_view(ivar, window_shape=smooth_window)
+    noline_win = sliding_window_view(np.logical_not(linemask), window_shape=smooth_window)
+
+    nminpix = 15
+
+    smooth_wave, smooth_flux, smooth_sigma, smooth_mask = [], [], [], []
+    for swave, sflux, sivar, noline in zip(wave_win[::smooth_step],
+                                           flux_win[::smooth_step],
+                                           ivar_win[::smooth_step],
+                                           noline_win[::smooth_step]):
+
+        # if there are fewer than XX good pixels after accounting for the
+        # line-mask, skip this window.
+        sflux = sflux[noline]
+        if len(sflux) < nminpix:
+            smooth_mask.append(True)
+            continue
+        swave = swave[noline]
+        sivar = sivar[noline]
+
+        cflux, _, _ = sigmaclip(sflux, low=2.0, high=2.0)
+        if len(cflux) < nminpix:
+            smooth_mask.append(True)
+            continue
+
+        # Toss out regions with too little good data.
+        if np.sum(sivar > 0) < nminpix:
+            smooth_mask.append(True)
+            continue
+
+        I = np.isin(sflux, cflux) # fragile?
+        sig = np.std(cflux) # simple median and sigma
+        mn = np.median(cflux)
+
+        #if png and mn < -1:# and np.mean(swave[I]) > 7600:
+        #    print(np.mean(swave[I]), mn)
+
+        # One more check for crummy spectral regions.
+        if mn == 0.0:
+            smooth_mask.append(True)
+            continue
+
+        smooth_wave.append(np.mean(swave[I]))
+        smooth_mask.append(False)
+
+        ## astropy is too slow!!
+        #cflux = sigma_clip(sflux, sigma=2.0, cenfunc='median', stdfunc='std', masked=False, grow=1.5)
+        #if np.sum(np.isfinite(cflux)) < 10:
+        #    smooth_mask.append(True)
+        #    continue
+        #I = np.isfinite(cflux) # should never be fully masked!
+        #smooth_wave.append(np.mean(swave[I]))
+        #smooth_mask.append(False)
+        #sig = np.std(cflux[I])
+        #mn = np.median(cflux[I])
+
+        ## inverse-variance weighted mean and sigma
+        #norm = np.sum(sivar[I])
+        #mn = np.sum(sivar[I] * cflux[I]) / norm # weighted mean
+        #sig = np.sqrt(np.sum(sivar[I] * (cflux[I] - mn)**2) / norm) # weighted sigma
+
+        smooth_sigma.append(sig)
+        smooth_flux.append(mn)
+
+    smooth_mask = np.array(smooth_mask)
+    smooth_wave = np.array(smooth_wave)
+    smooth_sigma = np.array(smooth_sigma)
+    smooth_flux = np.array(smooth_flux)
+
+    # For debugging.
+    if png:
+        _smooth_wave = smooth_wave.copy()
+        _smooth_flux = smooth_flux.copy()
+
+    # corner case for very wacky spectra
+    if len(smooth_flux) == 0:
+        smooth_flux = flux
+        smooth_sigma = flux * 0 + np.std(flux)
+    else:
+        from scipy.interpolate import make_interp_spline
+        srt = np.argsort(smooth_wave)
+        bspl_flux = make_interp_spline(smooth_wave[srt], smooth_flux[srt], k=1)
+        smooth_flux = bspl_flux(wave)
+
+        bspl_sigma = make_interp_spline(smooth_wave[srt], smooth_sigma[srt], k=1)
+        smooth_sigma = bspl_sigma(wave)
+        #pdb.set_trace()
+        #smooth_flux = np.interp(wave, smooth_wave, smooth_flux)
+        #smooth_sigma = np.interp(wave, smooth_wave, smooth_sigma)
+
+    if False:
+        smooth = smooth_flux
+        smoothsigma = smooth_sigma
+    else:
+        smooth = median_filter(smooth_flux, medbin, mode='nearest')
+        smoothsigma = median_filter(smooth_sigma, medbin, mode='nearest')
+
+    Z = (flux == 0.0) * (ivar == 0.0)
+    if np.sum(Z) > 0:
+        smooth[Z] = 0.0
+
+    # Optional QA.
+    if png:
+        import matplotlib.pyplot as plt
+
+        minwave, maxwave = wave.min(), wave.max() # 5000, 9000
+        I = (wave > minwave) * (wave < maxwave)
+
+        fig, ax = plt.subplots(2, 1, figsize=(8, 10), sharex=True)
+        ax[0].plot(wave[I], flux[I], alpha=0.5, color='gray')
+        ax[0].scatter(wave[linemask], flux[linemask], s=10, marker='s', color='k', alpha=0.7)#, zorder=2)
+        ax[0].plot(wave, smooth, color='orange')
+        #ax[0].scatter(_smooth_wave, _smooth_flux, color='red', s=5, marker='s')
+        #ax[0].scatter(_smooth_wave, _smooth_flux, color='orange', marker='s', ls='-', s=20)
+
+        ax[1].plot(wave[I], flux[I] - smooth[I], color='gray', alpha=0.5)
+        ax[1].axhline(y=0, color='k', lw=2)
+
+        for xx in ax:
+            xx.set_xlim(minwave, maxwave)
+        #for xx in ax:
+        #    xx.set_ylim(-2.5, 2)
+
+        zlinewaves = linetable['restwave'] * (1 + redshift)
+        linenames = linetable['name']
+        inrange = np.where((zlinewaves > np.min(wave)) * (zlinewaves < np.max(wave)))[0]
+        if len(inrange) > 0:
+            for linename, zlinewave in zip(linenames[inrange], zlinewaves[inrange]):
+                #print(linename, zlinewave)
+                for xx in ax:
+                    xx.axvline(x=zlinewave, color='gray')
+
+        fig.savefig(png)
+
+    return smooth, smoothsigma
+    
+def smooth_continuum():
+
+    from scipy.ndimage import gaussian_filter
+    from desispec.io import read_spectra
+    from desispec.coaddition import coadd_cameras    
+    from fastspecfit.io import read_fastspecfit, DESISpectra
+    #from fastspecfit.continuum import _smooth_continuum
+    from fastspecfit.io import cache_templates, get_templates_filename
+    from fastspecfit.continuum import ContinuumTools
+
+    survey, program, healpix, targetid = 'sv1', 'dark', 7610, 39633483106093315
+
+    exampledir = os.path.join(datadir, 'example-spectra')
+    redfile = os.path.join(exampledir, f'redrock-{survey}-{program}-{healpix}-{targetid}.fits')
+    specfile = os.path.join(exampledir, f'coadd-{survey}-{program}-{healpix}-{targetid}.fits')
+    fastfile = os.path.join(exampledir, f'fastspec-{survey}-{program}-{healpix}-{targetid}.fits')
+
+    Spec = DESISpectra()
+    Spec.select(redfile)
+    data = Spec.read_and_unpack()
+    data = data[0]
+
+    specwave = np.hstack(data['wave'])
+    specflux = np.hstack(data['flux'])
+    specivar = np.hstack(data['ivar']) * np.logical_not(np.hstack(data['linemask'])) # mask emission lines
+
+    #spec = read_spectra(specfile)
+    #coadd = coadd_cameras(spec)
+    #wave = np.hstack([coadd.wave[cam] for cam in coadd.bands])
+    #flux = np.hstack([coadd.flux[cam].flatten() for cam in coadd.bands])
+    #ivar = np.hstack([coadd.ivar[cam].flatten() for cam in coadd.bands])
+
+    fast, meta, _, _, models = read_fastspecfit(fastfile, read_models=True)
+
+    redshift = fast['Z'][0]
+    use_vdisp = fast['VDISP'][0]
+    coeff = fast['COEFF'].flatten()
+
+    #hdr = fitsio.read_header(fastfile, ext='MODELS')
+    #modelwave = hdr['CRVAL1'] + np.arange(hdr['NAXIS1']) * hdr['CDELT1']
+    #continuum = models[0, 0, :]
+    #smooth_continuum = models[0, 1, :]
+    #emlinemodel = models[0, 2, :]
+
+    templates = get_templates_filename()
+    templatecache = cache_templates(templates, mintemplatewave=450.0, maxtemplatewave=40e4)
+    CTools = ContinuumTools(continuum_pixkms=templatecache['continuum_pixkms'],
+                            pixkms_wavesplit=templatecache['pixkms_wavesplit'])
+
+    input_templateflux_nolines = templatecache['templateflux_nolines']
+
+    desitemplates_nolines, _ = CTools.templates2data(
+        input_templateflux_nolines, templatecache['templatewave'], redshift=redshift,
+        dluminosity=data['dluminosity'],
+        specwave=data['wave'], specres=data['res'], specmask=data['mask'], 
+        vdisp=use_vdisp, cameras=data['cameras'], stack_cameras=True, 
+        synthphot=False)
+
+    desimodel_nolines = desitemplates_nolines.dot(coeff)    
+
+    residuals = specflux - desimodel_nolines
+    linemask = np.hstack(data['linemask'])
+
+    smooth, smoothsigma = _smooth_continuum2(specwave, residuals, specivar, redshift=redshift, 
+                                             linemask=linemask, png='smooth.png')
+
+    pdb.set_trace()
+
+    minwave, maxwave = 8400, 8500
+    I = (specwave > minwave) * (specwave < maxwave)
+
+    #fig, ax = plt.subplots()
+    #ax.plot(specwave, 1 / np.sqrt(specivar))
+    #ax.plot(specwave, smoothsigma)
+    #fig.tight_layout()
+    #fig.savefig('smooth.png')
+
+    fig, ax = plt.subplots()
+    ax.plot(specwave, gaussian_filter(specflux, 0))
+    ax.plot(specwave, gaussian_filter(desimodel_nolines, 0))
+    ax.plot(specwave, gaussian_filter(desimodel_nolines+smooth, 0))
+    ax.plot(specwave, gaussian_filter(smooth, 0))
+    ax.set_ylim(-0.2, 1.5)
+    fig.tight_layout()
+    fig.savefig('smooth.png')
+
 def main():
 
     import argparse    
@@ -661,12 +1247,18 @@ def main():
     parser.add_argument('--compare-zouhu', action='store_true', help='Compare with the zouhu VAC.')    
     parser.add_argument('--example-spectra', action='store_true', help='Build the example spectra figures.')
 
+    parser.add_argument('--smooth-continuum', action='store_true')
+
     parser.add_argument('--match-lss', action='store_true', help='Match to the LSS catalogs (no figures, just catalogs).')
-    parser.add_argument('--build-example-spectra', action='store_true', help='Match to the LSS catalogs (no figures, just catalogs).')
+    parser.add_argument('--build-example-spectra', action='store_true', help='Build example spectra (no figures, just catalogs).')
 
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')
     args = parser.parse_args()
+
+    # testing
+    if args.smooth_continuum:
+        smooth_continuum()
 
     # data below here
     if args.build_example_spectra:
