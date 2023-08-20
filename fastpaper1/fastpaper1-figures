@@ -36,7 +36,7 @@ def major_formatter(x, pos):
     else:
         return '{:.1f}'.format(10**x)
 
-def plot_style(font_scale=1.2, paper=False, talk=True):
+def plot_style(font_scale=1.2, paper=False, talk=True, style='ticks'):
 
     import seaborn as sns
     rc = {'font.family': 'serif'}#, 'text.usetex': True}
@@ -54,7 +54,7 @@ def plot_style(font_scale=1.2, paper=False, talk=True):
         palette = 'deep'
         #rc.update({'text.usetex': True})
 
-    sns.set(context=context, style='ticks', font_scale=font_scale, rc=rc)
+    sns.set(context=context, style=style, font_scale=font_scale, rc=rc)
     sns.set_palette(palette, 12)
 
     colors = sns.color_palette()
@@ -504,7 +504,6 @@ def fig_example_emlines(png=None):
     from desispec.io import read_spectra
     from desispec.coaddition import coadd_cameras    
     from fastspecfit.io import read_fastspecfit
-    from fastspecfit.util import C_LIGHT
     from fastspecfit.emlines import read_emlines
         
     sns, colors = plot_style(talk=True, font_scale=0.8)
@@ -969,6 +968,197 @@ def smooth_continuum(overwrite=False):
     fig.tight_layout()
     fig.savefig('smooth.png')
 
+def fig_sps_models(png=None):
+
+    from scipy.stats import gmean
+    from matplotlib.patches import Rectangle
+    from speclite import filters
+    from fastspecfit.io import cache_templates
+    from fastspecfit.util import TabulatedDESI
+
+    sns, colors = plot_style(style='ticks', talk=True, font_scale=1.1)
+
+    @ticker.FuncFormatter
+    def major_formatter(x, pos):
+        if (x >= 0.01) and (x < 0.1):
+            return f'{x:.2f}'
+        elif (x >= 0.1) and (x < 1):
+            return f'{x:.1f}'
+        else:
+            return f'{x:.0f}'
+
+    def age_formatter(x):
+        xMyr = x / 1e6
+        xGyr = x / 1e9
+        if (xMyr < 1e3):
+            return f'{xMyr:.0f} Myr'
+        else:
+            return f'{xGyr:.1f} Gyr'
+
+    filt = filters.load_filters('decam2014-g', 'decam2014-r', 'decam2014-z', 
+                                'wise2010-W1', 'wise2010-W2', 'wise2010-W3', 'wise2010-W4')
+    bands = ['g', 'r', 'z', 'W1', 'W2', 'W3', 'W4']
+
+    templateversion = '1.1.0'
+    cache = cache_templates(templateversion=templateversion)
+
+    wave = cache['templatewave'] 
+    allflux = cache['templateflux']
+    allmeta = cache['templateinfo']
+    print(set(allmeta['age']))
+
+    zref = 0.1
+    cosmo = TabulatedDESI()
+    dlum = cosmo.luminosity_distance(zref)
+
+    logmstar = 10.5
+    fluxnorm = 1. #1e17
+    T = fluxnorm * 10**logmstar * (10. / (1e6 * dlum))**2 / (1. + zref)
+    factor = 10**(0.4 * 48.6) * wave**2 / (C_LIGHT * 1e13) # flam --> fnu
+
+    wdesi = [0.36, 0.98]
+    ffact = -3.
+
+    def plotit(ax, I, txt, show_legend=False, show_filters=False, xlabel=None, 
+               xticks=None, yticks=None, xlim=[0.06, 40], ylim=[29.5, 3]):
+
+        flux = allflux[:, I]
+        meta = allmeta[I]
+    
+        npix, nmodel = flux.shape
+        #print(npix, nmodel)
+    
+        ax.add_artist(Rectangle((wdesi[0], ylim[1]), np.ptp(wdesi), np.ptp(ylim), 
+                                fill=True, color='gray', alpha=0.2))#, zorder=0)
+
+        for ii in range(nmodel):
+            flux1 = factor * T * flux[:, ii]
+            J = np.where(flux1 > 0)[0]
+            ax.plot(wave[J] / 1e4, -2.5 * np.log10(flux1[J]), lw=2,
+                    label=age_formatter(meta['age'][ii]), zorder=1)
+
+        if show_filters:
+            for ff, band in zip(filt, bands):
+                ax.plot(ff.wavelength / 1e4, ffact * ff.response / np.max(ff.response) + ylim[0], 
+                        color='k', alpha=0.8, lw=1)
+                #print(band, ff.effective_wavelength.value / 1e4, 0.5 * ffact + ylim[0])
+                ax.text(ff.effective_wavelength.value / 1e4, -0.7 + ffact + ylim[0],
+                        band, fontsize=10, va='center', ha='center')
+            #ax.text(1.0, 25., 'g', fontsize=20, va='center', ha='center')
+
+        #print((wdesi[0], ylim[0]), np.ptp(wdesi), np.ptp(ylim))
+
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
+        ax.set_xscale('log')
+
+        if xticks == '':
+            ax.xaxis.set_major_formatter(ticker.NullFormatter())
+            #ax.set_xticks([])
+        else:
+            ax.xaxis.set_major_formatter(major_formatter)
+            #ax.set_xticks(np.array([0.1, 0.2, 0.5, 1.0, 1.5, 3.0, 5.0, 10.0, 20.0]))
+
+        if yticks == '':
+            ax.yaxis.set_major_formatter(ticker.NullFormatter())
+            #ax.set_yticks([])
+
+        ax.text(0.03, 0.96, '\n'.join(txt), transform=ax.transAxes, 
+                fontsize=14, va='top', ha='left')
+
+        if xlabel:
+            ax.set_xlabel(xlabel)
+
+        if show_legend:
+            ax.legend(fontsize=10, ncols=1, loc='lower right')
+
+    #fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(
+    #    2, 3, sharex=True, sharey=True, figsize=(16, 9))
+
+    fig = plt.figure(figsize=(16, 9))
+    gs = fig.add_gridspec(nrows=2, ncols=3)
+
+    ax1 = fig.add_subplot(gs[0, 0]) # rows x cols
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax3 = fig.add_subplot(gs[0, 2])
+    ax4 = fig.add_subplot(gs[1, 0])
+    ax5 = fig.add_subplot(gs[1, 1])
+
+    plotit(ax1, np.where((allmeta['av'] == 0.) * (allmeta['zzsun'] == -1.))[0],
+           [r'$Z=0.1Z_{\odot}$', r'$A(V)=0$ mag'], show_filters=True, xticks='')
+    plotit(ax2, np.where((allmeta['av'] == 0.) * (allmeta['zzsun'] == 0.))[0],
+           [r'$Z=Z_{\odot}$', r'$A(V)=0$ mag'], show_filters=True, xticks='', yticks='')
+    plotit(ax3, np.where((allmeta['av'] == 0.) * (allmeta['zzsun'] == 0.3))[0],
+           [r'$Z=2Z_{\odot}$', r'$A(V)=0$ mag'], show_filters=True, xticks='', yticks='')
+
+    plotit(ax4, np.where((allmeta['av'] == 0.11521167) * (allmeta['zzsun'] == 0.))[0],
+           [r'$Z=Z_{\odot}$', r'$A(V)=0.115$ mag'], show_filters=True, 
+           xlabel='Rest Wavelength ($\mu$m)')
+    plotit(ax5, np.where((allmeta['av'] == 1.412526) * (allmeta['zzsun'] == 0.))[0],
+           [r'$Z=Z_{\odot}$', r'$A(V)=1.41$ mag'], show_legend=False, show_filters=True, 
+           yticks='', xlabel='Rest Wavelength ($\mu$m)')
+
+    # SFH - from build_fsps_templates
+    ax6 = fig.add_subplot(gs[1, 2])
+
+    agelims = np.array([0., 0.01, 0.03, 0.1, 0.33, 1.1, 3.6, 12., 14.]) # [Gyr]
+    nages = len(agelims) - 1
+    agebins = np.array([agelims[:-1], agelims[1:]]).T # [Gyr]
+    sfrs = [0.4, 0.12, 0.15, 0.19, 0.14, 0.44, 0.52, 0.66]
+
+    handles, labels = ax1.get_legend_handles_labels()
+
+    for ibin, (abin, sfr, handle, label) in enumerate(zip(agebins, sfrs, handles, labels)):
+        #print(abin, np.mean(abin))
+        #sfr = 0.1+ibin/10
+        if ibin == 0:
+            xpos = 0.006
+        else:
+            xpos = gmean(abin)
+        ypos = sfr * 1.2
+        ax6.add_artist(Rectangle((abin[0], 0), np.ptp(abin), sfr, 
+                                 fill=True, color=handle.get_color()))
+        ax6.text(xpos, ypos, label.replace(' ', '\n'),
+                 ha='center', va='center', fontsize=11)
+
+    ax6.set_xlim(4e-3, 20.)
+
+    ax6.set_ylim(1e-1, 1)
+    ax6.set_yscale('log')
+    ax6.yaxis.set_minor_formatter(ticker.NullFormatter())
+    ax6.yaxis.set_major_formatter(ticker.NullFormatter())
+
+    ax6.set_xscale('log')
+    ax6.xaxis.set_major_formatter(major_formatter)
+    ax6.set_xlabel('Lookback Time (Gyr)')
+
+    ax6_twin = ax6.twinx()
+    ax6_twin.set_ylim(1e-1, 1)
+    ax6_twin.set_yscale('log')
+    ax6_twin.set_xscale('log')
+    ax6_twin.yaxis.set_minor_formatter(ticker.NullFormatter())
+    ax6_twin.yaxis.set_major_formatter(ticker.NullFormatter())
+    ax6_twin.set_ylabel(r'SFR ($M_{\odot}~\mathrm{yr}^{-1}$)'+'\n(arbitrary normalization)')
+
+    #ax6.legend(hh, ll, loc='upper left', fontsize=12)
+
+    ulpos = ax1.get_position()
+    llpos = ax4.get_position()
+    lrpos = ax6.get_position()
+
+    #fig.text((lrpos.x1-llpos.x0)/2+llpos.x0, lrpos.y0-0.07, 
+    #         'Rest Wavelength ($\mu$m)', ha='center', va='center')
+    fig.text(ulpos.x0-0.1, (ulpos.y1-llpos.y0)/2+llpos.y0, 
+             f'AB mag ($10^{{{logmstar:.1f}}}~M_{{\odot}}$ galaxy at $z={zref:.1f}$)', 
+             ha='center', va='center', rotation=90)
+    fig.subplots_adjust(left=0.08, right=0.92, top=0.95, bottom=0.12, wspace=0.08, hspace=0.08)
+
+    if png:
+        pngfile = os.path.join(figdir, png)
+        log.info('Writing {}'.format(pngfile))
+        fig.savefig(pngfile)#, bbox_inches='tight')
+        plt.close(fig)
+
 def main():
 
     import argparse    
@@ -988,6 +1178,9 @@ def main():
 
     # diagnostic figures
     parser.add_argument('--compare-zouhu', action='store_true', help='Compare with the zouhu VAC.')    
+    parser.add_argument('--example-spectra', action='store_true', help='Build the example spectra figures.')
+    parser.add_argument('--sps-models', action='store_true', help='SPS model spectra.')
+
     parser.add_argument('--smooth-continuum', action='store_true')
 
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
@@ -1007,6 +1200,9 @@ def main():
     # figures below here
     if args.example_emlines:
         fig_example_emlines(png='example-emlines.png')
+
+    if args.sps_models:
+        fig_sps_models(png='sps-models.png')
         
     if args.compare_zouhu:
         compare_zouhu()
