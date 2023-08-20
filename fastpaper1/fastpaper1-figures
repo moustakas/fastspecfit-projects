@@ -4,7 +4,7 @@
 
 # build the data
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --match-lss
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --build-example-spectra
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --write-example-spectra
 
 # build the figures
 time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --mstar
@@ -22,6 +22,8 @@ from desiutil.log import get_logger
 log = get_logger()
 
 from fastspecfit.util import C_LIGHT
+
+fujidir = '/pscratch/sd/i/ioannis/fastspecfit/vac/data1/fuji/catalogs' # to be updated
 
 paperdir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'fastpaper1')
 figdir = os.path.join(paperdir, 'figures')
@@ -60,80 +62,91 @@ def plot_style(font_scale=1.2, paper=False, talk=True):
 
     return sns, colors
 
-def build_example_spectra(overwrite=False):
+def write_example_spectra(overwrite=False):
     """Simple script to write out small coadded spectra and redrock files needed for
     the example spectra/modeling figures in the paper.
 
     """
-    from redrock.external.desi import write_zbest
-    from desispec.io import write_spectra, read_spectra
-    from fastspecfit.qa import fastqa
-    from fastspecfit.fastspecfit import fastspec
+    from fastspecfit.io import one_desi_spectrum
 
-    def write_one_spectrum(survey, program, healpix, targetid, specprod='fuji', overwrite=False):
+    outdir = os.path.join(datadir, 'example-spectra')
 
-        os.environ['SPECPROD'] = specprod # needed to get write_spectra have the correct dependency
+    # 1 - example-emlines figure
 
-        specdir = os.path.join(os.environ.get('DESI_ROOT'), 'spectro', 'redux', specprod, 'healpix',
-                               survey, program, str(healpix//100), str(healpix))
-        coaddfile = os.path.join(specdir, f'coadd-{survey}-{program}-{healpix}.fits')
-        redrockfile = os.path.join(specdir, f'redrock-{survey}-{program}-{healpix}.fits')
+    # 1a - nice star-forming galaxy
+    one_desi_spectrum(survey='sv1', program='dark', healpix=8140, targetid=39633560344201268,
+                      specprod='fuji', outdir=outdir, overwrite=overwrite)
 
-        outdir = os.path.join(datadir, 'example-spectra')
-        out_coaddfile = os.path.join(outdir, f'coadd-{survey}-{program}-{healpix}-{targetid}.fits')
-        out_redrockfile = os.path.join(outdir, f'redrock-{survey}-{program}-{healpix}-{targetid}.fits')
-        out_fastfile = os.path.join(outdir, f'fastspec-{survey}-{program}-{healpix}-{targetid}.fits')
-        if (os.path.isfile(out_coaddfile) or os.path.isfile(out_redrockfile) or os.path.isfile(out_fastfile)) and not overwrite:
-            if os.path.isfile(out_coaddfile):
-                print(f'Coadd file {out_coaddfile} exists and overwrite is False')
-            if os.path.isfile(out_redrockfile):
-                print(f'Redrock file {out_redrockfile} exists and overwrite is False')
-            if os.path.isfile(out_fastfile):
-                print(f'fastspec file {out_fastfile} exists and overwrite is False')
-            return
-        
-        redhdr = fitsio.read_header(redrockfile)
-        zbest = Table.read(redrockfile, 'REDSHIFTS')
-        fibermap = Table.read(redrockfile, 'FIBERMAP')
-        expfibermap = Table.read(redrockfile, 'EXP_FIBERMAP')
-        tsnr2 = Table.read(redrockfile, 'TSNR2')
-        
-        spechdr = fitsio.read_header(coaddfile)
-        
-        zbest = zbest[np.isin(zbest['TARGETID'], targetid)]
-        fibermap = fibermap[np.isin(fibermap['TARGETID'], targetid)]
-        expfibermap = expfibermap[np.isin(expfibermap['TARGETID'], targetid)]
-        tsnr2 = tsnr2[np.isin(tsnr2['TARGETID'], targetid)]
-        
-        archetype_version = None
-        template_version = {redhdr['TEMNAM{:02d}'.format(nn)]: redhdr['TEMVER{:02d}'.format(nn)] for nn in np.arange(10)}
+    # 1b - broad-line AGN example (z=0.287)
+    one_desi_spectrum(survey='sv3', program='bright', healpix=26065, targetid=39627878949720219,
+                      specprod='fuji', outdir=outdir, overwrite=overwrite)
 
-        print(f'Writing {out_redrockfile}')
-        write_zbest(out_redrockfile, zbest, fibermap, expfibermap, tsnr2,
-                    template_version, archetype_version, spec_header=spechdr)
-        
-        spec = read_spectra(coaddfile).select(targets=targetid)
-        print(f'Writing {out_coaddfile}')
-        write_spectra(out_coaddfile, spec)
+    # 1c - gorgeous QSO (z=0.191)
+    one_desi_spectrum(survey='sv3', program='dark', healpix=16040, targetid=39633451392961492,
+                       specprod='fuji', outdir=outdir, overwrite=overwrite)
 
-        fastspec(args=f'{out_redrockfile} -o {out_fastfile}'.split())
-        fastqa(args=f'{out_fastfile} --redrockfiles {out_redrockfile} -o {outdir}'.split())
+    # 1d - nice QSO with strong MgII and Hbeta (z=0.693)
+    one_desi_spectrum(survey='sv1', program='dark', healpix=7022, targetid=39633331528141827,
+                      specprod='fuji', outdir=outdir, overwrite=overwrite)
 
-    # broad-line AGN example
-    write_one_spectrum(survey='sv3', program='bright', healpix=26065, targetid=39627878949720219,
-                       specprod='fuji', overwrite=overwrite)
+    # 2 - example-continuum figure
 
-    ## narrow-line spectrum on a somewhat evolved continuum; nice [OIII] 5007
-    #write_one_spectrum(survey='sv1', program='bright', healpix=17675, targetid=39627628474278005,
-    #                   specprod='fuji', overwrite=overwrite)
+    # 2a - narrow-line AGN on a somewhat evolved continuum; nice [OIII] 5007 (z=0.202)
+    one_desi_spectrum(survey='sv1', program='bright', healpix=17675, targetid=39627628474278005,
+                      specprod='fuji', outdir=outdir, overwrite=overwrite)
 
-    # nice star-forming galaxy
-    write_one_spectrum(survey='sv1', program='dark', healpix=8140, targetid=39633560344201268,
-                       specprod='fuji', overwrite=overwrite)
+    # 2b - early-type spectrum with some weak (AGN) emission (z=0.132)
+    one_desi_spectrum(survey='sv3', program='bright', healpix=9813, targetid=39633109787873428,
+                      specprod='fuji', outdir=outdir, overwrite=overwrite)
 
-    # testing smooth continuum algorithm
-    write_one_spectrum(survey='sv1', program='dark', healpix=7610, targetid=39633483106093315,
-                       specprod='fuji', overwrite=overwrite)
+def match_lss(overwrite=False):
+    """Match to the LSS catalogs (full and clustering)."""
+
+    from fastspecfit.io import read_fastspecfit
+    from fastspecfit.io import write_fastspecfit
+    #from desispec.validredshifts import actually_validate
+    #actually_validate(cat, fiberstatus_cut=True, ignore_emline=True)
+    #https://github.com/desihub/LSS/blob/main/py/LSS/main/cattools.py#L2968
+
+    # read the clustering catalogs
+    lssdir = '/global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats'
+    for targtype in ['BGS_ANY', 'LRG', 'ELG', 'QSO']:
+
+        fastfile = os.path.join(datadir, 'clustering', f'fastspec-clustering-{targtype}.fits')
+        lssfile = os.path.join(datadir, 'clustering', f'lss-clustering-{targtype}.fits')
+        #lssfullfile = os.path.join(datadir, 'full', f'lss-full-{targtype}.fits')
+
+        if os.path.isfile(fastfile) and os.path.isfile(lssfile) and not overwrite:
+            log.info(f'fastspecfit file {fastfile} exists')
+            log.info(f'LSS clustering file {lssfile} exists')
+        else:
+            lssNfile = os.path.join(lssdir, 'clustering', f'{targtype}_N_clustering.dat.fits')
+            lssSfile = os.path.join(lssdir, 'clustering', f'{targtype}_S_clustering.dat.fits')
+            lssN = fitsio.read(lssNfile)
+            lssS = fitsio.read(lssSfile)
+            lss = Table(np.concatenate((lssN, lssS)))
+            log.info(f'Read {len(lssN):,d} objects from {lssNfile}')
+            log.info(f'Read {len(lssS):,d} objects from {lssSfile}')
+            log.info(f'  Total number of {targtype}: {len(lss):,d}')
+            del lssN, lssS
+    
+            if targtype == 'BGS_ANY':
+                sv3file = fujidir+'/fastspec-fuji-sv3-bright.fits'
+                fast, meta, _, _ = read_fastspecfit(sv3file)
+            else:
+                sv3file = fujidir+'/fastspec-fuji-sv3-dark.fits'
+                fast, meta, _, _ = read_fastspecfit(sv3file)
+    
+            indx_fast, indx_lss = geomask.match(fast['TARGETID'], lss['TARGETID'])
+            fast = fast[indx_fast]
+            meta = meta[indx_fast]
+            lss = lss[indx_lss]
+            assert(np.all(meta['TARGETID'] == lss['TARGETID']))
+    
+            write_fastspecfit(fast, meta, outfile=fastfile)
+    
+            lss.write(lssfile, overwrite=True)
+            log.info(f'Wrote {len(lss):,d} objects to {lssfile}')
 
 def compare_zouhu(png=None):
     """Compare with the Hu Zou VAC."""
@@ -146,15 +159,15 @@ def compare_zouhu(png=None):
     zouhu = zouhu[uindx]
 
     if False:
-        darkfile = '/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/fastspec-fuji-sv3-dark.fits'
-        brightfile = '/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/fastspec-fuji-sv3-bright.fits'
+        darkfile = fujidir+'/fastspec-fuji-sv3-dark.fits'
+        brightfile = fujidir+'/fastspec-fuji-sv3-bright.fits'
         fastbright, metabright, _, _ = read_fastspecfit(brightfile)
         fastdark, metadark, _, _ = read_fastspecfit(darkfile)
         fast = vstack((fastbright, fastdark))
         meta = vstack((metabright, metadark))
         del fastbright, metabright, fastdark, metadark
     else:
-        fastfile = '/pscratch/sd/i/ioannis/fastspecfit/data3/fuji/catalogs/fastspec-fuji.fits'
+        fastfile = fujidir+'/fastspec-fuji.fits'
         fast, meta, _, _ = read_fastspecfit(fastfile)
 
     _, uindx = np.unique(fast['TARGETID'], return_index=True)
@@ -180,21 +193,21 @@ def compare_zouhu(png=None):
 
     #ax.scatter(fast['HALPHA_SIGMA'][I], np.log10(fast['HALPHA_FLUX'][I])-np.log10(zouhu['HALPHA_FLUX'][I]), s=1)
 
-    fig, ax = plt.subplots()
-    ax.scatter(zouhu['HALPHA_SIGMA'][I], np.log10(fast['HALPHA_FLUX'][I])-np.log10(zouhu['HALPHA_FLUX'][I]), s=1)
-    ax.set_ylim(-1, 1)
-    fig.tight_layout()
-    fig.savefig('desi-users/ioannis/tmp/junk2.png')
+    #fig, ax = plt.subplots()
+    #ax.scatter(zouhu['HALPHA_SIGMA'][I], np.log10(fast['HALPHA_FLUX'][I])-np.log10(zouhu['HALPHA_FLUX'][I]), s=1)
+    #ax.set_ylim(-1, 1)
+    #fig.tight_layout()
+    #fig.savefig('desi-users/ioannis/tmp/junk2.png')
     
     fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(10, 12))
 
     ax1.scatter(np.log10(fast['HALPHA_FLUX'][I]), np.log10(zouhu['HALPHA_FLUX'][I]), s=1)
-    ax1.scatter(np.log10(fast['HALPHA_FLUX'][I][B]), np.log10(zouhu['HALPHA_FLUX'][I][B]), s=1, color='orange')
+    #ax1.scatter(np.log10(fast['HALPHA_FLUX'][I][B]), np.log10(zouhu['HALPHA_FLUX'][I][B]), s=1, color='orange')
 
     ax2.scatter(np.log10(fast['HALPHA_BOXFLUX'][I]), np.log10(zouhu['HALPHA_FLUX'][I]), s=1)
     #B = ((np.log10(fast['HALPHA_BOXFLUX'][I]) > 3) *
     #     (np.log10(zouhu['HALPHA_FLUX'][I]) > 2) * (np.log10(zouhu['HALPHA_FLUX'][I]) < 3))
-    ax2.scatter(np.log10(fast['HALPHA_BOXFLUX'][I][B]), np.log10(zouhu['HALPHA_FLUX'][I][B]), s=1, color='orange')
+    #ax2.scatter(np.log10(fast['HALPHA_BOXFLUX'][I][B]), np.log10(zouhu['HALPHA_FLUX'][I][B]), s=1, color='orange')
 
     ax3.scatter(np.log10(1/np.sqrt(fast['HALPHA_FLUX_IVAR'][I])), np.log10(zouhu['HALPHA_FLUXERR'][I]), s=1)
     ax4.scatter(np.log10(1/np.sqrt(fast['HALPHA_BOXFLUX_IVAR'][I])), np.log10(zouhu['HALPHA_FLUXERR'][I]), s=1)
@@ -208,9 +221,9 @@ def compare_zouhu(png=None):
     ax1.set_xlabel('log Flux [fastspec, Gauss]')
     ax2.set_xlabel('log Flux [fastspec, Box]')
     for xx in [ax1, ax2]:
-        xx.set_xlim(-2, 4)
-        xx.set_ylim(-2, 4)
-        xx.plot([-2, 4], [-2, 4], color='k')
+        xx.set_xlim(-2, 5)
+        xx.set_ylim(-2, 5)
+        xx.plot([-2, 5], [-2, 5], color='k')
 
     ax3.set_ylabel('log Flux Error [Hu Zou / mpfit]')
     ax3.set_xlabel('log Flux Error [fastspec, Gauss]')
@@ -232,50 +245,6 @@ def compare_zouhu(png=None):
     fig.savefig('desi-users/ioannis/tmp/junk.png')
 
     pdb.set_trace()
-
-def match_lss(overwrite=False):
-    """Match to the LSS catalogs (full and clustering)."""
-
-    from fastspecfit.io import read_fastspecfit
-    from fastspecfit.io import write_fastspecfit
-    #from desispec.validredshifts import actually_validate
-    #actually_validate(cat, fiberstatus_cut=True, ignore_emline=True)
-    #https://github.com/desihub/LSS/blob/main/py/LSS/main/cattools.py#L2968
-
-    # read the clustering catalogs
-    lssdir = '/global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats'
-    for targtype in ['BGS_ANY', 'LRG', 'ELG', 'QSO']:
-
-        fastfile = os.path.join(datadir, 'clustering', f'fastspec-clustering-{targtype}.fits')
-        lssfile = os.path.join(datadir, 'clustering', f'lss-clustering-{targtype}.fits')
-        #lssfullfile = os.path.join(datadir, 'full', f'lss-full-{targtype}.fits')
-
-        if os.path.isfile(fastfile) and os.path.isfile(lssfile) and not overwrite:
-            log.info(f'fastspecfit file {fastfile} exists')
-            log.info(f'LSS clustering file {lssfile} exists')
-        else:
-            lssN = fitsio.read(os.path.join(lssdir, 'clustering', f'{targtype}_N_clustering.dat.fits'))
-            lssS = fitsio.read(os.path.join(lssdir, 'clustering', f'{targtype}_S_clustering.dat.fits'))
-            lss = Table(np.concatenate((lssN, lssS)))
-            del lssN, lssS
-    
-            if targtype == 'BGS_ANY':
-                sv3file = '/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/fastspec-fuji-sv3-bright.fits'
-                fast, meta, _, _ = read_fastspecfit(fastfile)
-            else:
-                sv3file = '/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/fastspec-fuji-sv3-dark.fits'
-                fast, meta, _, _ = read_fastspecfit(fastfile)
-    
-            indx_fast, indx_lss = geomask.match(fast['TARGETID'], lss['TARGETID'])
-            fast = fast[indx_fast]
-            meta = meta[indx_fast]
-            lss = lss[indx_lss]
-            assert(np.all(meta['TARGETID'] == lss['TARGETID']))
-    
-            write_fastspecfit(fast, meta, outfile=fastfile)
-    
-            lss.write(lssfile, overwrite=True)
-            log.info(f'Wrote {len(lss)} objects to {lssfile}')
 
 def fig_broadline(overwrite=False, png=None):
 
@@ -304,7 +273,7 @@ def fig_broadline(overwrite=False, png=None):
                 survey = survey.strip()
                 program = program.strip()
 
-                fastfile1 = '/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/'+f'fastspec-fuji-{survey}-{program}.fits'
+                fastfile1 = fujidir+f'/fastspec-fuji-{survey}-{program}.fits'
                 #fastfile1 = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', 'fuji', 'catalogs', f'fastspec-fuji-{survey}-{program}.fits')
                 targetids = fitsio.read(fastfile1, ext='METADATA', columns='TARGETID')
                 I = np.where(np.isin(targetids, raga[J][K]['TARGETID']))[0]
@@ -353,7 +322,7 @@ def fig_vdisp(overwrite=False, png=None):
                 survey = survey.strip()
                 program = program.strip()
 
-                fastfile1 = f'/pscratch/sd/i/ioannis/fastspecfit/data/fuji/catalogs/fastspec-fuji-{survey}-{program}.fits'
+                fastfile1 = fujidir+f'/fastspec-fuji-{survey}-{program}.fits'
                 #fastfile1 = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', 'fuji', 'catalogs', f'fastspec-fuji-{survey}-{program}.fits')
                 targetids = fitsio.read(fastfile1, ext='METADATA', columns='TARGETID')
                 I = np.where(np.isin(targetids, fp[J][K]['TARGETID']))[0]
@@ -374,13 +343,13 @@ def fig_vdisp(overwrite=False, png=None):
 
     I = np.where((fast['VDISP'] != 125.) * (fp['PPXF_SIGMA'] / fp['PPXF_SIGMA_ERROR'] > 2))[0]
     #I = np.where(fast['VDISP'] != 125.)[0]
-    log.info(len(fast), len(I))
+    print(len(fast), len(I))
     #I = np.arange(len(fast))
     fast['VDISP_ERR'] = np.zeros(len(fast), 'f4') + 100
     fast['VDISP_ERR'][I] = 1 / np.sqrt(fast['VDISP_IVAR'][I])
 
     # make the plot
-    vdisplim = np.array([75, 325])
+    vdisplim = np.array([40, 350])
     redlim = [0.0, 0.22]
     snrlim = np.log10([1, 150])
     mstarlim = [9.5, 12]
@@ -499,7 +468,7 @@ def read_clustering():
             fast, meta, _, _ = read_fastspecfit(fastfile)
             lssfile = os.path.join(datadir, 'clustering', f'lss-clustering-{targtype}.fits')
             lss = Table(fitsio.read(lssfile))
-            log.info(f'Read {len(lss)} objects from {lssfile}')
+            log.info(f'Read {len(lss):,d} objects from {lssfile}')
             data[targtype] = {'fast': fast, 'meta': meta, 'lss': lss}
             
     return data     
@@ -526,7 +495,7 @@ def fig_mstar(overwrite=False, png=None):
         fig.savefig(pngfile)#, bbox_inches='tight')
         plt.close(fig)
 
-def fig_example_spectra(png=None):
+def fig_example_emlines(png=None):
     """Illustrate our emission-line measurements.
 
     """
@@ -653,253 +622,10 @@ def fig_example_spectra(png=None):
         plt.close(fig)
 
 def _smooth_continuum(wave, flux, ivar, redshift, medbin=150, 
-                      smooth_window=50, smooth_step=10, maskkms_uv=3000.0, 
+                      smooth_window=50, smooth_step=20, maskkms_uv=3000.0, 
                       maskkms_balmer=1000.0, maskkms_narrow=200.0,
                       linetable=None, emlinesfile=None, linemask=None, png=None,
                       log=None, verbose=False):
-    """Build a smooth, nonparametric continuum spectrum.
-
-    Parameters
-    ----------
-    wave : :class:`numpy.ndarray` [npix]
-        Observed-frame wavelength array.
-    flux : :class:`numpy.ndarray` [npix]
-        Spectrum corresponding to `wave`.
-    ivar : :class:`numpy.ndarray` [npix]
-        Inverse variance spectrum corresponding to `flux`.
-    redshift : :class:`float`
-        Object redshift.
-    medbin : :class:`int`, optional, defaults to 150 pixels
-        Width of the median-smoothing kernel in pixels; a magic number.
-    smooth_window : :class:`int`, optional, defaults to 50 pixels
-        Width of the sliding window used to compute the iteratively clipped
-        statistics (mean, median, sigma); a magic number. Note: the nominal
-        extraction width (0.8 A) and observed-frame wavelength range
-        (3600-9800 A) corresponds to pixels that are 66-24 km/s. So
-        `smooth_window` of 50 corresponds to 3300-1200 km/s, which is
-        conservative for all but the broadest lines. A magic number. 
-    smooth_step : :class:`int`, optional, defaults to 10 pixels
-        Width of the step size when computing smoothed statistics; a magic
-        number.
-    maskkms_uv : :class:`float`, optional, defaults to 3000 km/s
-        Masking width for UV emission lines. Pixels within +/-3*maskkms_uv
-        are masked before median-smoothing.
-    maskkms_balmer : :class:`float`, optional, defaults to 3000 km/s
-        Like `maskkms_uv` but for Balmer lines.
-    maskkms_narrow : :class:`float`, optional, defaults to 300 km/s
-        Like `maskkms_uv` but for narrow, forbidden lines.
-    linemask : :class:`numpy.ndarray` of type :class:`bool`, optional, defaults to `None`
-        Boolean mask with the same number of pixels as `wave` where `True`
-        means a pixel is (possibly) affected by an emission line
-        (specifically a strong line which likely cannot be median-smoothed).
-    png : :class:`str`, optional, defaults to `None`
-        Generate a simple QA plot and write it out to this filename.
-
-    Returns
-    -------
-    smooth :class:`numpy.ndarray` [npix]
-        Smooth continuum spectrum which can be subtracted from `flux` in
-        order to create a pure emission-line spectrum.
-    smoothsigma :class:`numpy.ndarray` [npix]
-        Smooth one-sigma uncertainty spectrum.
-
-    """
-    from numpy.lib.stride_tricks import sliding_window_view
-    from scipy.ndimage import median_filter
-    from scipy.stats import sigmaclip
-    #from astropy.stats import sigma_clip
-
-    if log is None:
-        from desiutil.log import get_logger, DEBUG
-        if verbose:
-            log = get_logger(DEBUG)
-        else:
-            log = get_logger()
-
-    if linetable is None:
-        from fastspecfit.emlines import read_emlines        
-        linetable = read_emlines(emlinesfile=emlinesfile)
-        
-    npix = len(wave)
-
-    # If we're not given a linemask, make a conservative one.
-    if linemask is None:
-        linemask = np.zeros(npix, bool) # True = (possibly) affected by emission line
-
-        nsig = 3
-
-        # select just strong lines
-        zlinewaves = linetable['restwave'] * (1 + redshift)
-        inrange = (zlinewaves > np.min(wave)) * (zlinewaves < np.max(wave))
-        if np.sum(inrange) > 0:
-            linetable = linetable[inrange]
-            linetable = linetable[linetable['amp'] >= 1]
-            if len(linetable) > 0:
-                for oneline in linetable:
-                    zlinewave = oneline['restwave'] * (1 + redshift)
-                    if oneline['isbroad']:
-                        if oneline['isbalmer']:
-                            sigma = maskkms_balmer
-                        else:
-                            sigma = maskkms_uv
-                    else:
-                        sigma = maskkms_narrow
-                
-                    sigma *= zlinewave / C_LIGHT # [km/s --> Angstrom]
-                    I = (wave >= (zlinewave - nsig*sigma)) * (wave <= (zlinewave + nsig*sigma))
-                    if len(I) > 0:
-                        linemask[I] = True
-
-        # Special: mask Ly-a (1215 A)
-        zlinewave = 1215.0 * (1 + redshift)
-        if (zlinewave > np.min(wave)) * (zlinewave < np.max(wave)):
-            sigma = maskkms_uv * zlinewave / C_LIGHT # [km/s --> Angstrom]
-            I = (wave >= (zlinewave - nsig*sigma)) * (wave <= (zlinewave + nsig*sigma))
-            if len(I) > 0:
-                linemask[I] = True
-
-    if len(linemask) != npix:
-        errmsg = 'Linemask must have the same number of pixels as the input spectrum.'
-        log.critical(errmsg)
-        raise ValueError(errmsg)
-
-    # Build the smooth (line-free) continuum by computing statistics in a
-    # sliding window, accounting for masked pixels and trying to be smart
-    # about broad lines. See:
-    #   https://stackoverflow.com/questions/41851044/python-median-filter-for-1d-numpy-array
-    #   https://numpy.org/devdocs/reference/generated/numpy.lib.stride_tricks.sliding_window_view.html
-    
-    wave_win = sliding_window_view(wave, window_shape=smooth_window)
-    flux_win = sliding_window_view(flux, window_shape=smooth_window)
-    ivar_win = sliding_window_view(ivar, window_shape=smooth_window)
-    noline_win = sliding_window_view(np.logical_not(linemask), window_shape=smooth_window)
-
-    nminpix = 15
-
-    smooth_wave, smooth_flux, smooth_sigma, smooth_mask = [], [], [], []
-    for swave, sflux, sivar, noline in zip(wave_win[::smooth_step],
-                                           flux_win[::smooth_step],
-                                           ivar_win[::smooth_step],
-                                           noline_win[::smooth_step]):
-
-        # if there are fewer than XX good pixels after accounting for the
-        # line-mask, skip this window.
-        sflux = sflux[noline]
-        if len(sflux) < nminpix:
-            smooth_mask.append(True)
-            continue
-        swave = swave[noline]
-        sivar = sivar[noline]
-
-        cflux, _, _ = sigmaclip(sflux, low=2.0, high=2.0)
-        if len(cflux) < nminpix:
-            smooth_mask.append(True)
-            continue
-
-        # Toss out regions with too little good data.
-        if np.sum(sivar > 0) < nminpix:
-            smooth_mask.append(True)
-            continue
-
-        I = np.isin(sflux, cflux) # fragile?
-        sig = np.std(cflux) # simple median and sigma
-        mn = np.median(cflux)
-
-        #if png and mn < -1:# and np.mean(swave[I]) > 7600:
-        #    print(np.mean(swave[I]), mn)
-
-        # One more check for crummy spectral regions.
-        if mn == 0.0:
-            smooth_mask.append(True)
-            continue
-
-        smooth_wave.append(np.mean(swave[I]))
-        smooth_mask.append(False)
-
-        ## astropy is too slow!!
-        #cflux = sigma_clip(sflux, sigma=2.0, cenfunc='median', stdfunc='std', masked=False, grow=1.5)
-        #if np.sum(np.isfinite(cflux)) < 10:
-        #    smooth_mask.append(True)
-        #    continue
-        #I = np.isfinite(cflux) # should never be fully masked!
-        #smooth_wave.append(np.mean(swave[I]))
-        #smooth_mask.append(False)
-        #sig = np.std(cflux[I])
-        #mn = np.median(cflux[I])
-
-        ## inverse-variance weighted mean and sigma
-        #norm = np.sum(sivar[I])
-        #mn = np.sum(sivar[I] * cflux[I]) / norm # weighted mean
-        #sig = np.sqrt(np.sum(sivar[I] * (cflux[I] - mn)**2) / norm) # weighted sigma
-
-        smooth_sigma.append(sig)
-        smooth_flux.append(mn)
-
-    smooth_mask = np.array(smooth_mask)
-    smooth_wave = np.array(smooth_wave)
-    smooth_sigma = np.array(smooth_sigma)
-    smooth_flux = np.array(smooth_flux)
-
-    # For debugging.
-    if png:
-        _smooth_wave = smooth_wave.copy()
-        _smooth_flux = smooth_flux.copy()
-
-    # corner case for very wacky spectra
-    if len(smooth_flux) == 0:
-        smooth_flux = flux
-        smooth_sigma = flux * 0 + np.std(flux)
-    else:
-        smooth_flux = np.interp(wave, smooth_wave, smooth_flux)
-        smooth_sigma = np.interp(wave, smooth_wave, smooth_sigma)
-
-    smooth = median_filter(smooth_flux, medbin, mode='nearest')
-    smoothsigma = median_filter(smooth_sigma, medbin, mode='nearest')
-
-    Z = (flux == 0.0) * (ivar == 0.0)
-    if np.sum(Z) > 0:
-        smooth[Z] = 0.0
-
-    # Optional QA.
-    if png:
-        import matplotlib.pyplot as plt
-
-        minwave, maxwave = 5000, 9000
-        I = (wave > minwave) * (wave < maxwave)
-
-        fig, ax = plt.subplots(2, 1, figsize=(8, 10), sharex=True)
-        ax[0].plot(wave[I], flux[I], alpha=0.5, color='gray')
-        ax[0].scatter(wave[linemask], flux[linemask], s=10, marker='s', color='k', alpha=0.7)#, zorder=2)
-        #ax[0].plot(wave, smooth, color='orange')
-        ax[0].scatter(_smooth_wave, _smooth_flux, color='red', s=50, marker='s')
-        #ax[0].scatter(_smooth_wave, _smooth_flux, color='orange', marker='s', ls='-', s=20)
-
-        ax[1].plot(wave[I], flux[I] - smooth[I], color='gray', alpha=0.5)
-        ax[1].axhline(y=0, color='k', lw=2)
-
-        for xx in ax:
-            xx.set_xlim(minwave, maxwave)
-        #for xx in ax:
-        #    xx.set_ylim(-2.5, 2)
-
-        zlinewaves = linetable['restwave'] * (1 + redshift)
-        linenames = linetable['name']
-        inrange = np.where((zlinewaves > np.min(wave)) * (zlinewaves < np.max(wave)))[0]
-        if len(inrange) > 0:
-            for linename, zlinewave in zip(linenames[inrange], zlinewaves[inrange]):
-                #print(linename, zlinewave)
-                for xx in ax:
-                    xx.axvline(x=zlinewave, color='gray')
-
-        fig.savefig(png)
-
-    return smooth, smoothsigma
-    
-def _smooth_continuum2(wave, flux, ivar, redshift, medbin=150, 
-                       smooth_window=50, smooth_step=20, maskkms_uv=3000.0, 
-                       maskkms_balmer=1000.0, maskkms_narrow=200.0,
-                       linetable=None, emlinesfile=None, linemask=None, png=None,
-                       log=None, verbose=False):
     """Build a smooth, nonparametric continuum spectrum.
 
     Parameters
@@ -1150,19 +876,26 @@ def _smooth_continuum2(wave, flux, ivar, redshift, medbin=150,
 
     return smooth, smoothsigma
     
-def smooth_continuum():
+def smooth_continuum(overwrite=False):
+    """Illustrating the smooth continuum algorithm.
 
+    """
     from scipy.ndimage import gaussian_filter
     from desispec.io import read_spectra
     from desispec.coaddition import coadd_cameras    
     from fastspecfit.io import read_fastspecfit, DESISpectra
-    #from fastspecfit.continuum import _smooth_continuum
     from fastspecfit.io import cache_templates, get_templates_filename
     from fastspecfit.continuum import ContinuumTools
 
+    #from fastspecfit.continuum import _smooth_continuum
+    
+    exampledir = os.path.join(datadir, 'example-spectra')
     survey, program, healpix, targetid = 'sv1', 'dark', 7610, 39633483106093315
 
-    exampledir = os.path.join(datadir, 'example-spectra')
+    one_desi_spectrum(survey=survey, program=program, healpix=healpix,
+                      targetid=targetid, specprod='fuji', outdir=exampledir,
+                      overwrite=overwrite)
+    
     redfile = os.path.join(exampledir, f'redrock-{survey}-{program}-{healpix}-{targetid}.fits')
     specfile = os.path.join(exampledir, f'coadd-{survey}-{program}-{healpix}-{targetid}.fits')
     fastfile = os.path.join(exampledir, f'fastspec-{survey}-{program}-{healpix}-{targetid}.fits')
@@ -1213,8 +946,8 @@ def smooth_continuum():
     residuals = specflux - desimodel_nolines
     linemask = np.hstack(data['linemask'])
 
-    smooth, smoothsigma = _smooth_continuum2(specwave, residuals, specivar, redshift=redshift, 
-                                             linemask=linemask, png='smooth.png')
+    smooth, smoothsigma = _smooth_continuum(specwave, residuals, specivar, redshift=redshift, 
+                                            linemask=linemask, png='smooth.png')
 
     pdb.set_trace()
 
@@ -1241,16 +974,21 @@ def main():
     import argparse    
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    # build data sets
+    parser.add_argument('--match-lss', action='store_true', help='Match to the LSS catalogs (no figures, just catalogs).')
+    parser.add_argument('--write-example-spectra', action='store_true', help='Build example spectra (no figures, just catalogs).')
+
+    # figures for paper
     parser.add_argument('--vdisp', action='store_true', help='Velocity dispersion comparison.')
     parser.add_argument('--mstar', action='store_true', help='Stellar mass plots.')
-    parser.add_argument('--broadline', action='store_true', help='Compare with Ragas broad-line fitting.')
+    parser.add_argument('--example-emlines', action='store_true', help='Illustration of the emission-line fitting.')
+    parser.add_argument('--example-continuum', action='store_true', help='Illustration of the continuum-fitting.')
+    #parser.add_argument('--broadline', action='store_true', help='Compare with Ragas broad-line fitting.')
+
+    # diagnostic figures
     parser.add_argument('--compare-zouhu', action='store_true', help='Compare with the zouhu VAC.')    
-    parser.add_argument('--example-spectra', action='store_true', help='Build the example spectra figures.')
-
     parser.add_argument('--smooth-continuum', action='store_true')
-
-    parser.add_argument('--match-lss', action='store_true', help='Match to the LSS catalogs (no figures, just catalogs).')
-    parser.add_argument('--build-example-spectra', action='store_true', help='Build example spectra (no figures, just catalogs).')
 
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')
@@ -1261,15 +999,14 @@ def main():
         smooth_continuum()
 
     # data below here
-    if args.build_example_spectra:
-        build_example_spectra(overwrite=args.overwrite)
-
+    if args.write_example_spectra:
+        write_example_spectra(overwrite=args.overwrite)
     if args.match_lss:
         match_lss(overwrite=args.overwrite)
 
     # figures below here
-    if args.example_spectra:
-        fig_example_spectra(png='example-emissionline.png')
+    if args.example_emlines:
+        fig_example_emlines(png='example-emlines.png')
         
     if args.compare_zouhu:
         compare_zouhu()
@@ -1280,8 +1017,8 @@ def main():
     if args.vdisp:
         fig_vdisp(overwrite=args.overwrite, png='ppxf-vdisp.png')
 
-    if args.broadline:
-        fig_broadline(overwrite=args.overwrite, png='broadline.png')
+    #if args.broadline:
+    #    fig_broadline(overwrite=args.overwrite, png='broadline.png')
 
 if __name__ == '__main__':
    main()
