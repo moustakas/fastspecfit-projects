@@ -84,14 +84,14 @@ def main():
     maxphotwave = 35. # [micron]
     if args.tertiary == '34' or args.tertiary == '35':
         fphotodir = desi_root+'/external/legacysurvey/dr10' # NGC4993 fields
-        fphotoinfo = resources.files('fastspecfit').joinpath('data/legacysurvey-dr10.yaml')
+        fphotofile = resources.files('fastspecfit').joinpath('data/legacysurvey-dr10.yaml')
     elif args.tertiary == '26':
         fphotodir = desi_root+'/users/ioannis/fastspecfit/laelbg-templates/subaru-tractor-tertiary26-thru20230416.fits'
-        fphotoinfo = desi_root+'/users/ioannis/fastspecfit/laelbg-templates/subaru-tractor-photoinfo.yaml'
+        fphotofile = desi_root+'/users/ioannis/fastspecfit/laelbg-templates/subaru-tractor-photoinfo.yaml'
         maxphotwave = 8. # [micron]
     else:
         fphotodir = os.getenv('FPHOTO_DIR')
-        fphotoinfo = resources.files('fastspecfit').joinpath('data/legacysurvey-dr9.yaml')
+        fphotofile = resources.files('fastspecfit').joinpath('data/legacysurvey-dr9.yaml')
 
     if args.fastphot:
         fcmd = 'fastphot'
@@ -127,7 +127,7 @@ def main():
                 healpix = os.path.basename(fastfile).split('-')[2].split('.')[0]
                 redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
                 cmd = f'fastspecfit-qa {fastfile} -o {qadir} --redrockfiles {redrockfile} --mp {args.mp} '
-                cmd += f'--fphotodir {fphotodir} --fphotoinfo {fphotoinfo} --maxphotwave {maxphotwave} '
+                cmd += f'--fphotodir {fphotodir} --fphotofile {fphotofile} --maxphotwave {maxphotwave} '
                 cmd += f'--emline_snrmin 1.0 --nsmoothspec 2'
                 if args.ntargets:
                     cmd += ' --ntargets {}'.format(args.ntargets)
@@ -187,7 +187,7 @@ def main():
                 #targetids = '39089837499745334'
 
                 cmd = f'fastspec {redrockfile} -o {outfile} --targetids {targetids} --input-redshifts {input_redshifts} '
-                cmd += f'--mp {args.mp} --fphotodir {fphotodir} --fphotoinfo {fphotoinfo} '
+                cmd += f'--mp {args.mp} --fphotodir {fphotodir} --fphotofile {fphotofile} '
                 if args.ntargets:
                     cmd += ' --ntargets {}'.format(args.ntargets)
                 if args.targetids:
@@ -214,7 +214,7 @@ def main():
             healpix = os.path.basename(fastfile).split('-')[1].split('.')[0]
             redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
             cmd = f'fastspecfit-qa {fastfile} -o {qadir} --redrockfiles {redrockfile} --mp {args.mp} '
-            cmd += f'--fphotodir {fphotodir} --fphotoinfo {fphotoinfo} --maxphotwave {maxphotwave}'
+            cmd += f'--fphotodir {fphotodir} --fphotofile {fphotofile} --maxphotwave {maxphotwave}'
             if args.ntargets:
                 cmd += f' --ntargets {args.ntargets}'
             if args.overwrite:
@@ -252,7 +252,7 @@ def main():
             if not args.fastphot:
                 fastfile += '.gz'
             if not os.path.isfile(fastfile) or args.overwrite:
-                cmd = f'{fcmd} {redrockfile} -o {fastfile} --mp {args.mp} --fphotodir {fphotodir} --fphotoinfo {fphotoinfo}'
+                cmd = f'{fcmd} {redrockfile} -o {fastfile} --mp {args.mp} --fphotodir {fphotodir} --fphotofile {fphotofile}'
                 if args.ntargets:
                     cmd += ' --ntargets {}'.format(args.ntargets)
                 if args.targetids:
