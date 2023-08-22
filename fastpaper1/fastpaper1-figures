@@ -3,11 +3,11 @@
 """Figures for FastSpecFit paper 1.
 
 # build the data
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --match-lss
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --write-example-spectra
+time $HOME/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --match-lss
+time $HOME/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --write-example-spectra
 
 # build the figures
-time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --mstar
+time $HOME/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --mstar
 
 """
 import os, pdb
@@ -98,6 +98,27 @@ def write_example_spectra(overwrite=False):
     # 2b - early-type spectrum with some weak (AGN) emission (z=0.132)
     one_desi_spectrum(survey='sv3', program='bright', healpix=9813, targetid=39633109787873428,
                       specprod='fuji', outdir=outdir, overwrite=overwrite)
+
+def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG', 'QSO']):
+    """Read the matched clustering files (from match_lss).
+
+    """
+    from fastspecfit.io import read_fastspecfit
+
+    data = {}
+    for targtype in np.atleast_1d(targetclass):
+        fastfile = os.path.join(datadir, 'clustering', f'fastspec-clustering-{targtype}.fits')
+        if not os.path.isfile(fastfile):
+            log.info(f'{fastfile} not found.')
+        else:
+            fast, meta, _, _ = read_fastspecfit(fastfile)
+            lssfile = os.path.join(datadir, 'clustering', f'lss-clustering-{targtype}.fits')
+            lss = Table(fitsio.read(lssfile))
+            log.info(f'Read {len(lss):,d} objects from {lssfile}')
+            data[targtype] = {'fast': fast, 'meta': meta, 'lss': lss}
+            
+    return data     
+
 
 def match_lss(overwrite=False):
     """Match to the LSS catalogs (full and clustering)."""
@@ -244,9 +265,7 @@ def compare_zouhu(png=None):
     fig.tight_layout()
     fig.savefig('desi-users/ioannis/tmp/junk.png')
 
-    pdb.set_trace()
-
-def fig_broadline(overwrite=False, png=None):
+def compare_raga(overwrite=False):
 
     import corner as cn
     from fastspecfit.io import read_fastspecfit
@@ -453,26 +472,6 @@ def fig_vdisp(overwrite=False, png=None):
         fig.savefig(pngfile)#, bbox_inches='tight')
         plt.close(fig)
 
-def read_clustering():
-    """Read the matched clustering files.
-
-    """
-    from fastspecfit.io import read_fastspecfit
-
-    data = {}
-    for targtype in ['BGS_ANY', 'LRG', 'ELG']:        
-        fastfile = os.path.join(datadir, 'clustering', f'fastspec-clustering-{targtype}.fits')
-        if not os.path.isfile(fastfile):
-            log.info(f'{fastfile} not found.')
-        else:
-            fast, meta, _, _ = read_fastspecfit(fastfile)
-            lssfile = os.path.join(datadir, 'clustering', f'lss-clustering-{targtype}.fits')
-            lss = Table(fitsio.read(lssfile))
-            log.info(f'Read {len(lss):,d} objects from {lssfile}')
-            data[targtype] = {'fast': fast, 'meta': meta, 'lss': lss}
-            
-    return data     
-
 def fig_mstar(overwrite=False, png=None):
     """Build the stellar mass figures."""
 
@@ -494,6 +493,44 @@ def fig_mstar(overwrite=False, png=None):
         fig.tight_layout()
         fig.savefig(pngfile)#, bbox_inches='tight')
         plt.close(fig)
+
+def fig_bpt_broadlines(overwrite=False, png=None):
+    """Incidence of broad line-emission and BPT diagrams.
+
+    """
+    sns, colors = plot_style(talk=True, font_scale=0.8)
+
+    data = read_clustering(targetclass='BGS_ANY')
+    if not bool(data):
+        return
+    fast, meta = data['BGS_ANY']['fast'], data['BGS_ANY']['meta']
+    del data
+
+    snrcut = 2.
+    #B = ((fast['HALPHA_AMP'] * np.sqrt(fast['HALPHA_AMP_IVAR']) > snrcut) * 
+    #     (fast['HALPHA_BROAD_AMP'] * np.sqrt(fast['HALPHA_BROAD_AMP_IVAR']) > snrcut))
+    B = (fast['HALPHA_BROAD_AMP'] * np.sqrt(fast['HALPHA_BROAD_AMP_IVAR']) > snrcut)
+    N = (fast['HALPHA_AMP'] * np.sqrt(fast['HALPHA_AMP_IVAR']) > snrcut) * (fast['HALPHA_BROAD_AMP'] == 0.)
+
+    
+    fig, ax = plt.subplots()
+    #ax.hist(fast['HALPHA_SIGMA'][N], bins=100, range=[0, 750])
+    ax.hist(fast['HALPHA_BROAD_SIGMA'][B], bins=100, range=[0, 1e4])
+    #ax.hist(fast['HALPHA_BROAD_SIGMA'][B], bins=100, alpha=0.7)
+    ax.set_xlabel(r'$\sigma(\mathrm{H}\alpha)$ (km/s)')
+    ax.set_ylabel('Number of Galaxies')
+    ax.set_yscale('log')
+    #ax.set_xscale('log')
+
+    if png:
+        pngfile = os.path.join(figdir, png)
+        log.info('Writing {}'.format(pngfile))
+        #fig.subplots_adjust(bottom=0.15, right=0.85, top=0.95)
+        fig.tight_layout()
+        fig.savefig(pngfile)#, bbox_inches='tight')
+        plt.close(fig)
+
+    pdb.set_trace()
 
 def fig_example_emlines(png=None):
     """Illustrate our emission-line measurements.
@@ -1174,12 +1211,12 @@ def main():
     parser.add_argument('--mstar', action='store_true', help='Stellar mass plots.')
     parser.add_argument('--example-emlines', action='store_true', help='Illustration of the emission-line fitting.')
     parser.add_argument('--example-continuum', action='store_true', help='Illustration of the continuum-fitting.')
-    #parser.add_argument('--broadline', action='store_true', help='Compare with Ragas broad-line fitting.')
+    parser.add_argument('--sps-models', action='store_true', help='SPS model spectra.')
+    parser.add_argument('--bpt-broadlines', action='store_true', help='Incidence of broad line-emission and BPT diagrams.')
 
     # diagnostic figures
+    parser.add_argument('--compare-raga', action='store_true', help='Compare with Ragas broad-line fitting.')
     parser.add_argument('--compare-zouhu', action='store_true', help='Compare with the zouhu VAC.')    
-    parser.add_argument('--example-spectra', action='store_true', help='Build the example spectra figures.')
-    parser.add_argument('--sps-models', action='store_true', help='SPS model spectra.')
 
     parser.add_argument('--smooth-continuum', action='store_true')
 
@@ -1187,9 +1224,13 @@ def main():
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')
     args = parser.parse_args()
 
-    # testing
+    # diagnostic figures
     if args.smooth_continuum:
         smooth_continuum()
+    if args.compare_zouhu:
+        compare_zouhu()
+    if args.compare_raga:
+        compare_raga()
 
     # data below here
     if args.write_example_spectra:
@@ -1204,17 +1245,14 @@ def main():
     if args.sps_models:
         fig_sps_models(png='sps-models.png')
         
-    if args.compare_zouhu:
-        compare_zouhu()
-
     if args.mstar:
         fig_mstar(png='mstar.png')
 
     if args.vdisp:
         fig_vdisp(overwrite=args.overwrite, png='ppxf-vdisp.png')
 
-    #if args.broadline:
-    #    fig_broadline(overwrite=args.overwrite, png='broadline.png')
+    if args.bpt_broadlines:
+        fig_bpt_broadlines(png='bpt-broadlines.png')
 
 if __name__ == '__main__':
    main()
