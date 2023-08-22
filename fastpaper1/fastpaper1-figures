@@ -169,6 +169,7 @@ def match_lss(overwrite=False):
             lss.write(lssfile, overwrite=True)
             log.info(f'Wrote {len(lss):,d} objects to {lssfile}')
 
+
 def compare_zouhu(png=None):
     """Compare with the Hu Zou VAC."""
 
@@ -345,22 +346,37 @@ def vac_diagnostics(specprod='fuji'):
             return
         fast, meta = data[targ]['fast'], data[targ]['meta']
         del data
-    
-        print(set(meta['SURVEY']))
-        print(set(meta['PROGRAM']))
-        print(set(meta['COADD_FIBERSTATUS']))
+
+        print(meta.colnames)
     
         pdffile = os.path.join(datadir, 'vac-diagnostics', f'vac-{specprod}-{targ.lower()}.pdf')
 
         print(f'Writing {pdffile}')
         with PdfPages(pdffile) as pdf:
             fig, ax = plt.subplots()
-            ax.hist(meta['Z'])
-            pdf.savefig()  # saves the current figure into a pdf page            
+            txt = [f'Target class: {targ}', f'N={len(meta):,d}', 
+                   '',
+                   f'specprod = {specprod}',
+                   'set(survey) = {}'.format(', '.join(set(meta['SURVEY']))),
+                   'set(program) = {}'.format(', '.join(set(meta['PROGRAM']))),
+                   '',
+                   'set(zwarn) = {}'.format(', '.join(set(meta['ZWARN'].astype(str)))),
+                   'set(coadd_fiberstatus) = {}'.format(', '.join(set(meta['COADD_FIBERSTATUS'].astype(str))))]
+            ax.text(0.1, 0.9, '\n'.join(txt), ha='left', va='center',
+                    transform=ax.transAxes)
+            ax.axis('off')
+            pdf.savefig()
 
             fig, ax = plt.subplots()
-            ax.hist(meta['Z'])
-            pdf.savefig()  # saves the current figure into a pdf page            
+            for zwarn in set(meta['ZWARN']):
+                I = np.where(zwarn == meta['ZWARN'])[0]
+                ax.hist(meta['Z'][I], bins=50, alpha=0.7, label=f'zwarn={zwarn} (N={len(I):,d})')
+            ax.set_yscale('log')
+            ax.legend()
+            ax.set_xlabel('Redshift')
+            ax.set_ylabel('Number of Objects')
+            fig.tight_layout()
+            pdf.savefig()
 
     pdb.set_trace()
     
