@@ -314,6 +314,55 @@ def compare_raga(overwrite=False):
     I = fast['HALPHA_BROAD_SIGMA'] > 0
     print(fast['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'HALPHA_AMP', 'HALPHA_BROAD_AMP', 'HALPHA_SIGMA', 'HALPHA_BROAD_SIGMA'][I])
     print(raga['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'HA_N_AMPLITUDE', 'HA_B_AMPLITUDE', 'HA_N_SIGMA_FITS', 'HA_B_SIGMA_FITS'][I])
+
+def vac_diagnostics(specprod='fuji'):
+    """Wide range of VAC diagnostics.
+
+    """
+    from matplotlib.backends.backend_pdf import PdfPages    
+    
+    from desitarget.targetmask import desi_mask, bgs_mask, scnd_mask
+
+    from desitarget.sv1.sv1_targetmask import desi_mask as sv1_desi_mask
+    from desitarget.sv2.sv2_targetmask import desi_mask as sv2_desi_mask
+    from desitarget.sv3.sv3_targetmask import desi_mask as sv3_desi_mask
+
+    from desitarget.sv1.sv1_targetmask import bgs_mask as sv1_bgs_mask
+    from desitarget.sv2.sv2_targetmask import bgs_mask as sv2_bgs_mask
+    from desitarget.sv3.sv3_targetmask import bgs_mask as sv3_bgs_mask
+
+    from desitarget.sv1.sv1_targetmask import scnd_mask as sv1_scnd_mask
+    from desitarget.sv2.sv2_targetmask import scnd_mask as sv2_scnd_mask
+    from desitarget.sv3.sv3_targetmask import scnd_mask as sv3_scnd_mask
+
+    from fastspecfit.emlines import read_emlines
+
+    linetable = read_emlines()
+
+    for targ in ['BGS_ANY']:
+        data = read_clustering(targetclass=targ)
+        if not bool(data):
+            return
+        fast, meta = data[targ]['fast'], data[targ]['meta']
+        del data
+    
+        print(set(meta['SURVEY']))
+        print(set(meta['PROGRAM']))
+        print(set(meta['COADD_FIBERSTATUS']))
+    
+        pdffile = os.path.join(datadir, 'vac-diagnostics', f'vac-{specprod}-{targ.lower()}.pdf')
+
+        print(f'Writing {pdffile}')
+        with PdfPages(pdffile) as pdf:
+            fig, ax = plt.subplots()
+            ax.hist(meta['Z'])
+            pdf.savefig()  # saves the current figure into a pdf page            
+
+            fig, ax = plt.subplots()
+            ax.hist(meta['Z'])
+            pdf.savefig()  # saves the current figure into a pdf page            
+
+    pdb.set_trace()
     
 def fig_vdisp(overwrite=False, png=None):
 
@@ -512,7 +561,6 @@ def fig_bpt_broadlines(overwrite=False, png=None):
     B = (fast['HALPHA_BROAD_AMP'] * np.sqrt(fast['HALPHA_BROAD_AMP_IVAR']) > snrcut)
     N = (fast['HALPHA_AMP'] * np.sqrt(fast['HALPHA_AMP_IVAR']) > snrcut) * (fast['HALPHA_BROAD_AMP'] == 0.)
 
-    
     fig, ax = plt.subplots()
     #ax.hist(fast['HALPHA_SIGMA'][N], bins=100, range=[0, 750])
     ax.hist(fast['HALPHA_BROAD_SIGMA'][B], bins=100, range=[0, 1e4])
@@ -656,6 +704,12 @@ def fig_example_emlines(png=None):
         #fig.tight_layout()
         fig.savefig(pngfile)#, bbox_inches='tight')
         plt.close(fig)
+
+def fig_example_continuum(png=None):
+    """Illustrate our continuum-fitting
+
+    """
+    pass
 
 def _smooth_continuum(wave, flux, ivar, redshift, medbin=150, 
                       smooth_window=50, smooth_step=20, maskkms_uv=3000.0, 
@@ -1206,6 +1260,12 @@ def main():
     parser.add_argument('--match-lss', action='store_true', help='Match to the LSS catalogs (no figures, just catalogs).')
     parser.add_argument('--write-example-spectra', action='store_true', help='Build example spectra (no figures, just catalogs).')
 
+    # diagnostic figures
+    parser.add_argument('--smooth-continuum', action='store_true')
+    parser.add_argument('--compare-raga', action='store_true', help='Compare with Ragas broad-line fitting.')
+    parser.add_argument('--compare-zouhu', action='store_true', help='Compare with the zouhu VAC.')    
+    parser.add_argument('--vac-diagnostics', action='store_true', help='Wide range of VAC diagnostic plots.')
+
     # figures for paper
     parser.add_argument('--vdisp', action='store_true', help='Velocity dispersion comparison.')
     parser.add_argument('--mstar', action='store_true', help='Stellar mass plots.')
@@ -1214,15 +1274,16 @@ def main():
     parser.add_argument('--sps-models', action='store_true', help='SPS model spectra.')
     parser.add_argument('--bpt-broadlines', action='store_true', help='Incidence of broad line-emission and BPT diagrams.')
 
-    # diagnostic figures
-    parser.add_argument('--compare-raga', action='store_true', help='Compare with Ragas broad-line fitting.')
-    parser.add_argument('--compare-zouhu', action='store_true', help='Compare with the zouhu VAC.')    
-
-    parser.add_argument('--smooth-continuum', action='store_true')
-
-    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
+    # other options
+    parser.add_argument('--specprod', default='fuji', help='Spectroscopic production.')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')
     args = parser.parse_args()
+
+    # data below here
+    if args.match_lss:
+        match_lss(overwrite=args.overwrite)
+    if args.write_example_spectra:
+        write_example_spectra(overwrite=args.overwrite)
 
     # diagnostic figures
     if args.smooth_continuum:
@@ -1231,26 +1292,20 @@ def main():
         compare_zouhu()
     if args.compare_raga:
         compare_raga()
+    if args.vac_diagnostics:
+        vac_diagnostics(specprod=args.specprod)
 
-    # data below here
-    if args.write_example_spectra:
-        write_example_spectra(overwrite=args.overwrite)
-    if args.match_lss:
-        match_lss(overwrite=args.overwrite)
-
-    # figures below here
-    if args.example_emlines:
-        fig_example_emlines(png='example-emlines.png')
-
-    if args.sps_models:
-        fig_sps_models(png='sps-models.png')
-        
-    if args.mstar:
-        fig_mstar(png='mstar.png')
-
+    # paper figures below here
     if args.vdisp:
         fig_vdisp(overwrite=args.overwrite, png='ppxf-vdisp.png')
-
+    if args.mstar:
+        fig_mstar(png='mstar.png')
+    if args.example_emlines:
+        fig_example_emlines(png='example-emlines.png')
+    if args.example_continuum:
+        fig_example_continuum(png='example-continuum.png')
+    if args.sps_models:
+        fig_sps_models(png='sps-models.png')
     if args.bpt_broadlines:
         fig_bpt_broadlines(png='bpt-broadlines.png')
 
