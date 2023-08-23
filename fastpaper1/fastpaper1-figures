@@ -7,7 +7,7 @@ time $HOME/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --mat
 time $HOME/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --write-example-spectra
 
 # build the figures
-time $HOME/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --mstar
+time $HOME/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --vac-diagnostics
 
 """
 import os, pdb
@@ -121,54 +121,157 @@ def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG', 'QSO']):
 
 
 def match_lss(overwrite=False):
-    """Match to the LSS catalogs (full and clustering)."""
+    """Match to the LSS catalogs (full and clustering).
 
+INFO:fastpaper1-figures:183:match_lss: ##################################################
+    INFO:fastpaper1-figures:184:match_lss: Working on BGS_ANY
+    INFO:io.py:1806:read_fastspecfit: Read 265,325 object(s) from /pscratch/sd/i/ioannis/fastspecfit/vac/data1/fuji/catalogs/fastspec-fuji-sv3-bright.fits
+    INFO:fastpaper1-figures:193:match_lss: --------------------
+    INFO:fastpaper1-figures:207:match_lss: Read 113,691 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/clustering/BGS_ANY_N_clustering.dat.fits
+    INFO:fastpaper1-figures:208:match_lss: Read 128,055 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/clustering/BGS_ANY_S_clustering.dat.fits
+    INFO:fastpaper1-figures:209:match_lss:   Total number of LSS BGS_ANY: 241,746
+    INFO:io.py:1855:write_fastspecfit: Writing 241,746 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/fastspec-clustering-BGS_ANY.fits
+    INFO:fastpaper1-figures:253:match_lss: Wrote 241,746 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/lss-clustering-BGS_ANY.fits
+    INFO:fastpaper1-figures:193:match_lss: --------------------
+    INFO:fastpaper1-figures:232:match_lss: Read 264,973 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/full/BGS_ANY_full.dat.fits.
+    INFO:fastpaper1-figures:233:match_lss:   Trimming 18,349 objects which fail GOODHARDCOL & ZWARN != 999999 & Z_HP > 0.001 & Z_HP != 999999.0
+    INFO:fastpaper1-figures:234:match_lss:   Final sample: 246,624 objects.
+    INFO:io.py:1855:write_fastspecfit: Writing 246,624 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/fastspec-full-BGS_ANY.fits
+    INFO:fastpaper1-figures:253:match_lss: Wrote 246,624 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/lss-full-BGS_ANY.fits
+    INFO:fastpaper1-figures:183:match_lss: ##################################################
+    INFO:fastpaper1-figures:184:match_lss: Working on LRG
+    INFO:io.py:1806:read_fastspecfit: Read 592,441 object(s) from /pscratch/sd/i/ioannis/fastspecfit/vac/data1/fuji/catalogs/fastspec-fuji-sv3-dark.fits
+    INFO:fastpaper1-figures:193:match_lss: --------------------
+    INFO:fastpaper1-figures:207:match_lss: Read 54,880 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/clustering/LRG_N_clustering.dat.fits
+    INFO:fastpaper1-figures:208:match_lss: Read 57,769 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/clustering/LRG_S_clustering.dat.fits
+    INFO:fastpaper1-figures:209:match_lss:   Total number of LSS LRG: 112,649
+    INFO:fastpaper1-figures:223:match_lss:   Matched 112,649 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/full/LRG_full.dat.fits
+    INFO:io.py:1855:write_fastspecfit: Writing 112,649 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/fastspec-clustering-LRG.fits
+    INFO:fastpaper1-figures:253:match_lss: Wrote 112,649 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/lss-clustering-LRG.fits
+    INFO:fastpaper1-figures:193:match_lss: --------------------
+    INFO:fastpaper1-figures:232:match_lss: Read 133,062 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/full/LRG_full.dat.fits.
+    INFO:fastpaper1-figures:233:match_lss:   Trimming 6,309 objects which fail GOODHARDCOL & ZWARN != 999999 & Z_HP > 0.001 & Z_HP != 999999.0
+    INFO:fastpaper1-figures:234:match_lss:   Final sample: 126,753 objects.
+    INFO:io.py:1855:write_fastspecfit: Writing 126,753 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/fastspec-full-LRG.fits
+    INFO:fastpaper1-figures:253:match_lss: Wrote 126,753 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/lss-full-LRG.fits
+    INFO:fastpaper1-figures:183:match_lss: ##################################################
+    INFO:fastpaper1-figures:184:match_lss: Working on ELG
+    INFO:io.py:1806:read_fastspecfit: Read 592,441 object(s) from /pscratch/sd/i/ioannis/fastspecfit/vac/data1/fuji/catalogs/fastspec-fuji-sv3-dark.fits
+    INFO:fastpaper1-figures:193:match_lss: --------------------
+    INFO:fastpaper1-figures:207:match_lss: Read 129,724 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/clustering/ELG_N_clustering.dat.fits
+    INFO:fastpaper1-figures:208:match_lss: Read 137,621 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/clustering/ELG_S_clustering.dat.fits
+    INFO:fastpaper1-figures:209:match_lss:   Total number of LSS ELG: 267,345
+    INFO:fastpaper1-figures:223:match_lss:   Matched 267,345 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/full/ELG_full.dat.fits
+    INFO:io.py:1855:write_fastspecfit: Writing 267,345 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/fastspec-clustering-ELG.fits
+    INFO:fastpaper1-figures:253:match_lss: Wrote 267,345 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/lss-clustering-ELG.fits
+    INFO:fastpaper1-figures:193:match_lss: --------------------
+    INFO:fastpaper1-figures:232:match_lss: Read 434,846 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/full/ELG_full.dat.fits.
+    INFO:fastpaper1-figures:233:match_lss:   Trimming 61,116 objects which fail GOODHARDCOL & ZWARN != 999999 & Z_HP > 0.001 & Z_HP != 999999.0
+    INFO:fastpaper1-figures:234:match_lss:   Final sample: 373,730 objects.
+    INFO:io.py:1855:write_fastspecfit: Writing 373,730 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/fastspec-full-ELG.fits
+    INFO:fastpaper1-figures:253:match_lss: Wrote 373,730 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/lss-full-ELG.fits
+    INFO:fastpaper1-figures:183:match_lss: ##################################################
+    INFO:fastpaper1-figures:184:match_lss: Working on QSO
+    INFO:io.py:1806:read_fastspecfit: Read 592,441 object(s) from /pscratch/sd/i/ioannis/fastspecfit/vac/data1/fuji/catalogs/fastspec-fuji-sv3-dark.fits
+    INFO:fastpaper1-figures:193:match_lss: --------------------
+    INFO:fastpaper1-figures:207:match_lss: Read 17,609 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/clustering/QSO_N_clustering.dat.fits
+    INFO:fastpaper1-figures:208:match_lss: Read 17,957 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/clustering/QSO_S_clustering.dat.fits
+    INFO:fastpaper1-figures:209:match_lss:   Total number of LSS QSO: 35,566
+    INFO:fastpaper1-figures:223:match_lss:   Matched 35,566 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/full/QSO_full.dat.fits
+    INFO:io.py:1855:write_fastspecfit: Writing 35,566 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/fastspec-clustering-QSO.fits
+    INFO:fastpaper1-figures:253:match_lss: Wrote 35,566 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/lss-clustering-QSO.fits
+    INFO:fastpaper1-figures:193:match_lss: --------------------
+    INFO:fastpaper1-figures:232:match_lss: Read 58,001 objects from /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/full/QSO_full.dat.fits.
+    INFO:fastpaper1-figures:233:match_lss:   Trimming 21,404 objects which fail GOODHARDCOL & ZWARN != 999999 & Z_HP > 0.001 & Z_HP != 999999.0
+    INFO:fastpaper1-figures:234:match_lss:   Final sample: 36,597 objects.
+    INFO:io.py:1855:write_fastspecfit: Writing 36,597 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/fastspec-full-QSO.fits
+    INFO:fastpaper1-figures:253:match_lss: Wrote 36,597 objects to /global/cfs/cdirs/desi/users/ioannis/fastspecfit/fastpaper1/data/clustering/lss-full-QSO.fits
+
+    """
     from fastspecfit.io import read_fastspecfit
     from fastspecfit.io import write_fastspecfit
     #from desispec.validredshifts import actually_validate
     #actually_validate(cat, fiberstatus_cut=True, ignore_emline=True)
     #https://github.com/desihub/LSS/blob/main/py/LSS/main/cattools.py#L2968
 
+    # additional columns to copy from the 'full' to the 'clustering' catalogs
+    copycols = {'ELG': ['OII_FLUX', 'OII_FLUX_IVAR', 'O2C'],
+                'QSO': ['Z_RR'], 'LRG': ['LRG_MASK']}
+
     # read the clustering catalogs
     lssdir = '/global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats'
     for targtype in ['BGS_ANY', 'LRG', 'ELG', 'QSO']:
-
-        fastfile = os.path.join(datadir, 'clustering', f'fastspec-clustering-{targtype}.fits')
-        lssfile = os.path.join(datadir, 'clustering', f'lss-clustering-{targtype}.fits')
-        #lssfullfile = os.path.join(datadir, 'full', f'lss-full-{targtype}.fits')
-
-        if os.path.isfile(fastfile) and os.path.isfile(lssfile) and not overwrite:
-            log.info(f'fastspecfit file {fastfile} exists')
-            log.info(f'LSS clustering file {lssfile} exists')
+        log.info('##################################################')
+        log.info(f'Working on {targtype}')
+        if targtype == 'BGS_ANY':
+            sv3file = fujidir+'/fastspec-fuji-sv3-bright.fits'
+            allfast, allmeta, _, _ = read_fastspecfit(sv3file)
         else:
-            lssNfile = os.path.join(lssdir, 'clustering', f'{targtype}_N_clustering.dat.fits')
-            lssSfile = os.path.join(lssdir, 'clustering', f'{targtype}_S_clustering.dat.fits')
-            lssN = fitsio.read(lssNfile)
-            lssS = fitsio.read(lssSfile)
-            lss = Table(np.concatenate((lssN, lssS)))
-            log.info(f'Read {len(lssN):,d} objects from {lssNfile}')
-            log.info(f'Read {len(lssS):,d} objects from {lssSfile}')
-            log.info(f'  Total number of {targtype}: {len(lss):,d}')
-            del lssN, lssS
+            sv3file = fujidir+'/fastspec-fuji-sv3-dark.fits'
+            allfast, allmeta, _, _ = read_fastspecfit(sv3file)
+        
+        for lsstype in ['clustering', 'full']:
+            log.info('--------------------')
+            outfastfile = os.path.join(datadir, 'clustering', f'fastspec-{lsstype}-{targtype}.fits')
+            outlssfile = os.path.join(datadir, 'clustering', f'lss-{lsstype}-{targtype}.fits')
     
-            if targtype == 'BGS_ANY':
-                sv3file = fujidir+'/fastspec-fuji-sv3-bright.fits'
-                fast, meta, _, _ = read_fastspecfit(sv3file)
+            if os.path.isfile(outfastfile) and os.path.isfile(outlssfile) and not overwrite:
+                log.info(f'fastspecfit file {outfastfile} exists')
+                log.info(f'LSS clustering file {outlssfile} exists')
             else:
-                sv3file = fujidir+'/fastspec-fuji-sv3-dark.fits'
-                fast, meta, _, _ = read_fastspecfit(sv3file)
+                if lsstype == 'clustering':
+                    lssNfile = os.path.join(lssdir, 'clustering', f'{targtype}_N_clustering.dat.fits')
+                    lssSfile = os.path.join(lssdir, 'clustering', f'{targtype}_S_clustering.dat.fits')
+                    lssN = fitsio.read(lssNfile)
+                    lssS = fitsio.read(lssSfile)
+                    alllss = Table(np.concatenate((lssN, lssS)))
+                    log.info(f'Read {len(lssN):,d} objects from {lssNfile}')
+                    log.info(f'Read {len(lssS):,d} objects from {lssSfile}')
+                    log.info(f'  Total number of LSS {targtype}: {len(alllss):,d}')
+                    del lssN, lssS
     
-            indx_fast, indx_lss = geomask.match(fast['TARGETID'], lss['TARGETID'])
-            fast = fast[indx_fast]
-            meta = meta[indx_fast]
-            lss = lss[indx_lss]
-            assert(np.all(meta['TARGETID'] == lss['TARGETID']))
+                    # add target-specific columns from the 'full' LSS catalogs
+                    if targtype == 'ELG' or targtype == 'QSO' or targtype == 'LRG':
+                        fullfile = os.path.join(lssdir, 'full', f'{targtype}_full.dat.fits')
+                        full = Table(fitsio.read(fullfile))
     
-            write_fastspecfit(fast, meta, outfile=fastfile)
-    
-            lss.write(lssfile, overwrite=True)
-            log.info(f'Wrote {len(lss):,d} objects to {lssfile}')
+                        indx_full, indx_lss = geomask.match(full['TARGETID'], alllss['TARGETID'])
+                        full = full[indx_full]
+                        alllss = alllss[indx_lss]
+                        assert(np.all(full['TARGETID'] == alllss['TARGETID']))
+                        for col in copycols[targtype]:
+                            alllss[col] = full[col]
+                        log.info(f'  Matched {len(full):,d} objects from {fullfile}')
+                else:
+                    # Read the 'full' catalogs but trim out unobserved/bad-hardware targets.
+                    lssfile = os.path.join(lssdir, lsstype, f'{targtype}_full.dat.fits')
+                    alllss = fitsio.read(lssfile, columns=['ZWARN', 'GOODHARDLOC', 'Z_HP'])
+                    nall = len(alllss)
+                    I = np.where((alllss['ZWARN'] != 999999) * alllss['GOODHARDLOC'] *
+                                 (alllss['Z_HP'] > 1e-3) * (alllss['Z_HP'] != 999999.0))[0]
+                    alllss = Table(fitsio.read(lssfile, rows=I))
+                    log.info(f'Read {nall:,d} objects from {lssfile}.')
+                    log.info(f'  Trimming {nall-len(I):,d} objects which fail GOODHARDCOL & ZWARN != 999999 & Z_HP > 0.001 & Z_HP != 999999.0')
+                    log.info(f'  Final sample: {len(alllss):,d} objects.')
+                    
+                indx_fast, indx_lss = geomask.match(allfast['TARGETID'], alllss['TARGETID'])
+                fast = allfast[indx_fast]
+                meta = allmeta[indx_fast]
+                lss = alllss[indx_lss]
+                assert(np.all(meta['TARGETID'] == lss['TARGETID']))
 
+                # Any missing objects are going to be because Z_TILE != Z_HP
+                # and Z_HP < 1e-3 but we trimmed those above.
+                miss = alllss[np.delete(np.arange(len(alllss)), indx_lss)]
+                try:
+                    assert(len(miss) == 0)
+                except:
+                    pdb.set_trace()
+                
+                write_fastspecfit(fast, meta, outfile=outfastfile, verbose=False)
+
+                lss.write(outlssfile, overwrite=True)
+                log.info(f'Wrote {len(lss):,d} objects to {outlssfile}')
 
 def compare_zouhu(png=None):
     """Compare with the Hu Zou VAC."""
