@@ -23,7 +23,7 @@ log = get_logger()
 
 from fastspecfit.util import C_LIGHT
 
-fujidir = '/pscratch/sd/i/ioannis/fastspecfit/vac/data1/fuji/catalogs' # to be updated
+fujidir = '/pscratch/sd/i/ioannis/fastspecfit/vac/data/fuji/catalogs' # to be updated
 
 paperdir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'fastpaper1')
 figdir = os.path.join(paperdir, 'figures')
