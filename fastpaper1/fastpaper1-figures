@@ -13,7 +13,7 @@ time $HOME/code/desihub/fastspecfit-projects/fastpaper1/fastpaper1-figures --vac
 import os, pdb
 import numpy as np
 import fitsio
-from astropy.table import Table, vstack
+from astropy.table import Table, vstack, join
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
@@ -22,8 +22,6 @@ from desiutil.log import get_logger
 log = get_logger()
 
 from fastspecfit.util import C_LIGHT
-
-fujidir = '/pscratch/sd/i/ioannis/fastspecfit/vac/data/fuji/catalogs' # to be updated
 
 paperdir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'fastpaper1')
 figdir = os.path.join(paperdir, 'figures')
@@ -61,6 +59,16 @@ def plot_style(font_scale=1.2, paper=False, talk=True, style='ticks'):
     #sns.reset_orig()
 
     return sns, colors
+
+def get_vacdir(specprod='fuji', version='v3.0'):
+
+    if 'NERSC_HOST' in os.environ:
+        vacdir = '/pscratch/sd/i/ioannis/fastspecfit/vac/data/'+specprod+'/catalogs' # to be updated
+    else:
+        vacdir = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', specprod, version, 'catalogs')
+    log.info(f'VAC dir {vacdir}')
+
+    return vacdir
 
 def write_example_spectra(overwrite=False):
     """Simple script to write out small coadded spectra and redrock files needed for
@@ -120,7 +128,7 @@ def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG', 'QSO'], lsstype='clust
     return data     
 
 
-def match_lss(overwrite=False):
+def match_lss(specprod='fuji', overwrite=False):
     """Match to the LSS catalogs (full and clustering).
 
 INFO:fastpaper1-figures:183:match_lss: ##################################################
@@ -198,16 +206,18 @@ INFO:fastpaper1-figures:183:match_lss: #########################################
     copycols = {'ELG': ['OII_FLUX', 'OII_FLUX_IVAR', 'O2C'],
                 'QSO': ['Z_RR'], 'LRG': ['LRG_MASK']}
 
+    vacdir = get_vacdir(specprod)
+
     # read the clustering catalogs
     lssdir = '/global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats'
     for targtype in ['BGS_ANY', 'LRG', 'ELG', 'QSO']:
         log.info('##################################################')
         log.info(f'Working on {targtype}')
         if targtype == 'BGS_ANY':
-            sv3file = fujidir+'/fastspec-fuji-sv3-bright.fits'
+            sv3file = vacdir+'/fastspec-fuji-sv3-bright.fits'
             allfast, allmeta, _, _ = read_fastspecfit(sv3file)
         else:
-            sv3file = fujidir+'/fastspec-fuji-sv3-dark.fits'
+            sv3file = vacdir+'/fastspec-fuji-sv3-dark.fits'
             allfast, allmeta, _, _ = read_fastspecfit(sv3file)
         
         for lsstype in ['clustering', 'full']:
@@ -273,10 +283,12 @@ INFO:fastpaper1-figures:183:match_lss: #########################################
                 lss.write(outlssfile, overwrite=True)
                 log.info(f'Wrote {len(lss):,d} objects to {outlssfile}')
 
-def compare_zouhu(png=None):
+def compare_zouhu(specprod='fuji', png=None):
     """Compare with the Hu Zou VAC."""
 
     from fastspecfit.io import read_fastspecfit
+
+    vacdir = get_vacdir(specprod)
 
     zouhufile = '/global/cfs/cdirs/desi/users/zouhu/vac/edr/edr_galaxy_stellarmass_lineinfo_v1.0.fits'
     zouhu = Table(fitsio.read(zouhufile))
@@ -284,15 +296,15 @@ def compare_zouhu(png=None):
     zouhu = zouhu[uindx]
 
     if False:
-        darkfile = fujidir+'/fastspec-fuji-sv3-dark.fits'
-        brightfile = fujidir+'/fastspec-fuji-sv3-bright.fits'
+        darkfile = vacdir+'/fastspec-fuji-sv3-dark.fits'
+        brightfile = vacdir+'/fastspec-fuji-sv3-bright.fits'
         fastbright, metabright, _, _ = read_fastspecfit(brightfile)
         fastdark, metadark, _, _ = read_fastspecfit(darkfile)
         fast = vstack((fastbright, fastdark))
         meta = vstack((metabright, metadark))
         del fastbright, metabright, fastdark, metadark
     else:
-        fastfile = fujidir+'/fastspec-fuji.fits'
+        fastfile = vacdir+'/fastspec-fuji.fits'
         fast, meta, _, _ = read_fastspecfit(fastfile)
 
     _, uindx = np.unique(fast['TARGETID'], return_index=True)
@@ -369,8 +381,74 @@ def compare_zouhu(png=None):
     fig.tight_layout()
     fig.savefig('desi-users/ioannis/tmp/junk.png')
 
-def compare_raga(overwrite=False):
+def broadline_stats(specprod='fuji', png=None):
+    """Investigate https://github.com/desihub/fastspecfit/issues/118
 
+    These sources are selected with Broad Ha AoN >= 5 in V1.0 and having Broad
+    Ha Flux = 0 in V2.0. The 15 sources are randomly selected in different
+    stellar mass (from CIGALE) bins. The SPECPROD, TARGETID, SURVEY, PROGRAM,
+    HEALPIX, and Z columns for these 15 example candidates are as follows:
+
+    """
+    from fastspecfit.io import read_fastspecfit
+
+    sns, colors = plot_style(talk=True, font_scale=0.8)
+
+    v1file = os.path.join(get_vacdir(specprod=specprod, version='v1.0'), f'fastspec-{specprod}.fits')
+    v2file = os.path.join(get_vacdir(specprod=specprod, version='v2.0'), f'fastspec-{specprod}.fits')
+    v3file = os.path.join(get_vacdir(specprod=specprod, version='v3.0'), f'fastspec-{specprod}.fits')
+
+    cols = ['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX', #'Z', 
+            'HALPHA_AMP', 'HALPHA_AMP_IVAR', 'HALPHA_BROAD_AMP', 'HALPHA_BROAD_AMP_IVAR', 
+            'HALPHA_SIGMA', 'HALPHA_BROAD_SIGMA']
+    v1 = Table(fitsio.read(v1file, 'FASTSPEC', columns=cols))
+    v2 = Table(fitsio.read(v2file, 'FASTSPEC', columns=cols))
+    v3 = Table(fitsio.read(v3file, 'FASTSPEC', columns=cols))
+    assert(np.all(v1['TARGETID'] == v2['TARGETID']))
+
+    I = ((v1['HALPHA_BROAD_AMP'] * np.sqrt(v1['HALPHA_BROAD_AMP_IVAR']) > 5) * (v2['HALPHA_BROAD_AMP'] == 0.))
+    print(np.sum(I))
+
+    out = join(v1[I], v2[I], keys=['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX'])
+    out = join(out, v3, keys=['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX'])
+
+    I = (out['HALPHA_BROAD_SIGMA'] == 0.)
+    print(np.sum(I))
+    pcols = ['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX', 'HALPHA_AMP_1', 'HALPHA_AMP_2',
+             'HALPHA_AMP', 'HALPHA_BROAD_AMP_1', 'HALPHA_BROAD_AMP_2', 'HALPHA_BROAD_AMP', 
+             'HALPHA_SIGMA_1', 'HALPHA_SIGMA_2', 'HALPHA_SIGMA', 'HALPHA_BROAD_SIGMA_1', 
+             'HALPHA_BROAD_SIGMA_2', 'HALPHA_BROAD_SIGMA']
+    print(out[I][pcols])
+
+    xlim = [-300, 6e3]
+
+    fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+    ax[0].scatter(out['HALPHA_BROAD_SIGMA_1'], out['HALPHA_BROAD_SIGMA'], s=15, alpha=0.8)
+    ax[0].set_xlabel(r'$\sigma(\mathrm{H}\alpha)$ (v1 broad, km/s)')
+    ax[0].set_ylabel(r'$\sigma(\mathrm{H}\alpha)$ (v3 broad, km/s)')
+    ax[0].set_xlim(xlim)
+    ax[0].set_ylim(xlim)
+    ax[0].plot(xlim, xlim, color='k', lw=1)
+    
+    ax[1].hist(out['HALPHA_BROAD_SIGMA_1'][I], bins=50, label='v1', range=[-10, 400])
+    ax[1].axvline(x=250, color='k', lw=1)
+    #ax[1].hist(out['HALPHA_BROAD_SIGMA_2'], bins=100, range=xlim, label='v2', alpha=0.7)
+    #ax[1].hist(out['HALPHA_BROAD_SIGMA'], bins=100, range=xlim, label='v3', alpha=0.7)
+    #ax[1].legend(loc='upper right')
+    ax[1].set_ylabel('Number of Galaxies')
+    ax[1].text(0.9, 0.9, 'v1 != 0 & v3 == 0', va='center', ha='right', 
+               fontsize=12, transform=ax[1].transAxes)
+    #ax[1].set_yscale('log')
+    ax[1].set_xlabel(r'$\sigma(\mathrm{H}\alpha)$ (v1 broad, km/s)')
+
+    if png:
+        pngfile = os.path.join(datadir, png)
+        log.info('Writing {}'.format(pngfile))
+        fig.tight_layout()
+        fig.savefig(pngfile)#, bbox_inches='tight')
+        plt.close(fig)
+
+def compare_raga(overwrite=False):
     import corner as cn
     from fastspecfit.io import read_fastspecfit
     from fastspecfit.io import write_fastspecfit
@@ -396,7 +474,7 @@ def compare_raga(overwrite=False):
                 survey = survey.strip()
                 program = program.strip()
 
-                fastfile1 = fujidir+f'/fastspec-fuji-{survey}-{program}.fits'
+                fastfile1 = vacdir+f'/fastspec-fuji-{survey}-{program}.fits'
                 #fastfile1 = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', 'fuji', 'catalogs', f'fastspec-fuji-{survey}-{program}.fits')
                 targetids = fitsio.read(fastfile1, ext='METADATA', columns='TARGETID')
                 I = np.where(np.isin(targetids, raga[J][K]['TARGETID']))[0]
@@ -761,13 +839,15 @@ def vac_diagnostics(specprod='fuji', lsstype='clustering'):
 
         print(f'Writing {pdffile}')
 
-def fig_vdisp(overwrite=False, png=None):
+def fig_vdisp(specprod='fuji', overwrite=False, png=None):
 
     import corner as cn
     from fastspecfit.io import read_fastspecfit
     from fastspecfit.io import write_fastspecfit
 
     sns, colors = plot_style(talk=True, font_scale=0.8)
+
+    vacdir = get_vacdir(specprod)
 
     # build / read the sample
     fpfile = os.path.join(datadir, 'fuji_FP.fits')
@@ -787,7 +867,7 @@ def fig_vdisp(overwrite=False, png=None):
                 survey = survey.strip()
                 program = program.strip()
 
-                fastfile1 = fujidir+f'/fastspec-fuji-{survey}-{program}.fits'
+                fastfile1 = vacdir+f'/fastspec-fuji-{survey}-{program}.fits'
                 #fastfile1 = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', 'fuji', 'catalogs', f'fastspec-fuji-{survey}-{program}.fits')
                 targetids = fitsio.read(fastfile1, ext='METADATA', columns='TARGETID')
                 I = np.where(np.isin(targetids, fp[J][K]['TARGETID']))[0]
@@ -1661,6 +1741,7 @@ def main():
     parser.add_argument('--smooth-continuum', action='store_true')
     parser.add_argument('--compare-raga', action='store_true', help='Compare with Ragas broad-line fitting.')
     parser.add_argument('--compare-zouhu', action='store_true', help='Compare with the zouhu VAC.')    
+    parser.add_argument('--broadline-stats', action='store_true', help='Compare v1 vs v2 vs v3 broad-line stats.')    
     parser.add_argument('--vac-diagnostics', action='store_true', help='Wide range of VAC diagnostic plots.')
 
     # figures for paper
@@ -1678,7 +1759,7 @@ def main():
 
     # data below here
     if args.match_lss:
-        match_lss(overwrite=args.overwrite)
+        match_lss(specprod=args.specprod, overwrite=args.overwrite)
     if args.write_example_spectra:
         write_example_spectra(overwrite=args.overwrite)
 
@@ -1686,15 +1767,17 @@ def main():
     if args.smooth_continuum:
         smooth_continuum()
     if args.compare_zouhu:
-        compare_zouhu()
+        compare_zouhu(specprod=args.specprod)
     if args.compare_raga:
         compare_raga()
+    if args.broadline_stats:
+        broadline_stats(specprod=args.specprod, png='halpha-broad-stats.png')
     if args.vac_diagnostics:
         vac_diagnostics(specprod=args.specprod)
 
     # paper figures below here
     if args.vdisp:
-        fig_vdisp(overwrite=args.overwrite, png='ppxf-vdisp.png')
+        fig_vdisp(specprod=args.specprod, overwrite=args.overwrite, png='ppxf-vdisp.png')
     if args.mstar:
         fig_mstar(png='mstar.png')
     if args.example_emlines:
