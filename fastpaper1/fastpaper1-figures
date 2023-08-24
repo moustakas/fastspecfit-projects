@@ -99,7 +99,7 @@ def write_example_spectra(overwrite=False):
     one_desi_spectrum(survey='sv3', program='bright', healpix=9813, targetid=39633109787873428,
                       specprod='fuji', outdir=outdir, overwrite=overwrite)
 
-def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG', 'QSO']):
+def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG', 'QSO'], lsstype='clustering'):
     """Read the matched clustering files (from match_lss).
 
     """
@@ -107,12 +107,12 @@ def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG', 'QSO']):
 
     data = {}
     for targtype in np.atleast_1d(targetclass):
-        fastfile = os.path.join(datadir, 'clustering', f'fastspec-clustering-{targtype}.fits')
+        fastfile = os.path.join(datadir, 'clustering', f'fastspec-{lsstype}-{targtype}.fits')
         if not os.path.isfile(fastfile):
             log.info(f'{fastfile} not found.')
         else:
             fast, meta, _, _ = read_fastspecfit(fastfile)
-            lssfile = os.path.join(datadir, 'clustering', f'lss-clustering-{targtype}.fits')
+            lssfile = os.path.join(datadir, 'clustering', f'lss-{lsstype}-{targtype}.fits')
             lss = Table(fitsio.read(lssfile))
             log.info(f'Read {len(lss):,d} objects from {lssfile}')
             data[targtype] = {'fast': fast, 'meta': meta, 'lss': lss}
@@ -419,11 +419,31 @@ def compare_raga(overwrite=False):
     print(fast['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'HALPHA_AMP', 'HALPHA_BROAD_AMP', 'HALPHA_SIGMA', 'HALPHA_BROAD_SIGMA'][I])
     print(raga['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'HA_N_AMPLITUDE', 'HA_B_AMPLITUDE', 'HA_N_SIGMA_FITS', 'HA_B_SIGMA_FITS'][I])
 
-def vac_diagnostics(specprod='fuji'):
+def vac_diagnostics(specprod='fuji', lsstype='clustering'):
     """Wide range of VAC diagnostics.
 
+    No plots for the following quantities:
+
+      'FLYA_1215_CONT', 'FOII_3727_CONT', 'FHBETA_CONT', 'FOIII_5007_CONT', 'FHALPHA_CONT'
+      
+      'FLUX_SYNTH_G','FLUX_SYNTH_R', 'FLUX_SYNTH_Z',
+      'FLUX_SYNTH_SPECMODEL_G', 'FLUX_SYNTH_SPECMODEL_R',
+      'FLUX_SYNTH_SPECMODEL_Z', 'FLUX_SYNTH_PHOTMODEL_G',
+      'FLUX_SYNTH_PHOTMODEL_R', 'FLUX_SYNTH_PHOTMODEL_Z', 
+      'FLUX_SYNTH_PHOTMODEL_W1', 'FLUX_SYNTH_PHOTMODEL_W2', 
+      'FLUX_SYNTH_PHOTMODEL_W3', 'FLUX_SYNTH_PHOTMODEL_W4'
+      
+      'RCHI2', 'RCHI2_CONT', 'RCHI2_PHOT', 'RCHI2_LINE', 
+      'DELTA_LINECHI2', 'DELTA_LINENDOF', 
+      
+      'COEFF', 'SNR_B', 'SNR_R', 'SNR_Z',
+      
+      'SMOOTHCORR_B', 'SMOOTHCORR_R', 'SMOOTHCORR_Z',
+
+      'NARROW_ZRMS', 'BROAD_ZRMS', 'UV_ZRMS', 'NARROW_SIGMARMS', 'BROAD_SIGMARMS', 'UV_SIGMARMS'
+
     """
-    from matplotlib.backends.backend_pdf import PdfPages    
+    from matplotlib.backends.backend_pdf import PdfPages
     
     #from desitarget.targetmask import desi_mask, bgs_mask, scnd_mask
 
@@ -439,51 +459,215 @@ def vac_diagnostics(specprod='fuji'):
     #from desitarget.sv2.sv2_targetmask import bgs_mask as sv2_bgs_mask
     #from desitarget.sv2.sv2_targetmask import scnd_mask as sv2_scnd_mask
 
+    import corner as cn
+    import yaml
+    from importlib import resources
     from fastspecfit.emlines import read_emlines
+
+    #sns, colors = plot_style(talk=True, font_scale=0.5)
+
+    hist2dcol = 'blue' # colors[1]
+    levels = [0.5, 0.75, 0.95]
+    contour_kwargs = {'colors': 'k', 'alpha': 0.8}
+    data_kwargs = {'color': 'gray', 'alpha': 0.5, 'ms': 1}
+    smooth = 1.5
+
+    inch_perpanel = 3.
 
     linetable = read_emlines()
 
-    for targ in ['BGS_ANY']:#, 'LRG']:
-        data = read_clustering(targetclass=targ)
+    fphotofile = resources.files('fastspecfit').joinpath('data/legacysurvey-dr9.yaml')
+    with open(fphotofile, 'r') as F:
+        fphoto = yaml.safe_load(F)
+
+    for targ in ['BGS_ANY', 'LRG', 'ELG', 'QSO']:
+    #for targ in ['ELG']:#, 'LRG']:
+        #print(f'Building diagnostic plots for target type {targ}')
+
+        data = read_clustering(targetclass=targ, lsstype=lsstype)
         if not bool(data):
             return
         fast, meta = data[targ]['fast'], data[targ]['meta']
         del data
 
-        print(meta.colnames)
+        #fast = fast[:50000]
+        #meta = meta[:50000]
+        #print(meta.colnames)
     
-        pdffile = os.path.join(datadir, 'vac-diagnostics', f'vac-{specprod}-{targ.lower()}.pdf')
+        pdffile = os.path.join(datadir, 'vac-diagnostics', f'vac-{specprod}-{lsstype}-{targ.lower()}.pdf')
 
-        print(f'Writing {pdffile}')
         with PdfPages(pdffile) as pdf:
-            fig, ax = plt.subplots()
-            txt = [f'Target class: {targ}', f'N={len(meta):,d}', 
-                   '',
-                   f'specprod = {specprod}',
-                   'set(survey) = {}'.format(', '.join(set(meta['SURVEY']))),
-                   'set(program) = {}'.format(', '.join(set(meta['PROGRAM']))),
-                   '',
-                   'set(zwarn) = {}'.format(', '.join(set(meta['ZWARN'].astype(str)))),
-                   'set(coadd_fiberstatus) = {}'.format(', '.join(set(meta['COADD_FIBERSTATUS'].astype(str))))]
-            ax.text(0.1, 0.9, '\n'.join(txt), ha='left', va='center',
-                    transform=ax.transAxes)
-            ax.axis('off')
-            pdf.savefig()
-            fig.close()
+            #fig, ax = plt.subplots()
+            #txt = [f'Target class: {targ}', f'N={len(meta):,d}', 
+            #       '',
+            #       f'specprod = {specprod}',
+            #       'set(survey) = {}'.format(', '.join(set(meta['SURVEY']))),
+            #       'set(program) = {}'.format(', '.join(set(meta['PROGRAM']))),
+            #       '',
+            #       'set(zwarn) = {}'.format(', '.join(set(meta['ZWARN'].astype(str)))),
+            #       'set(coadd_fiberstatus) = {}'.format(', '.join(set(meta['COADD_FIBERSTATUS'].astype(str))))]
+            #ax.text(0.1, 0.9, '\n'.join(txt), ha='left', va='center',
+            #        transform=ax.transAxes)
+            #ax.axis('off')
+            #pdf.savefig()
+            #plt.close()
 
+            print('  Creating cover page.')
             fig, ax = plt.subplots()
             ax.hist(meta['Z'], bins=50)
             ax.set_yscale('log')
             ax.set_xlabel('Redshift')
             ax.set_ylabel('Number of Objects')
+            txt = [f'{targ} - {lsstype}', f'N={len(meta):,d}', 
+                   #'',
+                   f'specprod = {specprod}',
+                   'set(survey) = {}'.format(', '.join(set(meta['SURVEY']))),
+                   'set(program) = {}'.format(', '.join(set(meta['PROGRAM'])))]#,
+                   #'',
+                   #'set(zwarn) = {}'.format(', '.join(set(meta['ZWARN'].astype(str)))),
+                   #'set(coadd_fiberstatus) = {}'.format(', '.join(set(meta['COADD_FIBERSTATUS'].astype(str))))]
+            ax.text(0.95, 0.95, '\n'.join(txt), ha='right', va='top',
+                    transform=ax.transAxes, fontsize=10)
             fig.tight_layout()
             pdf.savefig()
-            fig.close()
+            plt.close()
+
+            # rest-frame photometry vs redshift
+            print('  Rest-frame photometry vs redshift.')
+
+            I = np.where(np.sum(fast['COEFF'] != 0, axis=1) != 0)[0]
+
+            fig, ax = plt.subplots(5, 6, figsize=(inch_perpanel*6, inch_perpanel*5))
+            for ii, (band, shift, xx) in enumerate(zip(fphoto['absmag_bands']*2, fphoto['band_shift']*2, ax.flat)):
+                if ii < len(fphoto['absmag_bands']):
+                    col = 'ABSMAG{:02d}_{}'.format(int(10*shift), band.upper())
+                    cn.hist2d(fast['Z'][I], fast[col][I],
+                              fill_contours=False,
+                              bins=100, color=hist2dcol, smooth=smooth, levels=levels,
+                              contour_kwargs=contour_kwargs,
+                              data_kwargs=data_kwargs, ax=xx)
+                    #xx.scatter(fast['Z'], fast[col], s=1)
+                    xx.invert_yaxis()
+                else:
+                    col = 'KCORR{:02d}_{}'.format(int(10*shift), band.upper())
+                    cn.hist2d(fast['Z'][I], fast[col][I],
+                              fill_contours=False,
+                              bins=100, color=hist2dcol, smooth=smooth, levels=levels,
+                              contour_kwargs=contour_kwargs,
+                              data_kwargs=data_kwargs, ax=xx)
+                xx.set_ylabel(col)
+                xx.set_xlabel('Redshift')
+            
+            moreax = ax.flat[ii+1:]
+            for col, xx in zip(['LOGLNU_1500', 'LOGLNU_2800', 'LOGL_1450', 'LOGL_1700', 'LOGL_3000', 'LOGL_5100'],
+                               moreax):
+                cn.hist2d(fast['Z'][I], fast[col][I],
+                          fill_contours=False,
+                          bins=100, color=hist2dcol, smooth=smooth, levels=levels,
+                          contour_kwargs=contour_kwargs,
+                          data_kwargs=data_kwargs, ax=xx)
+                xx.set_ylabel(col)
+                xx.set_xlabel('Redshift')
+            
+            fig.tight_layout()
+            pdf.savefig()
+            plt.close()
+
+            # stellar pops vs redshift
+            print('  SPS properties vs redshift.')
+            cols = ['LOGMSTAR', 'SFR', 'VDISP', 'APERCORR',
+                    #, 'APERCORR_G', 'APERCORR_R', 'APERCORR_Z'
+                    #'AV', 'AGE', 'ZZSUN', 
+                    'DN4000', 'DN4000_OBS', 'DN4000_MODEL']
+            dologs = [False, True, False, True,
+                      False, False, False]
+            
+            fig, ax = plt.subplots(2, 4, figsize=(inch_perpanel*4, inch_perpanel*2))
+            for col, dolog, xx in zip(cols, dologs, ax.flat):
+                if col == 'VDISP':
+                    I = fast['VDISP_IVAR'] > 0
+                elif col == 'SFR':
+                    I = fast['SFR'] > 0
+                else:
+                    I = np.ones(len(fast), bool)
+            
+                if dolog:
+                    plotvar = np.log10(fast[col][I])
+                    ylabel = r'$\log_{{10}}$ ({})'.format(col)
+                else:
+                    plotvar = fast[col][I]
+                    ylabel = col
+            
+                if 'DN4000' in col:
+                    ylim = [np.min(fast['DN4000_MODEL'][I]), np.max(fast['DN4000_MODEL'][I])]
+                    _range = [(np.min(fast['Z'][I]), np.max(fast['Z'][I])), ylim]
+                else:
+                    ylim = None
+                    _range = None
+            
+                cn.hist2d(fast['Z'][I], plotvar,
+                          fill_contours=False, range=_range,
+                          bins=100, color=hist2dcol, smooth=smooth, levels=levels,
+                          contour_kwargs=contour_kwargs,
+                          data_kwargs=data_kwargs, ax=xx)
+                if ylim:
+                    xx.set_ylim(ylim)
+                xx.set_ylabel(ylabel)
+                xx.set_xlabel('Redshift')
+            
+            ax.flat[-1].axis('off')
+            
+            fig.tight_layout()
+            pdf.savefig()
+            plt.close()
+            
+            # mean redshifts and velocity widths
+            print('  Mean redshifts, velocity widths, and doublet ratios.')
+            cols = ['NARROW_Z', 'BROAD_Z', 'UV_Z',
+                    'NARROW_SIGMA', 'BROAD_SIGMA', 'UV_SIGMA', 
+                    'MGII_DOUBLET_RATIO', 'OII_DOUBLET_RATIO', 'SII_DOUBLET_RATIO']
+
+            spectypes = meta['SPECTYPE']
+
+            fig, ax = plt.subplots(3, 3, figsize=(inch_perpanel*3, inch_perpanel*3))
+            for ii, (col, xx) in enumerate(zip(cols, ax.flat)):
+                if 'Z' in col:
+                    I = np.where(fast[col] != fast['Z'])[0]
+                    plotvar = 3e5 * (fast[col][I] - fast['Z'][I])
+                    xlabel = 'c({} - Z$_{{Redrock}})$ (km/s)'.format(col)
+                elif 'SIGMA' in col:
+                    I = np.where(fast[col] > 0)[0]
+                    plotvar = fast[col][I]
+                    xlabel = f'{col} (km/s)'
+                else:
+                    I = np.arange(len(fast))
+                    plotvar = fast[col][I]
+                    xlabel = col
+
+                uspectype, ntype = np.unique(spectypes[I], return_counts=True)
+                for spectype in uspectype[np.argsort(ntype)[::-1]]:
+                    J = np.where(spectype == spectypes[I])[0]
+                    _ = xx.hist(plotvar[J], bins=100, alpha=0.7,
+                                label=f'{spectype} (N={len(J):,d})')
+                    xx.legend(fontsize=6, frameon=True, loc='upper right')
+
+                if 'Z' in col:                
+                    xx.axvline(x=0, color='k', alpha=0.7)
+
+                xx.set_yscale('log')
+                xx.set_xlabel(xlabel)
+                xx.set_ylabel('Number')
+
+            fig.tight_layout()
+            pdf.savefig()
+            plt.close()
 
             # emission lines
+            print('  Emission lines:')
             for line in linetable['name'].data:
-            #for line in ['HALPHA', 'HALPHA_BROAD']:
+            #for line in ['OII_3729', 'HALPHA']:
                 line = line.upper()
+    
                 modelamp = fast[f'{line}_MODELAMP']
                 amp = fast[f'{line}_AMP']
                 ampsnr = fast[f'{line}_AMP'] * np.sqrt(fast[f'{line}_AMP_IVAR'])
@@ -502,8 +686,8 @@ def vac_diagnostics(specprod='fuji'):
                 chi2 = fast[f'{line}_CHI2']
                 npix = fast[f'{line}_NPIX']
                 spectypes = meta['SPECTYPE']
-
-                vars = [modelamp, amp, ampsnr, flux, fluxsnr, 
+                
+                myvars = [modelamp, amp, ampsnr, flux, fluxsnr, 
                         boxflux, boxfluxsnr, vshift, sigma, 
                         cont, contsnr, ew, ewsnr, fluxlimit, 
                         ewlimit, chi2, npix]
@@ -520,59 +704,63 @@ def vac_diagnostics(specprod='fuji'):
                            True, False, False, False, True,
                            False, True, False, True, True, 
                            True, False]
-
+                
                 I = np.where(ampsnr > 0)[0]
-                if len(I) == 0:
-                    print(f'No data for {line}')
+                if len(I) < 20:
+                    print(f'    No or minimal data for {line} (N={len(I)}).')
                     continue
 
-                fig, ax = plt.subplots(4, 5, figsize=(14, 16))
+                print(f'    Working on {line}.')
+                fig, ax = plt.subplots(4, 5, figsize=(inch_perpanel*5, inch_perpanel*4))
                 for ii, (var, label, dolog, doclip, xx) in enumerate(zip(
-                        vars, xlabels, dologs, doclips, ax.flat)):
+                        myvars, xlabels, dologs, doclips, ax.flat)):
                     if dolog:
                         plotvar = np.log10(var[I])
                     else:
                         plotvar = var[I]
                     if doclip:
-                        lims = np.percentile(plotvar, [0.5, 99.5])
-                        #J = np.where(
+                        lims = np.percentile(plotvar, [0.1, 99.9])
                         nlo = np.sum(plotvar < lims[0])
                         nhi = np.sum(plotvar > lims[1])
-                        cliptxt = [f'Nclip(<{lims[0]:.2g})={nlo:,d}', 
-                                   f'Nclip(>{lims[1]:.2g})={nhi:,d}']
+                        cliptxt = f'Nclip={nlo+nhi:,d}'
+                        #cliptxt = f'Nclip({lims[0]:.2g},{lims[1]:.2g}))={nlo+nhi:,d}'
+                        #cliptxt = [f'Nclip(<{lims[0]:.2g})={nlo:,d}', 
+                        #           f'Nclip(>{lims[1]:.2g})={nhi:,d}']
+                        #cliptxt = '\n'.join(cliptxt)
                     else:
                         lims = [np.min(plotvar), np.max(plotvar)]
                         cliptxt = None
                     
-                    for spectype in np.unique(spectypes):
+                    uspectype, ntype = np.unique(spectypes[I], return_counts=True)
+                    for spectype in uspectype[np.argsort(ntype)[::-1]]:
                         J = np.where(spectype == spectypes[I])[0]
                         _ = xx.hist(plotvar[J], bins=100, range=lims, alpha=0.7,
-                                    label=f'{spectype} (N={len(J):,d})')
+                                    label=f'spectype={spectype} (N={len(J):,d})')
+                        if 'VSHIFT' in label:
+                            xx.axvline(x=0, color='k', alpha=0.7)
                     if cliptxt:
-                        xx.text(0.9, 0.9, '\n'.join(cliptxt), ha='right', va='center',
+                        xx.text(0.9, 0.9, cliptxt, ha='right', va='center',
                                 transform=xx.transAxes, fontsize=10)
-                    if ii == 0:
-                        xx.legend(fontsize=10, frameon=True, loc='lower right')
+                    #if ii == 0:
+                    #    xx.legend(fontsize=10, frameon=True, loc='lower right')
                     xx.set_yscale('log')
                     xx.set_xlabel(label)
                     xx.set_ylabel('Number')
+                
+                for xx in ax.flat[-3:]:
+                    xx.axis('off')
 
-                #xx = ax.flat[ii+1]
-                #xx.scatter(meta['Z'][I], np.log10(flux[I]), s=1, alpha=0.7)
-                #xx.set_xlabel('Redshift')
-                #
-                #xx = ax.flat[ii+2]
-                #xx.scatter(meta['Z'][I], np.log10(ew[I]), s=1, alpha=0.7)
-                #xx.set_xlabel('Redshift')
+                hh, ll = ax.flat[0].get_legend_handles_labels()
+                ax.flat[-3].legend(hh, ll, loc='upper left')
 
-                #ax.flat[-1].axis('off')
-                fig.suptitle(line)
+                fig.suptitle(f'{line} (N={len(I):,d})', va='center')
                 fig.tight_layout()
+                #fig.subplots_adjust(left=0.1, right=0.95, bottom=0.1, top=0.92)
                 pdf.savefig()
-                fig.close()
+                plt.close()
 
-    pdb.set_trace()
-    
+        print(f'Writing {pdffile}')
+
 def fig_vdisp(overwrite=False, png=None):
 
     import corner as cn
