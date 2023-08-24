@@ -425,25 +425,25 @@ def vac_diagnostics(specprod='fuji'):
     """
     from matplotlib.backends.backend_pdf import PdfPages    
     
-    from desitarget.targetmask import desi_mask, bgs_mask, scnd_mask
+    #from desitarget.targetmask import desi_mask, bgs_mask, scnd_mask
 
-    from desitarget.sv1.sv1_targetmask import desi_mask as sv1_desi_mask
-    from desitarget.sv2.sv2_targetmask import desi_mask as sv2_desi_mask
     from desitarget.sv3.sv3_targetmask import desi_mask as sv3_desi_mask
-
-    from desitarget.sv1.sv1_targetmask import bgs_mask as sv1_bgs_mask
-    from desitarget.sv2.sv2_targetmask import bgs_mask as sv2_bgs_mask
     from desitarget.sv3.sv3_targetmask import bgs_mask as sv3_bgs_mask
-
-    from desitarget.sv1.sv1_targetmask import scnd_mask as sv1_scnd_mask
-    from desitarget.sv2.sv2_targetmask import scnd_mask as sv2_scnd_mask
     from desitarget.sv3.sv3_targetmask import scnd_mask as sv3_scnd_mask
+
+    #from desitarget.sv1.sv1_targetmask import desi_mask as sv1_desi_mask
+    #from desitarget.sv1.sv1_targetmask import bgs_mask as sv1_bgs_mask
+    #from desitarget.sv1.sv1_targetmask import scnd_mask as sv1_scnd_mask
+    #
+    #from desitarget.sv2.sv2_targetmask import desi_mask as sv2_desi_mask
+    #from desitarget.sv2.sv2_targetmask import bgs_mask as sv2_bgs_mask
+    #from desitarget.sv2.sv2_targetmask import scnd_mask as sv2_scnd_mask
 
     from fastspecfit.emlines import read_emlines
 
     linetable = read_emlines()
 
-    for targ in ['BGS_ANY']:
+    for targ in ['BGS_ANY']:#, 'LRG']:
         data = read_clustering(targetclass=targ)
         if not bool(data):
             return
@@ -469,17 +469,107 @@ def vac_diagnostics(specprod='fuji'):
                     transform=ax.transAxes)
             ax.axis('off')
             pdf.savefig()
+            fig.close()
 
             fig, ax = plt.subplots()
-            for zwarn in set(meta['ZWARN']):
-                I = np.where(zwarn == meta['ZWARN'])[0]
-                ax.hist(meta['Z'][I], bins=50, alpha=0.7, label=f'zwarn={zwarn} (N={len(I):,d})')
+            ax.hist(meta['Z'], bins=50)
             ax.set_yscale('log')
-            ax.legend()
             ax.set_xlabel('Redshift')
             ax.set_ylabel('Number of Objects')
             fig.tight_layout()
             pdf.savefig()
+            fig.close()
+
+            # emission lines
+            for line in linetable['name'].data:
+            #for line in ['HALPHA', 'HALPHA_BROAD']:
+                line = line.upper()
+                modelamp = fast[f'{line}_MODELAMP']
+                amp = fast[f'{line}_AMP']
+                ampsnr = fast[f'{line}_AMP'] * np.sqrt(fast[f'{line}_AMP_IVAR'])
+                flux = fast[f'{line}_FLUX']
+                fluxsnr = fast[f'{line}_FLUX'] * np.sqrt(fast[f'{line}_FLUX_IVAR'])
+                boxflux = fast[f'{line}_BOXFLUX']
+                boxfluxsnr = fast[f'{line}_BOXFLUX'] * np.sqrt(fast[f'{line}_BOXFLUX_IVAR'])
+                vshift = fast[f'{line}_VSHIFT']
+                sigma = fast[f'{line}_SIGMA']
+                cont = fast[f'{line}_CONT']
+                contsnr = fast[f'{line}_CONT'] * np.sqrt(fast[f'{line}_CONT_IVAR'])
+                ew = fast[f'{line}_EW']
+                ewsnr = fast[f'{line}_EW'] * np.sqrt(fast[f'{line}_EW_IVAR'])
+                fluxlimit = fast[f'{line}_FLUX_LIMIT']
+                ewlimit = fast[f'{line}_EW_LIMIT']
+                chi2 = fast[f'{line}_CHI2']
+                npix = fast[f'{line}_NPIX']
+                spectypes = meta['SPECTYPE']
+
+                vars = [modelamp, amp, ampsnr, flux, fluxsnr, 
+                        boxflux, boxfluxsnr, vshift, sigma, 
+                        cont, contsnr, ew, ewsnr, fluxlimit, 
+                        ewlimit, chi2, npix]
+                xlabels = ['MODELAMP', 'AMP', 'S/N AMP', 'FLUX', 'S/N FLUX',
+                           'BOXFLUX', 'S/N BOXFLUX', 'VSHIFT (km/s)', 'SIGMA (km/s)',
+                           'CONT', 'S/N CONT', r'EW ($\AA$)', r'S/N EW ($\AA$)',
+                           'FLUX LIMIT', r'EW LIMIT ($\AA$)', r'$\log_{10}$ (CHI2)', 
+                           'NPIX']
+                dologs = [False, False, False, False, False, 
+                          False, False, False, False, False, 
+                          False, False, False, False, False, 
+                          True, False]
+                doclips = [True, True, False, True, False, 
+                           True, False, False, False, True,
+                           False, True, False, True, True, 
+                           True, False]
+
+                I = np.where(ampsnr > 0)[0]
+                if len(I) == 0:
+                    print(f'No data for {line}')
+                    continue
+
+                fig, ax = plt.subplots(4, 5, figsize=(14, 16))
+                for ii, (var, label, dolog, doclip, xx) in enumerate(zip(
+                        vars, xlabels, dologs, doclips, ax.flat)):
+                    if dolog:
+                        plotvar = np.log10(var[I])
+                    else:
+                        plotvar = var[I]
+                    if doclip:
+                        lims = np.percentile(plotvar, [0.5, 99.5])
+                        #J = np.where(
+                        nlo = np.sum(plotvar < lims[0])
+                        nhi = np.sum(plotvar > lims[1])
+                        cliptxt = [f'Nclip(<{lims[0]:.2g})={nlo:,d}', 
+                                   f'Nclip(>{lims[1]:.2g})={nhi:,d}']
+                    else:
+                        lims = [np.min(plotvar), np.max(plotvar)]
+                        cliptxt = None
+                    
+                    for spectype in np.unique(spectypes):
+                        J = np.where(spectype == spectypes[I])[0]
+                        _ = xx.hist(plotvar[J], bins=100, range=lims, alpha=0.7,
+                                    label=f'{spectype} (N={len(J):,d})')
+                    if cliptxt:
+                        xx.text(0.9, 0.9, '\n'.join(cliptxt), ha='right', va='center',
+                                transform=xx.transAxes, fontsize=10)
+                    if ii == 0:
+                        xx.legend(fontsize=10, frameon=True, loc='lower right')
+                    xx.set_yscale('log')
+                    xx.set_xlabel(label)
+                    xx.set_ylabel('Number')
+
+                #xx = ax.flat[ii+1]
+                #xx.scatter(meta['Z'][I], np.log10(flux[I]), s=1, alpha=0.7)
+                #xx.set_xlabel('Redshift')
+                #
+                #xx = ax.flat[ii+2]
+                #xx.scatter(meta['Z'][I], np.log10(ew[I]), s=1, alpha=0.7)
+                #xx.set_xlabel('Redshift')
+
+                #ax.flat[-1].axis('off')
+                fig.suptitle(line)
+                fig.tight_layout()
+                pdf.savefig()
+                fig.close()
 
     pdb.set_trace()
     
