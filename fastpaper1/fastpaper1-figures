@@ -62,10 +62,10 @@ def plot_style(font_scale=1.2, paper=False, talk=True, style='ticks'):
 
 def get_vacdir(specprod='fuji', version='v3.0'):
 
-    if 'NERSC_HOST' in os.environ:
-        vacdir = '/pscratch/sd/i/ioannis/fastspecfit/vac/data/'+specprod+'/catalogs' # to be updated
-    else:
-        vacdir = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', specprod, version, 'catalogs')
+    #if 'NERSC_HOST' in os.environ:
+    #    vacdir = '/pscratch/sd/i/ioannis/fastspecfit/vac/data/'+specprod+'/catalogs' # to be updated
+    #else:
+    vacdir = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', specprod, version, 'catalogs')
     log.info(f'VAC dir {vacdir}')
 
     return vacdir
@@ -209,7 +209,13 @@ INFO:fastpaper1-figures:183:match_lss: #########################################
     vacdir = get_vacdir(specprod)
 
     # read the clustering catalogs
-    lssdir = '/global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats'
+    if specprod == 'fuji':
+        lssdir = '/global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats'
+    #elif specprod == 'guadalupe':
+    #    
+    #else:
+    #    raise NotImplemented
+    
     for targtype in ['BGS_ANY', 'LRG', 'ELG', 'QSO']:
         log.info('##################################################')
         log.info(f'Working on {targtype}')
@@ -283,104 +289,163 @@ INFO:fastpaper1-figures:183:match_lss: #########################################
                 lss.write(outlssfile, overwrite=True)
                 log.info(f'Wrote {len(lss):,d} objects to {outlssfile}')
 
-def compare_zouhu(specprod='fuji', png=None):
+def compare_zouhu(specprod='fuji', overwrite=False, png1=None, png2=None):
     """Compare with the Hu Zou VAC."""
 
-    from fastspecfit.io import read_fastspecfit
+    import corner as cn
+    from fastspecfit.io import read_fastspecfit, write_fastspecfit
 
     vacdir = get_vacdir(specprod)
 
-    zouhufile = '/global/cfs/cdirs/desi/users/zouhu/vac/edr/edr_galaxy_stellarmass_lineinfo_v1.0.fits'
-    zouhu = Table(fitsio.read(zouhufile))
-    _, uindx = np.unique(zouhu['TARGETID'], return_index=True)
-    zouhu = zouhu[uindx]
-
-    if False:
-        darkfile = vacdir+'/fastspec-fuji-sv3-dark.fits'
-        brightfile = vacdir+'/fastspec-fuji-sv3-bright.fits'
-        fastbright, metabright, _, _ = read_fastspecfit(brightfile)
-        fastdark, metadark, _, _ = read_fastspecfit(darkfile)
-        fast = vstack((fastbright, fastdark))
-        meta = vstack((metabright, metadark))
-        del fastbright, metabright, fastdark, metadark
-    else:
-        fastfile = vacdir+'/fastspec-fuji.fits'
+    # build / read the sample
+    fastfile = os.path.join(datadir, 'fastspec-zouhu.fits')
+    zouhufile = os.path.join(datadir, 'zouhu.fits')
+    if os.path.isfile(fastfile) and not overwrite:
         fast, meta, _, _ = read_fastspecfit(fastfile)
+        zouhu = Table(fitsio.read(zouhufile))
+        log.info('Read {:,d} objects from {}'.format(len(zouhu), zouhufile))
+    else:
+        fullzouhufile = os.path.join(os.getenv('DESI_ROOT'), 'users', 'zouhu', 'vac', 'edr', 'edr_galaxy_stellarmass_lineinfo_v1.0.fits')
+        fullzouhu = Table(fitsio.read(fullzouhufile))
+        log.info('Read {:,d} objects from {}'.format(len(fullzouhu), fullzouhufile))
 
-    _, uindx = np.unique(fast['TARGETID'], return_index=True)
-    fast = fast[uindx]
-    meta = meta[uindx]
+        # Need survey / program / healpix
+        _, uindx = np.unique(fullzouhu['TARGETID'], return_index=True)
+        log.info(f'Removing {len(fullzouhu)-len(uindx):,d} duplicates.')
+        fullzouhu = fullzouhu[uindx]
+        I = np.isfinite(fullzouhu['HALPHA_FLUXERR']) #* (fullzouhu['HALPHA_FLUXERR'] > 0.)
+        log.info(f'Removing {len(fullzouhu)-np.sum(I):,d} objects with infinite HALPHA_FLUXERR.')
+        fullzouhu = fullzouhu[I]
 
-    indx_fast, indx_zouhu = geomask.match(fast['TARGETID'], zouhu['TARGETID'])
-    fast = fast[indx_fast]
-    meta = meta[indx_fast]
-    zouhu = zouhu[indx_zouhu]
-    assert(np.all(meta['TARGETID'] == zouhu['TARGETID']))
-    
-    I = ((fast['HALPHA_FLUX'] > 0) * (fast['HALPHA_FLUX_IVAR'] > 0) *
-         (fast['HALPHA_BOXFLUX'] > 0) * (fast['HALPHA_BOXFLUX_IVAR'] > 0) *
-         (fast['HALPHA_BROAD_FLUX_IVAR'] == 0) *
-         (zouhu['HALPHA_FLUX'] > 0) * (zouhu['HALPHA_FLUXERR'] > 0) *
-         np.isfinite(zouhu['HALPHA_FLUX']) * np.isfinite(zouhu['HALPHA_FLUXERR']) )
+        data = read_clustering(targetclass='BGS_ANY')
+        fullfast, fullmeta = data['BGS_ANY']['fast'], data['BGS_ANY']['meta']
+        del data
 
-    B = (fast['HALPHA_FLUX'][I] * np.sqrt(fast['HALPHA_FLUX_IVAR'][I]) > 1.5) * ((np.log10(fast['HALPHA_FLUX'][I])-np.log10(zouhu['HALPHA_FLUX'][I])) > 0.25)
-    check = fast[I][B]['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'HALPHA_FLUX', 'HALPHA_BOXFLUX', 'HALPHA_SIGMA']
-    check['HU_HALPHA_FLUX'] = zouhu['HALPHA_FLUX'][I][B]
-    check['HU_HALPHA_SIGMA'] = zouhu['HALPHA_SIGMA'][I][B]
+        #fullfastfile = os.path.join(vacdir, 'fastspec-fuji.fits')
+        #fullfast, fullmeta, _, _ = read_fastspecfit(fullfastfile)
+        #_, uindx = np.unique(fullfast['TARGETID'], return_index=True)
+        #log.info(f'Removing {len(fullfast)-len(uindx):,d} duplicates.')
+        #fullfast = fullfast[uindx]
+        #fullmeta = fullmeta[uindx]
 
-    #ax.scatter(fast['HALPHA_SIGMA'][I], np.log10(fast['HALPHA_FLUX'][I])-np.log10(zouhu['HALPHA_FLUX'][I]), s=1)
-
-    #fig, ax = plt.subplots()
-    #ax.scatter(zouhu['HALPHA_SIGMA'][I], np.log10(fast['HALPHA_FLUX'][I])-np.log10(zouhu['HALPHA_FLUX'][I]), s=1)
-    #ax.set_ylim(-1, 1)
-    #fig.tight_layout()
-    #fig.savefig('desi-users/ioannis/tmp/junk2.png')
-    
-    fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(10, 12))
-
-    ax1.scatter(np.log10(fast['HALPHA_FLUX'][I]), np.log10(zouhu['HALPHA_FLUX'][I]), s=1)
-    #ax1.scatter(np.log10(fast['HALPHA_FLUX'][I][B]), np.log10(zouhu['HALPHA_FLUX'][I][B]), s=1, color='orange')
-
-    ax2.scatter(np.log10(fast['HALPHA_BOXFLUX'][I]), np.log10(zouhu['HALPHA_FLUX'][I]), s=1)
-    #B = ((np.log10(fast['HALPHA_BOXFLUX'][I]) > 3) *
-    #     (np.log10(zouhu['HALPHA_FLUX'][I]) > 2) * (np.log10(zouhu['HALPHA_FLUX'][I]) < 3))
-    #ax2.scatter(np.log10(fast['HALPHA_BOXFLUX'][I][B]), np.log10(zouhu['HALPHA_FLUX'][I][B]), s=1, color='orange')
-
-    ax3.scatter(np.log10(1/np.sqrt(fast['HALPHA_FLUX_IVAR'][I])), np.log10(zouhu['HALPHA_FLUXERR'][I]), s=1)
-    ax4.scatter(np.log10(1/np.sqrt(fast['HALPHA_BOXFLUX_IVAR'][I])), np.log10(zouhu['HALPHA_FLUXERR'][I]), s=1)
-
-    ax5.scatter(np.log10(fast['HALPHA_FLUX'][I]*np.sqrt(fast['HALPHA_FLUX_IVAR'][I])),
-                np.log10(zouhu['HALPHA_FLUX'][I]/zouhu['HALPHA_FLUXERR'][I]), s=1)
-    ax6.scatter(np.log10(fast['HALPHA_FLUX'][I]*np.sqrt(fast['HALPHA_BOXFLUX_IVAR'][I])),
-                np.log10(zouhu['HALPHA_FLUX'][I]/zouhu['HALPHA_FLUXERR'][I]), s=1)
-
-    ax1.set_ylabel('log Flux [Hu Zou / mpfit]')
-    ax1.set_xlabel('log Flux [fastspec, Gauss]')
-    ax2.set_xlabel('log Flux [fastspec, Box]')
-    for xx in [ax1, ax2]:
-        xx.set_xlim(-2, 5)
-        xx.set_ylim(-2, 5)
-        xx.plot([-2, 5], [-2, 5], color='k')
-
-    ax3.set_ylabel('log Flux Error [Hu Zou / mpfit]')
-    ax3.set_xlabel('log Flux Error [fastspec, Gauss]')
-    ax4.set_xlabel('log Flux Error [fastspec, Box]')
-    for xx in [ax3, ax4]:
-        xx.set_xlim(-2, 2.5)
-        xx.set_ylim(-2, 2.5)
-        xx.plot([-2, 2.5], [-2, 2.5], color='k')
-
-    ax5.set_ylabel('log Flux S/N [Hu Zou / mpfit]')
-    ax5.set_xlabel('log Flux S/N [fastspec, Gauss]')
-    ax6.set_xlabel('log Flux S/N [fastspec, Box]')
-    for xx in [ax5, ax6]:
-        xx.set_xlim(-1.5, 3.5)
-        xx.set_ylim(-1.5, 3.5)
-        xx.plot([-1.5, 3.5], [-1.5, 3.5], color='k')
+        indx_fast, indx_zouhu = geomask.match(fullfast['TARGETID'], fullzouhu['TARGETID'])
+        fast = fullfast[indx_fast]
+        meta = fullmeta[indx_fast]
+        zouhu = fullzouhu[indx_zouhu]
+        assert(np.all(meta['TARGETID'] == zouhu['TARGETID']))
         
-    fig.tight_layout()
-    fig.savefig('desi-users/ioannis/tmp/junk.png')
+        write_fastspecfit(fast, meta, outfile=fastfile)
+        log.info(f'Writing {len(zouhu):,d} objects to {zouhufile}.')        
+        zouhu.write(zouhufile, overwrite=True)
 
+    sns, colors = plot_style(talk=True, font_scale=0.8)
+
+    ccol = colors[0]
+    levels = [0.5, 0.75, 0.95, 0.99]
+    contour_kwargs = {'colors': 'k', 'alpha': 0.8, 'linewidths': 1}
+    data_kwargs = {'color': ccol, 'alpha': 0.5, 'ms': 2}
+    smooth = 1.5
+
+    fluxlim = [-0.5, 2.5]
+    siglim = [-0.1, 3.1]
+    residlim1 = [-1.5, 1.5]
+    residlim2 = [-1.5, 1.5]
+    mstarlim = [7, 12.5]
+    redshiftlim = [0, 0.7]
+
+    I = (fast['LOGMSTAR'] > 0) * (zouhu['SED_MASS'] > 0) * (meta['Z'] < 2.)
+    fmstar = fast['LOGMSTAR'][I]
+    zmstar = np.log10(zouhu['SED_MASS'][I])
+    fredshift = meta['Z'][I]
+
+    nrows, ncols = 2, 1
+    fig = plt.figure(figsize=(7, 7))
+    gs = fig.add_gridspec(nrows=nrows, ncols=ncols, height_ratios=[1, 0.5])
+
+    ax1 = fig.add_subplot(gs[0, 0]) # rows x cols
+    cn.hist2d(fmstar, zmstar, fill_contours=False, range=[mstarlim, mstarlim],
+              bins=100, color=ccol, smooth=smooth, levels=levels,
+              contour_kwargs=contour_kwargs,
+              data_kwargs=data_kwargs, ax=ax1)
+    ax1.plot(mstarlim, mstarlim, color='k', lw=2, ls='-')
+    ax1.set_xlabel(r'$\log_{10}\ (M/M_{\odot})$ [FastSpecFit]')
+    ax1.set_ylabel(r'$\log_{10}\ (M/M_{\odot})$ [Zou]')
+    #ax1.text(0.05, 0.9, label, va='center', ha='left', transform=ax1.transAxes)
+
+    ax2 = fig.add_subplot(gs[1, 0]) # rows x cols
+    resid = zmstar - fmstar
+    cn.hist2d(fredshift, resid, fill_contours=False, range=[redshiftlim, residlim1],
+              bins=100, color=ccol, smooth=smooth, levels=levels,
+              contour_kwargs=contour_kwargs,
+              data_kwargs=data_kwargs, ax=ax2)
+    ax2.axhline(y=0, color='k', lw=2, ls='-')
+    ax2.set_xlabel('Redshift')
+    ax2.set_ylabel(r'$\Delta\log_{10}\ (M/M_{\odot})$')
+
+    print(f'Mstar: {np.nanmean(resid):.3f}+/-{np.nanstd(resid):.3f} ({np.median(resid):.3f}) dex')
+        
+    if png1:
+        pngfile = os.path.join(figdir, png1)
+        log.info('Writing {}'.format(pngfile))
+        fig.tight_layout()
+        fig.savefig(pngfile)
+        plt.close(fig)
+
+    nline = 4
+    ncols = 2
+    nrows = 2 * nline // ncols
+    fig = plt.figure(figsize=(12, 12))
+    gs = fig.add_gridspec(nrows=nrows, ncols=ncols, height_ratios=[1, 0.5, 1, 0.5])
+
+    for iline, (zline, fline, label) in enumerate(zip(['HALPHA', 'NII6583', 'HBETA', 'OIII5007'],
+                                                      ['HALPHA', 'NII_6584', 'HBETA', 'OIII_5007'],
+                                                      [r'H$\alpha$', r'[NII] $\lambda6584$', r'H$\beta$', r'[OIII] $\lambda5007$'])):
+        
+        I = ((fast[f'{fline}_FLUX'] > 0) * (fast[f'{fline}_FLUX_IVAR'] > 1.) * (zouhu[f'{zline}_FLUX'] > 0) *
+             (fast[f'{fline}_SIGMA'] > 0) * (zouhu[f'{zline}_FLUXERR'] > 0.) *
+             (zouhu[f'{zline}_FLUXERR'] > 0.) *
+             #(zouhu[f'{zline}_SIGMA'] > 0) *
+             (zouhu[f'{zline}_FLUX']/zouhu[f'{zline}_FLUXERR'] > 1.) *
+             np.isfinite(zouhu[f'{zline}_FLUXERR']))
+            
+        zflux = np.log10(zouhu[f'{zline}_FLUX'][I])
+        fflux = np.log10(fast[f'{fline}_FLUX'][I])
+        fsigma = np.log10(fast[f'{fline}_SIGMA'][I])
+        zsigma = zouhu[f'{zline}_SIGMA'][I]
+
+        icol, irow = iline % ncols, 2 * (iline // ncols)
+        #print(irow, icol)
+
+        ax1 = fig.add_subplot(gs[irow, icol]) # rows x cols
+        cn.hist2d(fflux, zflux, fill_contours=False, range=[fluxlim, fluxlim],
+                  bins=100, color=ccol, smooth=smooth, levels=levels,
+                  contour_kwargs=contour_kwargs,
+                  data_kwargs=data_kwargs, ax=ax1)
+        ax1.plot(fluxlim, fluxlim, color='k', lw=2, ls='-')
+        ax1.set_xlabel(r'$\log_{10}$ (Flux) [FastSpecFit]')
+        ax1.set_ylabel(r'$\log_{10}$ (Flux) [Zou]')
+        ax1.text(0.05, 0.9, label, va='center', ha='left', transform=ax1.transAxes)
+
+        ax2 = fig.add_subplot(gs[irow+1, icol]) # rows x cols
+        resid = zflux-fflux
+        cn.hist2d(fsigma, resid, fill_contours=False, range=[siglim, residlim2],
+                  bins=100, color=ccol, smooth=smooth, levels=levels,
+                  contour_kwargs=contour_kwargs,
+                  data_kwargs=data_kwargs, ax=ax2)
+        ax2.axhline(y=0, color='k', lw=2, ls='-')
+        ax2.set_xlabel(r'$\log_{10}\ (\sigma)$ (km/s) [FastSpecFit]')
+        ax2.set_ylabel(r'$\Delta\log_{10}$ (Flux)')# (Flux) [Zou-FastSpecFit]')
+
+        print(f'{fline:9s}: {np.nanmean(resid):.3f}+/-{np.nanstd(resid):.3f} ({np.median(resid):.3f}) dex')
+
+    if png2:
+        pngfile = os.path.join(figdir, png2)
+        log.info('Writing {}'.format(pngfile))
+        #fig.subplots_adjust(bottom=0.15, right=0.85, top=0.95)
+        fig.tight_layout()
+        fig.savefig(pngfile)
+        plt.close(fig)
+        
 def broadline_stats(specprod='fuji', png=None):
     """Investigate https://github.com/desihub/fastspecfit/issues/118
 
@@ -523,8 +588,7 @@ def vac_diagnostics(specprod='fuji', lsstype='clustering'):
     """
     from matplotlib.backends.backend_pdf import PdfPages
     
-    #from desitarget.targetmask import desi_mask, bgs_mask, scnd_mask
-
+    from desitarget.targetmask import desi_mask, bgs_mask, scnd_mask
     from desitarget.sv3.sv3_targetmask import desi_mask as sv3_desi_mask
     from desitarget.sv3.sv3_targetmask import bgs_mask as sv3_bgs_mask
     from desitarget.sv3.sv3_targetmask import scnd_mask as sv3_scnd_mask
@@ -541,8 +605,21 @@ def vac_diagnostics(specprod='fuji', lsstype='clustering'):
     import yaml
     from importlib import resources
     from fastspecfit.emlines import read_emlines
-
+    from fastspecfit.io import read_fastspecfit
+    
     #sns, colors = plot_style(talk=True, font_scale=0.5)
+
+    if specprod == 'fuji':
+        version = 'v3.0'
+    elif specprod == 'guadalupe':
+        lsstype = 'all'
+        version = 'v3.0'
+    elif specprod == 'iron':
+        version = 'v2.0'
+
+    diagnosticsdir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'vac', specprod, version)
+    if not os.path.isdir(diagnosticsdir):
+        os.makedirs(diagnosticsdir, exist_ok=True)
 
     hist2dcol = 'blue' # colors[1]
     levels = [0.5, 0.75, 0.95]
@@ -558,21 +635,28 @@ def vac_diagnostics(specprod='fuji', lsstype='clustering'):
     with open(fphotofile, 'r') as F:
         fphoto = yaml.safe_load(F)
 
+    #for targ in ['BGS_ANY']:
     for targ in ['BGS_ANY', 'LRG', 'ELG', 'QSO']:
     #for targ in ['ELG']:#, 'LRG']:
         #print(f'Building diagnostic plots for target type {targ}')
 
-        data = read_clustering(targetclass=targ, lsstype=lsstype)
-        if not bool(data):
-            return
-        fast, meta = data[targ]['fast'], data[targ]['meta']
-        del data
+        if specprod == 'guadalupe':
+            vacdir = get_vacdir(specprod, version=version)
+            fastfile = os.path.join(vacdir, f'fastspec-{specprod}.fits')
+            desi_target = fitsio.read(fastfile, 'METADATA', columns='DESI_TARGET')
+            I = np.where(desi_target & desi_mask.mask(targ) != 0)[0]#[:10000]
+            fast, meta, _, _ = read_fastspecfit(fastfile, rows=I)
+        else:
+            data = read_clustering(targetclass=targ, lsstype=lsstype)
+            if not bool(data):
+                return
+            fast, meta = data[targ]['fast'], data[targ]['meta']
+            del data
 
-        #fast = fast[:50000]
-        #meta = meta[:50000]
-        #print(meta.colnames)
+            #fast = fast[:50000]
+            #meta = meta[:50000]
     
-        pdffile = os.path.join(datadir, 'vac-diagnostics', f'vac-{specprod}-{lsstype}-{targ.lower()}.pdf')
+        pdffile = os.path.join(diagnosticsdir, f'vac-{specprod}-{lsstype}-{targ.lower()}.pdf')
 
         with PdfPages(pdffile) as pdf:
             #fig, ax = plt.subplots()
@@ -1819,7 +1903,7 @@ def main():
     if args.smooth_continuum:
         smooth_continuum()
     if args.compare_zouhu:
-        compare_zouhu(specprod=args.specprod)
+        compare_zouhu(png1='fastspec-zouhu-mstar.png', png2='fastspec-zouhu-emlines.png', specprod=args.specprod, overwrite=args.overwrite)
     if args.compare_raga:
         compare_raga()
     if args.broadline_stats:
