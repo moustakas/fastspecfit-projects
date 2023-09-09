@@ -138,6 +138,8 @@ def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG', 'QSO'], specprod='fuji
 def match_lss(specprod='fuji', overwrite=False):
     """Match to the LSS catalogs (full and clustering).
 
+    https://desi.lbl.gov/trac/wiki/keyprojects/y1kp3/Y1details
+
     INFO:fastpaper1-figures:183:match_lss: ##################################################
     INFO:fastpaper1-figures:184:match_lss: Working on BGS_ANY
     INFO:io.py:1806:read_fastspecfit: Read 265,325 object(s) from /pscratch/sd/i/ioannis/fastspecfit/vac/data1/fuji/catalogs/fastspec-fuji-sv3-bright.fits
@@ -217,9 +219,9 @@ def match_lss(specprod='fuji', overwrite=False):
 
     # read the clustering catalogs
     if specprod == 'fuji':
-        lssdir = '/global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats'
+        lssdir = os.path.join(os.getenv('DESI_ROOT'), 'vac', 'edr', 'lss', 'v2.0', 'LSScats')
     elif specprod == 'iron':
-        lssdir = '/global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats'
+        lssdir = os.path.join(os.getenv('DESI_ROOT'), 'vac', 'edr', 'lss', 'v2.0', 'LSScats')
         #lssdir = '/global/cfs/cdirs/desi/survey/catalogs/Y1/LSS/iron/LSScats/v0.6/'
     else:
         raise NotImplemented
