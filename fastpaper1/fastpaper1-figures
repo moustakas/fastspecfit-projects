@@ -60,7 +60,14 @@ def plot_style(font_scale=1.2, paper=False, talk=True, style='ticks'):
 
     return sns, colors
 
-def get_vacdir(specprod='fuji', version='v3.0'):
+def get_version(specprod):
+    ver = {'fuji': 'v3.0', 'guadalupe': 'v3.0', 'iron': 'v2.0'}
+    return ver[specprod]    
+
+def get_vacdir(specprod='fuji', version=None):
+
+    if version is None:
+        version = get_version(specprod)
 
     #if 'NERSC_HOST' in os.environ:
     #    vacdir = '/pscratch/sd/i/ioannis/fastspecfit/vac/data/'+specprod+'/catalogs' # to be updated
@@ -107,7 +114,7 @@ def write_example_spectra(overwrite=False):
     one_desi_spectrum(survey='sv3', program='bright', healpix=9813, targetid=39633109787873428,
                       specprod='fuji', outdir=outdir, overwrite=overwrite)
 
-def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG', 'QSO'], lsstype='clustering'):
+def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG', 'QSO'], specprod='fuji', lsstype='clustering'):
     """Read the matched clustering files (from match_lss).
 
     """
@@ -115,12 +122,12 @@ def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG', 'QSO'], lsstype='clust
 
     data = {}
     for targtype in np.atleast_1d(targetclass):
-        fastfile = os.path.join(datadir, 'clustering', f'fastspec-{lsstype}-{targtype}.fits')
+        fastfile = os.path.join(datadir, 'clustering', f'fastspec-{specprod}-{lsstype}-{targtype}.fits')
         if not os.path.isfile(fastfile):
             log.info(f'{fastfile} not found.')
         else:
             fast, meta, _, _ = read_fastspecfit(fastfile)
-            lssfile = os.path.join(datadir, 'clustering', f'lss-{lsstype}-{targtype}.fits')
+            lssfile = os.path.join(datadir, 'clustering', f'lss-{specprod}-{lsstype}-{targtype}.fits')
             lss = Table(fitsio.read(lssfile))
             log.info(f'Read {len(lss):,d} objects from {lssfile}')
             data[targtype] = {'fast': fast, 'meta': meta, 'lss': lss}
@@ -131,7 +138,7 @@ def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG', 'QSO'], lsstype='clust
 def match_lss(specprod='fuji', overwrite=False):
     """Match to the LSS catalogs (full and clustering).
 
-INFO:fastpaper1-figures:183:match_lss: ##################################################
+    INFO:fastpaper1-figures:183:match_lss: ##################################################
     INFO:fastpaper1-figures:184:match_lss: Working on BGS_ANY
     INFO:io.py:1806:read_fastspecfit: Read 265,325 object(s) from /pscratch/sd/i/ioannis/fastspecfit/vac/data1/fuji/catalogs/fastspec-fuji-sv3-bright.fits
     INFO:fastpaper1-figures:193:match_lss: --------------------
@@ -211,25 +218,26 @@ INFO:fastpaper1-figures:183:match_lss: #########################################
     # read the clustering catalogs
     if specprod == 'fuji':
         lssdir = '/global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats'
-    #elif specprod == 'guadalupe':
-    #    
-    #else:
-    #    raise NotImplemented
+    elif specprod == 'iron':
+        lssdir = '/global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats'
+        #lssdir = '/global/cfs/cdirs/desi/survey/catalogs/Y1/LSS/iron/LSScats/v0.6/'
+    else:
+        raise NotImplemented
     
     for targtype in ['BGS_ANY', 'LRG', 'ELG', 'QSO']:
         log.info('##################################################')
         log.info(f'Working on {targtype}')
         if targtype == 'BGS_ANY':
-            sv3file = vacdir+'/fastspec-fuji-sv3-bright.fits'
+            sv3file = os.path.join(vacdir, f'fastspec-{specprod}-sv3-bright.fits')
             allfast, allmeta, _, _ = read_fastspecfit(sv3file)
         else:
-            sv3file = vacdir+'/fastspec-fuji-sv3-dark.fits'
+            sv3file = os.path.join(vacdir, f'fastspec-{specprod}-sv3-dark.fits')
             allfast, allmeta, _, _ = read_fastspecfit(sv3file)
         
         for lsstype in ['clustering', 'full']:
             log.info('--------------------')
-            outfastfile = os.path.join(datadir, 'clustering', f'fastspec-{lsstype}-{targtype}.fits')
-            outlssfile = os.path.join(datadir, 'clustering', f'lss-{lsstype}-{targtype}.fits')
+            outfastfile = os.path.join(datadir, 'clustering', f'fastspec-{specprod}-{lsstype}-{targtype}.fits')
+            outlssfile = os.path.join(datadir, 'clustering', f'lss-{specprod}-{lsstype}-{targtype}.fits')
     
             if os.path.isfile(outfastfile) and os.path.isfile(outlssfile) and not overwrite:
                 log.info(f'fastspecfit file {outfastfile} exists')
@@ -282,8 +290,9 @@ INFO:fastpaper1-figures:183:match_lss: #########################################
                 try:
                     assert(len(miss) == 0)
                 except:
-                    pdb.set_trace()
-                
+                    log.warning('Missing the following objects!')
+                    print(miss)
+               
                 write_fastspecfit(fast, meta, outfile=outfastfile, verbose=False)
 
                 lss.write(outlssfile, overwrite=True)
@@ -609,13 +618,7 @@ def vac_diagnostics(specprod='fuji', lsstype='clustering'):
     
     #sns, colors = plot_style(talk=True, font_scale=0.5)
 
-    if specprod == 'fuji':
-        version = 'v3.0'
-    elif specprod == 'guadalupe':
-        lsstype = 'all'
-        version = 'v3.0'
-    elif specprod == 'iron':
-        version = 'v2.0'
+    version = get_version(specprod)
 
     diagnosticsdir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'vac', specprod, version)
     if not os.path.isdir(diagnosticsdir):
@@ -641,7 +644,7 @@ def vac_diagnostics(specprod='fuji', lsstype='clustering'):
         #print(f'Building diagnostic plots for target type {targ}')
 
         if specprod == 'guadalupe':
-            vacdir = get_vacdir(specprod, version=version)
+            vacdir = get_vacdir(specprod)
             fastfile = os.path.join(vacdir, f'fastspec-{specprod}.fits')
             desi_target = fitsio.read(fastfile, 'METADATA', columns='DESI_TARGET')
             I = np.where(desi_target & desi_mask.mask(targ) != 0)[0]#[:10000]
