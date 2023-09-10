@@ -21,7 +21,8 @@ log = get_logger()
 
 from fastspecfit.util import C_LIGHT
 
-#sns.set(context='talk', style='ticks', font_scale=0.9)#, rc=rc)
+import seaborn as sns
+sns.set(context='talk', style='ticks', font_scale=0.9)
 
 datadir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'redrock-templates', 'data')
 
@@ -47,7 +48,6 @@ def match_lss(specprod='iron', overwrite=False):
     """Match to the clustering catalogs (full and clustering).
 
     https://desi.lbl.gov/trac/wiki/keyprojects/y1kp3/Y1details
-
 
     """
     from fastspecfit.io import read_fastspecfit
@@ -231,6 +231,8 @@ def build_emline_model(lineamps, linevshifts, linesigmas, linewaves,
     if dlog10wave is None:
         dlog10wave = 5. / C_LIGHT / np.log(10) # equivalent to km/s
 
+    pad = 5.
+
     # Cut to lines with non-zero amplitudes.
     I = lineamps > 0
     if np.count_nonzero(I) > 0:
@@ -245,12 +247,12 @@ def build_emline_model(lineamps, linevshifts, linesigmas, linewaves,
 
         # line-width [log-10 Angstrom] and redshifted wavelength [log-10 Angstrom]
         log10sigmas = linesigmas / C_LIGHT / np.log(10) 
-        linezwaves = np.log10(linewaves * (1.0 + redshift + linevshifts / C_LIGHT))
+        linezwaves = np.log10(linewaves * (1. + redshift + linevshifts / C_LIGHT))
 
         log10wave = []
         for linezwave, log10sigma in zip(linezwaves, log10sigmas):
             log10wave.append(np.arange(linezwave - (5 * log10sigma), linezwave + (5 * log10sigma), dlog10wave))
-        log10wave = np.hstack([np.log10(np.min(emlinewave)-1), np.log10(np.max(emlinewave)+1), ] + log10wave)
+        log10wave = np.hstack([np.log10(np.min(emlinewave)-pad), np.log10(np.max(emlinewave)+pad), ] + log10wave)
         S = np.argsort(log10wave)
         log10wave = log10wave[S]
         log10model = np.zeros_like(log10wave)
@@ -260,7 +262,10 @@ def build_emline_model(lineamps, linevshifts, linesigmas, linewaves,
             log10model[J] += lineamp * np.exp(-0.5 * (log10wave[J]-linezwave)**2 / log10sigma**2)
 
     modelflux = np.hstack(log10model)
-    emlinemodel = trapz_rebin(10**log10wave, modelflux, emlinewave)
+    try:
+        emlinemodel = trapz_rebin(10**log10wave, modelflux, emlinewave)
+    except:
+        pdb.set_trace()
 
     return emlinemodel
 
@@ -279,7 +284,7 @@ def read_ftemplates():
     return templatecache
 
 
-def restframe_templates(fast, meta, outfile, minwave=100., maxwave=1.1e4):
+def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4):
     """Reconstruct the rest-frame templates.
 
     """
@@ -294,63 +299,117 @@ def restframe_templates(fast, meta, outfile, minwave=100., maxwave=1.1e4):
     templatewave = templatecache['templatewave'][I]
     templateflux = templatecache['templateflux'][I, :]
     templateflux_nolines = templatecache['templateflux_nolines'][I, :]
+    npix = len(templatewave)
 
     J = np.where((templatecache['linewaves'] > minwave) * (templatecache['linewaves'] < maxwave))[0]
     linewaves = templatecache['linewaves'][J]
     linefluxes = templatecache['linefluxes'][J]
-
     del templatecache
 
     # reconstruct the continuum-only templates
     continuum = fast['COEFF'].data.dot(templateflux_nolines.T) # note: no line-emission
     templates_lowres = fast['COEFF'].data.dot(templateflux.T) # note: low-res line-emission
 
-    # now generate the individual emission-line spectra but using the measured
-    # line-width (if any)
+    # build emission-line spectra on a grid of line-width; then, below, choose
+    # the closest one to the measured line-width
     nominal_sigma = 90. # [km/s]
     nline = len(linewaves)
 
+    linesigma_min = 5.
+    linesigma_max = 275.
+    linesigma_delta = 50. # 5.
+    nlinesigma = int(np.ceil((linesigma_max - linesigma_min) / linesigma_delta)) + 1
+    linesigma_grid = np.linspace(linesigma_min, linesigma_max, nlinesigma)
+    if not nominal_sigma in linesigma_grid:
+        linesigma_grid = np.hstack((nominal_sigma, linesigma_grid))
+        linesigma_grid = linesigma_grid[np.argsort(linesigma_grid)]
+        nlinesigma = len(linesigma_grid)
+
     linevshifts = np.zeros_like(linewaves) # no velocity shifts
+    linezwaves = linewaves * (1. + linevshifts / C_LIGHT)
     
+    linemodels = np.zeros((nlinesigma, nsed, npix)) # [nsigma, nsed, npix]
+    for isigma in range(nlinesigma):
+        print(linesigma_grid[isigma])
+        linesigmas = np.zeros(nline) + linesigma_grid[isigma]
+        I = np.where(np.sum(linefluxes, axis=0) > 0)[0]
+        for imodel in I:
+            lineamps = C_LIGHT * linefluxes[:, imodel] / (np.sqrt(2 * np.pi) * linesigmas * linezwaves)
+            emlinemodel = build_emline_model(lineamps, linevshifts, linesigmas,
+                                             linewaves, emlinewave=templatewave)
+            linemodels[isigma, imodel, :] = emlinemodel
+
+    # now build the emission-line spectra, choosing the linemodels model closest
+    # to the measured line-width
     linespectra = np.zeros_like(continuum)
     for igal in range(ngal):
         if igal % 20 == 0:
             log.info(f'Working on galaxy {igal} / {ngal}')
-        
-        if fast['NARROW_SIGMA'][igal] > 0:
-            linesigmas = np.zeros(nline) + fast['NARROW_SIGMA'][igal]
-        else:
-            linesigmas = np.zeros(nline) + nominal_sigma
-        #linesigmas = np.zeros(nline) + 500.
 
-        linezwaves = linewaves * (1. + linevshifts / C_LIGHT)
-
-        #lineamps = C_LIGHT * linefluxes / (np.sqrt(2 * np.pi) * linesigmas[:, np.newaxis] * linewaves[:, np.newaxis])
-        emlinemodels = np.zeros_like(templateflux_nolines)
+        # are any of the emission-line models used for this object?
         I = np.where((np.sum(linefluxes, axis=0) > 0) * (fast['COEFF'][igal] > 0))[0]
         if len(I) > 0:
-            for imodel in I:
-                #print(igal, imodel)
-                lineamps = C_LIGHT * linefluxes[:, imodel] / (np.sqrt(2 * np.pi) * linesigmas * linezwaves)
-                emlinemodel = build_emline_model(lineamps, linevshifts, linesigmas,
-                                                 linewaves, emlinewave=templatewave)
-                emlinemodels[:, imodel] = emlinemodel
-                #plt.clf()
-                #I = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]                
-                #plt.plot(templatewave[I], emlinemodel[I])
-                #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp2/junk.png')
-                #pdb.set_trace()
+            if fast['NARROW_SIGMA'][igal] > 0:
+                linesigma = fast['NARROW_SIGMA'][igal]
+            else:
+                linesigma = nominal_sigma
+            jsigma = np.argmin(np.abs(linesigma-linesigma_grid))
 
-        if np.max(emlinemodels) > 0:
+            emlinemodels = np.zeros_like(templateflux_nolines)
+            for imodel in I:
+                #print(igal, jsigma, imodel, linesigma, linesigma_grid[jsigma])
+                emlinemodels[:, imodel] = linemodels[jsigma, imodel, :]
+
             linespectra[igal, :] = fast['COEFF'][igal].dot(emlinemodels.T)
-        #plt.clf()
-        #I = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]                
-        #plt.plot(templatewave[I], continuum[igal, I] + linespectra[igal, I])
-        #plt.plot(templatewave[I], templates_lowres[igal, I])
-        ##plt.plot(templatewave[I], linespectra[igal, I])
-        #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp2/junk.png')
-        #pdb.set_trace()
+
+            #W = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]                
+            #plt.plot(templatewave[W], continuum[igal, W] + linespectra[igal, W])
+            #plt.plot(templatewave[W], templates_lowres[igal, W])
+            #plt.plot(templatewave[W], linespectra[igal, W])
+            #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp2/junk.png')
+            #pdb.set_trace()
     
+    ## now generate the individual emission-line spectra but using the measured
+    ## line-width (if any)
+    #linespectra = np.zeros_like(continuum)
+    #for igal in range(ngal):
+    #    if igal % 20 == 0:
+    #        log.info(f'Working on galaxy {igal} / {ngal}')
+    #    
+    #    if fast['NARROW_SIGMA'][igal] > 0:
+    #        linesigmas = np.zeros(nline) + fast['NARROW_SIGMA'][igal]
+    #    else:
+    #        linesigmas = np.zeros(nline) + nominal_sigma
+    #    #linesigmas = np.zeros(nline) + 500.
+    #
+    #    linezwaves = linewaves * (1. + linevshifts / C_LIGHT)
+    #
+    #    #lineamps = C_LIGHT * linefluxes / (np.sqrt(2 * np.pi) * linesigmas[:, np.newaxis] * linewaves[:, np.newaxis])
+    #    emlinemodels = np.zeros_like(templateflux_nolines)
+    #    I = np.where((np.sum(linefluxes, axis=0) > 0) * (fast['COEFF'][igal] > 0))[0]
+    #    if len(I) > 0:
+    #        for imodel in I:
+    #            #print(igal, imodel)
+    #            lineamps = C_LIGHT * linefluxes[:, imodel] / (np.sqrt(2 * np.pi) * linesigmas * linezwaves)
+    #            emlinemodel = build_emline_model(lineamps, linevshifts, linesigmas,
+    #                                             linewaves, emlinewave=templatewave)
+    #            emlinemodels[:, imodel] = emlinemodel
+    #            #plt.clf()
+    #            #I = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]                
+    #            #plt.plot(templatewave[I], emlinemodel[I])
+    #            #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp2/junk.png')
+    #            #pdb.set_trace()
+    #
+    #    if np.max(emlinemodels) > 0:
+    #        linespectra[igal, :] = fast['COEFF'][igal].dot(emlinemodels.T)
+    #    #plt.clf()
+    #    #I = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]                
+    #    #plt.plot(templatewave[I], continuum[igal, I] + linespectra[igal, I])
+    #    #plt.plot(templatewave[I], templates_lowres[igal, I])
+    #    ##plt.plot(templatewave[I], linespectra[igal, I])
+    #    #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp2/junk.png')
+    #    #pdb.set_trace()
+        
     templates = continuum + linespectra
 
     # normalize at 5500 A
@@ -358,6 +417,8 @@ def restframe_templates(fast, meta, outfile, minwave=100., maxwave=1.1e4):
         norm = np.interp(5500., templatewave, templates[igal, :])
         templates[igal, :] /= norm
         templates_lowres[igal, :] /= norm
+        continuum[igal, :] /= norm
+        linespectra[igal, :] /= norm
     
     #T = np.where(templatewave < 6e4)[0]
     #fitsio.write(outfile, templates[:, T], clobber=True, extname='FLUX')
@@ -368,26 +429,25 @@ def restframe_templates(fast, meta, outfile, minwave=100., maxwave=1.1e4):
 
     #igal = 2
 
-    I = np.where((templatewave > 1e3) * (templatewave < 1e4))[0]
-    #I = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]
+    #I = np.where((templatewave > 1e3) * (templatewave < 1e4))[0]
+    I = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]
  
     fig, ax = plt.subplots()
-    #ax.plot(templatewave[I]/1e4, templates[igal, I], label='Custom')
-    #ax.scatter(templatewave[I]/1e4, templates_lowres[igal, I], label='FSPS', alpha=0.5)
-    #ax.plot(templatewave[I]/1e4, linespectra[igal, I], label='Custom')
-    #ax.plot(templatewave[I]/1e4, continuum[igal, I], label='Custom')
-    for igal in range(ngal):
-        #ax.plot(templatewave/1e4, templatewave * templates[igal, :], alpha=0.5)
-        ax.plot(templatewave[I]/1e4, templates[igal, I], label='Custom', alpha=0.5)
+    #ax.plot(templatewave[I]/1e4, templates[igal, I], label='New model')
+    #ax.plot(templatewave[I]/1e4, templates_lowres[igal, I], alpha=0.5, label='Fixed-res model')
+    ##ax.plot(templatewave[I]/1e4, linespectra[igal, I])
+    #ax.plot(templatewave[I]/1e4, continuum[igal, I], label='Continuum only')
+    #ax.legend()
+    for igal in range(10):
+        ax.plot(templatewave/1e4, templatewave * templates[igal, :], alpha=0.5)
+        #ax.plot(templatewave[I]/1e4, templates[igal, I], label='Custom', alpha=0.5)
         #ax.plot(templatewave[I]/1e4, templates_lowres[igal, I], label='FSPS', alpha=0.5)
+    ax.set_yscale('log')
     ax.set_ylabel(r'Normalized $\lambda F_{\lambda}$')
     ax.set_xlabel(r'Rest-frame Wavelength ($\mu$m)')
     ax.set_xscale('log')
-    ax.set_yscale('log')
-    #ax.set_ylim(1e-8, 1e7)
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: '{:g}'.format(y)))
-    #ax.legend()
-    #ax.margins(0)
+    ax.margins(0)
     fig.tight_layout()
     pngfile = outfile.replace('.fits', '.png')
     fig.savefig(pngfile)
@@ -420,7 +480,7 @@ def main():
     # build the rest-frame templates
     if args.parent_templates:
         for targtype in ['BGS_ANY', 'LRG', 'ELG']:
-            data = read_clustering(targetclass=targtype, rows=np.arange(150))
+            data = read_clustering(targetclass=targtype, rows=np.arange(10))
             fast, meta = data[targtype]['fast'], data[targtype]['meta']
             del data
 
