@@ -2,16 +2,24 @@
 
 """Build new Redrock templates.
 
-source /global/cfs/cdirs/desi/software/desi_environment.sh main
-module load fastspecfit/main
+Dependencies:
+--desi/main
+--fastspecfit/main
+--redrock/fastspec-pca-templates
+--empca
+--setcoverpy
 
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates
+
+To run redrock, request the following resources:
+  salloc -N 4 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
 
 """
 import os, pdb
 import numpy as np
 import fitsio
-from astropy.table import Table, vstack, join
+from glob import glob
+from astropy.table import Table, hstack, vstack, join
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
@@ -20,11 +28,17 @@ from desiutil.log import get_logger
 log = get_logger()
 
 from fastspecfit.util import C_LIGHT
+from fastspecfit.util import trapz_rebin
 
 import seaborn as sns
 sns.set(context='talk', style='ticks', font_scale=0.9)
 
-datadir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'redrock-templates', 'data')
+templatedir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'redrock-templates')
+reduxdir = os.path.join(templatedir, 'redux')
+datadir = os.path.join(templatedir, 'data')
+qadir = os.path.join(templatedir, 'qa')
+
+tertiary26dir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'raichoor', 'laelbg', 'daily', 'healpix', 'tertiary26-thru20230416')
 
 def get_version(specprod):
     ver = {'fuji': 'v3.0', 'guadalupe': 'v3.0', 'iron': 'v2.0'}
@@ -43,6 +57,50 @@ def get_vacdir(specprod='fuji', version=None):
 
     return vacdir
 
+def read_vi_tertiary26():
+    """Read the tertiary26 LAE/LBG VI results.
+
+    """
+    from desimodel.footprint import radec2pix    
+        
+    vifile = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'tertiary', 'tertiary26', 'FINAL_VI_Subaru_COSMOS.fits')
+    vi = Table(fitsio.read(vifile))
+    vi.rename_columns(['VI_Z_FINAL', 'VI_QUALITY_FINAL', 'VI_COMMENTS_FINAL'], ['VI_Z', 'VI_QUALITY', 'VI_COMMENTS'])
+    I = np.where(vi['VI_QUALITY'] >=3)[0]
+    #I = (vi['VI_QUALITY'] >=3) * (vi['TERTIARY_TARGET'] == 'LAE_SUBARU ') * (vi['VI_Z'] > 2.4)#1e-3)    
+    log.info(f'Trimming to {len(I):,d}/{len(vi):,d} VI redshifts in {vifile}')
+    vi = vi[I]
+
+    # Now read the 'merge' catalog to figure out which healpixels we care about.
+    mergefile = os.path.join(tertiary26dir, 'merge-tertiary26-thru20230416.fits')
+    mm = Table(fitsio.read(mergefile))
+    log.info(f'Read {len(mm):,d} objects from {mergefile}')
+    mm['HEALPIX'] = radec2pix(nside=64, ra=mm['TARGET_RA'], dec=mm['TARGET_DEC'])
+
+    vi = join(mm, vi, keys='TARGETID')
+
+    return vi
+
+def read_vi(quality=2.5):
+    # see https://data.desi.lbl.gov/doc/releases/edr/vac/vi/
+    from glob import glob
+    #vifiles = glob('/global/cfs/cdirs/desi/public/edr/vac/edr/vi/v1.0/*.csv')
+    allvi = []
+    for targ in ['BGS', 'LRG', 'ELG', 'QSO']:
+        vifile = f'/global/cfs/cdirs/desi/public/edr/vac/edr/vi/v1.0/EDR_VI_{targ}_v1.csv'
+        vi = Table.read(vifile)
+        vi['SUFFIX'] = targ # os.path.basename(vifile).replace('EDR_VI_', '').replace('_v1.csv', '')
+        allvi.append(vi)
+    allvi = vstack(allvi)
+    I = np.where(allvi['VI_QUALITY'] >= quality)[0]
+    log.info(f'Trimming to {len(I):,d}/{len(allvi):,d} VI redshifts.')
+    allvi = allvi[I]
+
+    _, uindx = np.unique(allvi['TARGETID'], return_index=True)
+    log.info(f'Trimming to {len(uindx):,d}/{len(allvi):,d} unique targets.')
+    allvi = allvi[uindx]
+    
+    return allvi
 
 def match_lss(specprod='iron', overwrite=False):
     """Match to the clustering catalogs (full and clustering).
@@ -147,86 +205,8 @@ def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG'], specprod='iron',
     return data     
 
 
-def add_bitnames(meta):
-
-    desi_bitnames = np.zeros(len(meta), dtype='U300')
-    bgs_bitnames = np.zeros(len(meta), dtype='U300')
-    mws_bitnames = np.zeros(len(meta), dtype='U300')
-    scnd_bitnames = np.zeros(len(meta), dtype='U300')
-    cmx_bitnames = np.zeros(len(meta), dtype='U300')
-    targetclass = np.zeros(len(meta), dtype='U300')
-
-    def get_targetclass(targetclass, name):
-        for cc in ['BGS', 'LRG', 'ELG', 'QSO', 'MWS', 'SCND', 'STD']:
-            if cc in name:
-                for iobj, tclass in enumerate(targetclass):
-                    if tclass == '':
-                        targetclass[iobj] = cc
-                    else:
-                        if not cc in tclass: # only once
-                            targetclass[iobj] = ' '.join([tclass, cc])
-        return targetclass
-    
-    for survey, prefix in zip(['SV3'], ['SV3_']):
-    #for survey, prefix in zip(['CMX', 'SV1', 'SV2', 'SV3', 'MAIN'], ['CMX_', 'SV1_', 'SV2_', 'SV3_', '']):
-        I = meta['SURVEY'] == survey.lower()
-        if np.sum(I) > 0:
-            if survey == 'MAIN':
-                from desitarget.targetmask import desi_mask, bgs_mask, mws_mask, scnd_mask
-            elif survey == 'SV1':
-                from desitarget.sv1.sv1_targetmask import desi_mask, bgs_mask, mws_mask, scnd_mask
-            elif survey == 'SV2':
-                from desitarget.sv2.sv2_targetmask import desi_mask, bgs_mask, mws_mask, scnd_mask
-            elif survey == 'SV3':
-                from desitarget.sv3.sv3_targetmask import desi_mask, bgs_mask, mws_mask, scnd_mask
-            elif survey == 'CMX':
-                from desitarget.cmx.cmx_targetmask import cmx_mask
-
-            if survey == 'CMX':
-                for name in cmx_mask.names():
-                    J = np.where(meta['CMX_TARGET'.format(prefix)] & cmx_mask.mask(name) != 0)[0]
-                    if len(J) > 0:
-                        cmx_bitnames[J] = [' '.join([bit, name]) for bit in cmx_bitnames[J]]
-                        #if 'QSO' in name:
-                        #    pdb.set_trace()
-                        #print(name, targetclass[J])
-                        targetclass[J] = get_targetclass(targetclass[J], name)
-            else:
-                for name in desi_mask.names():
-                    J = np.where(meta['{}DESI_TARGET'.format(prefix)] & desi_mask.mask(name) != 0)[0]
-                    if len(J) > 0:
-                        desi_bitnames[J] = [' '.join([bit, name]) for bit in desi_bitnames[J]]
-                        targetclass[J] = get_targetclass(targetclass[J], name)
-                        
-                for name in bgs_mask.names():
-                    J = np.where(meta['{}BGS_TARGET'.format(prefix)] & bgs_mask.mask(name) != 0)[0]
-                    if len(J) > 0:
-                        bgs_bitnames[J] = [' '.join([bit, name]) for bit in bgs_bitnames[J]]
-                        targetclass[J] = get_targetclass(targetclass[J], name)
-                        
-                for name in mws_mask.names():
-                    J = np.where(meta['{}MWS_TARGET'.format(prefix)] & mws_mask.mask(name) != 0)[0]
-                    if len(J) > 0:
-                        mws_bitnames[J] = [' '.join([bit, name]) for bit in mws_bitnames[J]]
-                        targetclass[J] = get_targetclass(targetclass[J], name)
-                        
-                for name in scnd_mask.names():
-                    J = np.where(meta['{}SCND_TARGET'.format(prefix)] & scnd_mask.mask(name) != 0)[0]
-                    if len(J) > 0:
-                        scnd_bitnames[J] = [' '.join([bit, name]) for bit in scnd_bitnames[J]]
-                        targetclass[J] = get_targetclass(targetclass[J], name)
-
-    meta['DESI_BITNAMES'] = desi_bitnames
-    meta['BGS_BITNAMES'] = bgs_bitnames
-    meta['MWS_BITNAMES'] = mws_bitnames
-    meta['SCND_BITNAMES'] = scnd_bitnames
-    meta['CMX_BITNAMES'] = cmx_bitnames
-    meta['TARGETCLASS'] = targetclass
-
 def build_emline_model(lineamps, linevshifts, linesigmas, linewaves, 
                        emlinewave, dlog10wave=None, redshift=0.0):
-
-    from fastspecfit.util import trapz_rebin
 
     if dlog10wave is None:
         dlog10wave = 5. / C_LIGHT / np.log(10) # equivalent to km/s
@@ -262,10 +242,7 @@ def build_emline_model(lineamps, linevshifts, linesigmas, linewaves,
             log10model[J] += lineamp * np.exp(-0.5 * (log10wave[J]-linezwave)**2 / log10sigma**2)
 
     modelflux = np.hstack(log10model)
-    try:
-        emlinemodel = trapz_rebin(10**log10wave, modelflux, emlinewave)
-    except:
-        pdb.set_trace()
+    emlinemodel = trapz_rebin(10**log10wave, modelflux, emlinewave)
 
     return emlinemodel
 
@@ -284,18 +261,21 @@ def read_ftemplates():
     return templatecache
 
 
-def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4):
+def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4, dwave=0.1):
     """Reconstruct the rest-frame templates.
 
     """
-    from fastspecfit.io import read_fastspecfit, write_fastspecfit, cache_templates, FLUXNORM
+    from scipy.ndimage import gaussian_filter1d
+    from fastspecfit.io import cache_templates
+    from fastspecfit.continuum import PIXKMS_BLU
 
     ngal = len(meta)
 
     templatecache = read_ftemplates()
     nsed = len(templatecache['templateinfo'])
 
-    I = np.where((templatecache['templatewave'] > minwave) * (templatecache['templatewave'] < maxwave))[0]
+    # note the 5-Angstrom pad
+    I = np.where((templatecache['templatewave'] > (minwave-5)) * (templatecache['templatewave'] < (maxwave+5)))[0]
     templatewave = templatecache['templatewave'][I]
     templateflux = templatecache['templateflux'][I, :]
     templateflux_nolines = templatecache['templateflux_nolines'][I, :]
@@ -306,9 +286,48 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4):
     linefluxes = templatecache['linefluxes'][J]
     del templatecache
 
+    # generate template models on a grid of velocity dispersion; note that this
+    # isn't quite right in the UV or beyond about a micron...
+    vdispmin = 50.
+    vdispmax = 350.
+    dvdisp = 25.
+    nvdisp = int(np.ceil((vdispmax - vdispmin) / dvdisp)) + 1
+    vdisp_grid = np.linspace(vdispmin, vdispmax, nvdisp)
+
+    vdispflux = []
+    for sigma in vdisp_grid / PIXKMS_BLU:
+        vdispflux.append(gaussian_filter1d(templateflux_nolines, sigma=sigma, axis=0))
+    vdispflux = np.stack(vdispflux, axis=-1) # [npix,nvdispmodel,nvdisp]
+
+    # now loop on each galaxy and build the best-fitting continuum using the
+    # smoothed model closest to the measured velocity dispersion
+    continuum = np.zeros((ngal, npix))
+    I = np.argmin(np.abs(fast['VDISP'][:, np.newaxis] - vdisp_grid[np.newaxis, :]), axis=1)
+    for ivdisp in set(I):
+        J = np.where(ivdisp == I)[0]
+        continuum[J, :] = fast['COEFF'][J].data.dot(vdispflux[:, :, ivdisp].T) # note: no line-emission
+
     # reconstruct the continuum-only templates
-    continuum = fast['COEFF'].data.dot(templateflux_nolines.T) # note: no line-emission
+    #continuum = fast['COEFF'].data.dot(templateflux_nolines.T) # note: no line-emission
     templates_lowres = fast['COEFF'].data.dot(templateflux.T) # note: low-res line-emission
+
+    ## convolve with the measured velocity dispersion
+    #log.info('Convolving to the measured velocity dispersion.')
+    #for igal in range(ngal):
+    #    sigma = fast['VDISP'][igal] / PIXKMS_BLU # [pixels]
+    #    continuum[igal, :] = gaussian_filter1d(continuum[igal, :], sigma=sigma, axis=0)
+
+    # interpolate the models onto the new, desired wavelength grid
+    _templatewave = np.arange(minwave, maxwave, dwave)
+    _npix = len(_templatewave)
+    _continuum = np.zeros((ngal, _npix))
+    log.info('Interpolating onto the new wavelength grid.')
+    for igal in range(ngal):
+        _continuum[igal, :] = trapz_rebin(templatewave, continuum[igal, :], xnew=_templatewave)
+        
+    npix = _npix
+    continuum = _continuum
+    templatewave = _templatewave
 
     # build emission-line spectra on a grid of line-width; then, below, choose
     # the closest one to the measured line-width
@@ -343,7 +362,7 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4):
     # to the measured line-width
     linespectra = np.zeros_like(continuum)
     for igal in range(ngal):
-        if igal % 20 == 0:
+        if igal % 1000 == 0:
             log.info(f'Working on galaxy {igal} / {ngal}')
 
         # are any of the emission-line models used for this object?
@@ -355,7 +374,7 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4):
                 linesigma = nominal_sigma
             jsigma = np.argmin(np.abs(linesigma-linesigma_grid))
 
-            emlinemodels = np.zeros_like(templateflux_nolines)
+            emlinemodels = np.zeros((npix, nsed))
             for imodel in I:
                 #print(igal, jsigma, imodel, linesigma, linesigma_grid[jsigma])
                 emlinemodels[:, imodel] = linemodels[jsigma, imodel, :]
@@ -367,7 +386,6 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4):
             #plt.plot(templatewave[W], templates_lowres[igal, W])
             #plt.plot(templatewave[W], linespectra[igal, W])
             #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp2/junk.png')
-            #pdb.set_trace()
     
     ## now generate the individual emission-line spectra but using the measured
     ## line-width (if any)
@@ -398,7 +416,6 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4):
     #            #I = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]                
     #            #plt.plot(templatewave[I], emlinemodel[I])
     #            #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp2/junk.png')
-    #            #pdb.set_trace()
     #
     #    if np.max(emlinemodels) > 0:
     #        linespectra[igal, :] = fast['COEFF'][igal].dot(emlinemodels.T)
@@ -408,31 +425,37 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4):
     #    #plt.plot(templatewave[I], templates_lowres[igal, I])
     #    ##plt.plot(templatewave[I], linespectra[igal, I])
     #    #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp2/junk.png')
-    #    #pdb.set_trace()
         
     templates = continuum + linespectra
 
+    # gather the output metadata
+    metacols = ['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX', 'RA', 'DEC', 'Z', 'ZWARN', 'DELTACHI2', 'SPECTYPE', 'Z_RR']
+    outmeta = meta[metacols]
+
+    fastcols = ['VDISP', 'AV', 'AGE', 'ZZSUN', 'LOGMSTAR', 'SFR', 'DN4000_MODEL', 'NARROW_Z',
+                'BROAD_Z', 'UV_Z', 'NARROW_SIGMA', 'BROAD_SIGMA', 'UV_SIGMA']
+    outmeta = hstack((outmeta, fast[fastcols]))
+    outmeta['TEMPLATENORM'] = np.ones(len(outmeta), 'f4')
+
     # normalize at 5500 A
     for igal in range(ngal):
-        norm = np.interp(5500., templatewave, templates[igal, :])
+        norm = np.median(templates[igal, :])
+        #norm = np.interp(5500., templatewave, templates[igal, :])
+        outmeta['TEMPLATENORM'][igal] = norm
         templates[igal, :] /= norm
         templates_lowres[igal, :] /= norm
         continuum[igal, :] /= norm
         linespectra[igal, :] /= norm
     
-    #T = np.where(templatewave < 6e4)[0]
-    #fitsio.write(outfile, templates[:, T], clobber=True, extname='FLUX')
-    #fitsio.write(outfile, templatewave[T], extname='WAVE')
-    #fitsio.write(outfile, meta.as_array(), extname='METADATA')
-    #fitsio.write(outfile, fast.as_array(), extname='FASTSPEC')
-    #print(f'Wrote {outfile}')
+    fitsio.write(outfile, templates.astype('f8'), clobber=True, extname='FLUX')
+    fitsio.write(outfile, templatewave, extname='WAVE')
+    fitsio.write(outfile, outmeta.as_array(), extname='METADATA')
+    print(f'Wrote {outfile}')
 
-    #igal = 2
-
-    #I = np.where((templatewave > 1e3) * (templatewave < 1e4))[0]
-    I = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]
- 
+    # optional QA of the first 10 models
+    
     fig, ax = plt.subplots()
+    #I = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]
     #ax.plot(templatewave[I]/1e4, templates[igal, I], label='New model')
     #ax.plot(templatewave[I]/1e4, templates_lowres[igal, I], alpha=0.5, label='Fixed-res model')
     ##ax.plot(templatewave[I]/1e4, linespectra[igal, I])
@@ -461,17 +484,25 @@ def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--match-lss', action='store_true', help='Match to the LSS catalogs (no figures, just catalogs).')
     parser.add_argument('--parent-templates', action='store_true', help='Build the parent rest-frame templates.')
-    parser.add_argument('--lae-templates', action='store_true', help='LAE/COSMOS sample.')
-    parser.add_argument('--nmf-templates', action='store_true', help='Find the NMF basis templates.')
-    parser.add_argument('--template-qa', action='store_true', help='Build some QA.')
+    parser.add_argument('--empca-templates', action='store_true', help='Run empca on the output of --parent-templates.')
+    parser.add_argument('--redrock-vitiles', action='store_true', help='Run Redrock on the VI tiles.')
+    parser.add_argument('--template-qa', action='store_true', help='Template QA.')
+    parser.add_argument('--redshift-qa', action='store_true', help='Redshift QA.')
+
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
+    parser.add_argument('--minwave', type=float, default=400., help='Minimum template wavelength (Angstrom).')
+    parser.add_argument('--maxwave', type=float, default=1.1e4, help='Maximum template wavelength (Angstrom).')
+    parser.add_argument('--dwave', type=float, default=0.1, help='Template wavelength spacing (Angstrom).')
+    parser.add_argument('--niter', type=int, default=10, help='Number of PCA iterations.')
+    parser.add_argument('--ncomp', type=int, default=10, help='Number of PCA components.')
+
     parser.add_argument('--specprod', default='iron', help='Spectroscopic production.')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')    
     args = parser.parse_args()
 
-    desi_root = os.getenv('DESI_ROOT')
-    outdir = desi_root+'/users/ioannis/fastspecfit/redrock-templates'
-    tertiarydir = desi_root+'/users/ioannis/tertiary/tertiary26'
+    rand = np.random.RandomState(seed=1)
+
+    empca_outfile = os.path.join(templatedir, 'rrtemplate-galaxy.fits')
 
     # build the parent samples
     if args.match_lss:
@@ -479,194 +510,325 @@ def main():
 
     # build the rest-frame templates
     if args.parent_templates:
-        for targtype in ['BGS_ANY', 'LRG', 'ELG']:
-            data = read_clustering(targetclass=targtype, rows=np.arange(10))
+        for targtype, nrows in zip(['BGS_ANY', 'LRG', 'ELG'], [10000, 5000, 5000]):
+            data = read_clustering(targetclass=targtype)#, rows=np.arange(10))
             fast, meta = data[targtype]['fast'], data[targtype]['meta']
             del data
 
+            I = rand.choice(len(meta), size=nrows, replace=False)
+
             outfile = os.path.join(datadir, f'ftemplates-{args.specprod}-{targtype}.fits')            
-            restframe_templates(fast, meta, outfile)
+            restframe_templates(fast[I], meta[I], outfile, minwave=args.minwave,
+                                maxwave=args.maxwave, dwave=args.dwave)
 
+    if args.empca_templates:
+        import redrock
+        from astropy.io import fits
+        from empca import empca
 
-    if args.lae_templates:
-        # see fastspecfit-projects/tertiary/fastspecfit-tertiary
-        fastfile = os.path.join(tertiarydir, 'fastspec-vi-tertiary26.fits')
-        fast, meta, _, _ = read_fastspecfit(fastfile)
+        flux = []
+        for targtype in ['BGS_ANY', 'LRG', 'ELG']:
+            templatefile = os.path.join(datadir, f'ftemplates-{args.specprod}-{targtype}.fits')
+            log.info(f'Reading {templatefile}')
+            flux.append(fitsio.read(templatefile, 'FLUX'))
+        flux = np.vstack(flux) # [ngal, nwave]
+        #flux = flux[:100, :]
+        ngal = flux.shape[0]
 
-        # one galaxy has all zero coefficients
-        I = np.sum(fast['COEFF'].data, axis=1) > 0
-
-        outfile = outdir+'/fastspec-vi-tertiary26-templates.fits'
-        restframe_templates(fast[I], meta[I], outfile)
-
-
-    #nmf_outfile = outdir+'/rrtemplate-nmf-galaxy.fits'        
-
-    if args.nmf_templates:
-        # read the basis templates
-        templatewave = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'WAVE')
-
-        templateflux = []
-        templateflux.append(fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'FLUX'))
-        for oneclass in ['BGS', 'ELG', 'LRG']:
-            templateflux.append(fitsio.read(outdir+f'/{specprod}-{version}-{oneclass}.fits', 'FLUX'))
-        templateflux = np.vstack(templateflux) # [ngal, npix]
-
-        #T = np.where(templatewave < 6e4)[0]
-        #templatewave = templatewave[T]
-        #templateflux = templateflux[T, :]
-
-        dw = 0.5
-        wave = np.arange(550., 1e4, dw)
-        npix = len(wave)
-        ngal = templateflux.shape[0]
-
-        flux = np.zeros((ngal, npix))
-        for igal in range(ngal):
-            flux[igal, :] = np.interp(wave, templatewave, templateflux[igal, :])
-
-        ncomp = 10
-        g = nmf.NMF(flux, n_components=ncomp) # input matrix should be [ngal, npix]
-        chi2, time_used = g.SolveNMF(maxiters=1000, tol=1e-3)
+        model = empca(flux, niter=args.niter, nvec=args.ncomp)
+        for ii in range(model.coeff.shape[0]):
+            model.coeff[ii] /= np.linalg.norm(model.coeff[ii])
         
-        nmf_eigenvec = g.H # [nc, npix]
-        nmf_eigencoeff = g.W # [ngal, nc]
-        nmf_model = nmf_eigencoeff.dot(nmf_eigenvec) # [ngal, npix]
+        empca_eigenvec = model.eigvec  # [ncomp, npix]
+        empca_eigencoeff = model.coeff # [ngal, ncomp]
+        empca_model = empca_eigencoeff.dot(empca_eigenvec)
 
         header = fits.Header()
-        header['CRVAL1'] = (wave[0], 'restframe starting wavelength [Angstroms]')
-        header['CDELT1'] = dw
+        header['CRVAL1'] = (args.minwave, 'restframe starting wavelength [Angstroms]')
+        header['CDELT1'] = args.dwave
         header['RRTYPE']   = 'GALAXY'
         header['RRSUBTYP'] = ''
-        header['RRVER'] = 'ver' # redrock.__version__
+        header['RRVER'] = redrock.__version__
         header['VERSION'] = ('TBD', 'Template version')
         #header['INSPEC'] = os.environ['DESI_BASIS_TEMPLATES']
         #header['SEED'] = opts.seed
         header['EXTNAME'] = 'BASIS_VECTORS'
         
         hdus = fits.HDUList()
-        hdus.append(fits.PrimaryHDU(nmf_eigenvec, header=header))
-        hdus.append(fits.ImageHDU(nmf_eigencoeff, name='ARCHETYPE_COEFF'))
-        
-        hdus.writeto(nmf_outfile, overwrite=True)
-        print(f'Wrote {nmf_outfile}')
+        hdus.append(fits.PrimaryHDU(empca_eigenvec, header=header))
+        hdus.append(fits.ImageHDU(empca_eigencoeff, name='ARCHETYPE_COEFF'))
+        hdus.writeto(empca_outfile, overwrite=True)
+        log.info(f'Wrote {empca_outfile}')
 
 
     if args.template_qa:
+        # compare the new and old PCA templates
         
-        # NMF templates
-
-        hdr = fitsio.read_header(nmf_outfile, ext='BASIS_VECTORS')
+        hdr = fitsio.read_header(empca_outfile, ext='BASIS_VECTORS')
         ncomp = hdr['NAXIS2']
         wave = np.arange(hdr['NAXIS1']) * hdr['CDELT1'] + hdr['CRVAL1']
 
-        nmf_eigenvec = fitsio.read(nmf_outfile, ext='BASIS_VECTORS')     # H matrix
-        nmf_eigencoeff = fitsio.read(nmf_outfile, ext='ARCHETYPE_COEFF') # W matrix
+        empca_eigenvec = fitsio.read(empca_outfile, ext='BASIS_VECTORS')     # H matrix - [ncomp, npix]
+        empca_eigencoeff = fitsio.read(empca_outfile, ext='ARCHETYPE_COEFF') # W matrix - [ngal, ncomp]
+        empca_model = empca_eigencoeff.dot(empca_eigenvec) # [ngal, npix]
 
-        nmf_model = nmf_eigencoeff.dot(nmf_eigenvec) # [ngal, npix]
+        pngfile = os.path.join(qadir, 'rrtemplate-galaxy.png')
 
-        if False:
-            # read the basis templates
-            templatewave = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'WAVE')
-            templateflux = []
-            templateflux.append(fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'FLUX'))
-            for oneclass in ['BGS', 'ELG', 'LRG']:
-                templateflux.append(fitsio.read(outdir+f'/{specprod}-{version}-{oneclass}.fits', 'FLUX'))
-            templateflux = np.vstack(templateflux) # [ngal, npix]
+        #from speclite import filters
+        #filt = filters.load_filters('decam2014-g', 'decam2014-r')
+        #padflux, padwave = filt.pad_spectrum(nmf_eigenvec, wave, axis=0, method='edge')
+        #mags = filt.get_ab_magnitudes(padflux, padwave) # speclite.filters wants an [nmodel,npix] array
+        #gr = mags['decam2014-g'] - mags['decam2014-r']
+        #srt = np.argsort(gr)
 
-            wmin, wmax = 3500, 5500 # 6500, 6600
-            I = np.where((wave > wmin) * (wave < wmax))[0]
-            J = np.where((templatewave > wmin) * (templatewave < wmax))[0]
-
-            pngfile = outdir+'/rrtemplate-nmf-galaxy-models.png'
-            fig, ax = plt.subplots(10, 1, figsize=(6, 20), sharex=True)
-
-            for ii in range(10):
-                ax[ii].plot(templatewave[J], templateflux[ii, J], label='Data', lw=2)
-                ax[ii].plot(wave[I], nmf_model[ii, I], alpha=0.5, label='NMF')
-                ax[ii].legend()
-                ax[ii].set_ylim(0, np.max((np.max(nmf_model[ii, I]), np.max(templateflux[ii, J]))))
-            fig.tight_layout()
-            fig.savefig(pngfile)
-            print(f'Wrote {pngfile}')
-
-        pngfile = outdir+'/rrtemplate-nmf-galaxy.png'
-
-        from speclite import filters
-        filt = filters.load_filters('decam2014-g', 'decam2014-r')
-        padflux, padwave = filt.pad_spectrum(nmf_eigenvec, wave, axis=0, method='edge')
-        mags = filt.get_ab_magnitudes(padflux, padwave) # speclite.filters wants an [nmodel,npix] array
-        gr = mags['decam2014-g'] - mags['decam2014-r']
-        srt = np.argsort(gr)
+        ylim = np.percentile(empca_eigenvec, [0.1, 99.9])
 
         fig, ax = plt.subplots()#figsize=(8, 5))
-        I = np.where((wave > 0.5) * (wave < 6e4))[0]
-        for ii, ic in enumerate(srt):
-            #I = np.where(nmf_eigenvec[ic, :] > 0)[0]
-            ax.plot(wave[I]/1e4, nmf_eigenvec[ic, I] + ii)
-        ax.set_ylim(-1, 15)
-        ax.set_xlim(0.1, 1)
-        ax.set_yticklabels([])
-        ax.set_xlabel(r'Rest-frame Wavelength ($\mu$m)')
+        #I = np.where((wave > 0.5) * (wave < 6e4))[0]
+        for ic in range(empca_eigenvec.shape[0]):
+            ax.plot(wave, empca_eigenvec[ic, :], alpha=0.5)
+        #for ii, ic in enumerate(srt):
+            #I = np.where(empca_eigenvec[ic, :] > 0)[0]
+            #ax.plot(wave[I]/1e4, empca_eigenvec[ic, I] + ii)
+        ax.set_ylim(ylim) # -0.01, 0.01)
+        #ax.set_xlim(0.1, 1)
+        #ax.set_yticklabels([])
+        ax.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
         ax.set_ylabel(r'Normalized Flux (+offsets)')
         ax.margins(x=0)
         #ax.set_yscale('log')
         fig.tight_layout()
         fig.savefig(pngfile)
-        print(f'Wrote {pngfile}')
+        log.info(f'Wrote {pngfile}')
 
-
-        pdb.set_trace()
-
+        pngfile = os.path.join(qadir, f'ftemplates-{args.specprod}.png')
 
         # 4-panel SED figure
-        templatewave = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'WAVE')
+        #sns.set(context='talk', style='ticks', font_scale=0.6)#, rc=rc)
 
-        sns.set(context='talk', style='ticks', font_scale=0.6)#, rc=rc)
-        fig, ax = plt.subplots(2, 2, sharex=True, sharey=True)
-        for ii, (xx, oneclass) in enumerate(zip(ax.flat, ['BGS', 'LRG', 'ELG', ''])):
+        nplot = 30
+        fig, ax = plt.subplots(2, 2, sharex=True, sharey=False, figsize=(10, 8))
+        for ii, (xx, targtype) in enumerate(zip(ax.flat, ['BGS_ANY', 'LRG', 'ELG', ''])):
             if ii == 3:
                 continue
-            flux = fitsio.read(outdir+f'/{specprod}-{version}-{oneclass}.fits', 'FLUX')
-            meta = fitsio.read(outdir+f'/{specprod}-{version}-{oneclass}.fits', 'METADATA')
-            #print(oneclass, np.median(meta['Z']))
-            for igal in range(flux.shape[0]):
-                xx.plot(templatewave/1e4, templatewave * flux[igal, :], alpha=0.5)
-            xx.text(0.1, 0.85, f'{oneclass}', ha='left', va='center', transform=xx.transAxes)
+            templatefile = os.path.join(datadir, f'ftemplates-{args.specprod}-{targtype}.fits')
+            if ii == 0:
+                templatewave = fitsio.read(templatefile, 'WAVE')
+            flux = fitsio.read(templatefile, 'FLUX')
+            meta = fitsio.read(templatefile, 'METADATA')
+            I = rand.choice(len(meta), size=nplot, replace=False)        
+            for igal in I:
+                xx.plot(templatewave, templatewave * flux[igal, :], alpha=0.5)
+            xx.set_ylim(1, np.max(templatewave*flux[I, :]))
+            xx.text(0.1, 0.85, f'{targtype.replace("_ANY", "")}', ha='left', va='center', transform=xx.transAxes)
             xx.text(0.92, 0.15, r'$\langle z\rangle={:.2f}$'.format(np.median(meta['Z'])), 
                     ha='right', va='center', transform=xx.transAxes)
 
             #inset = fig.add_axes([0.66, 0.6, 0.25, 0.27])
             #inset.hist(meta['Z'], density=True, bins=100)
-                
-        flux = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'FLUX')
-        meta = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'METADATA')
-        #print('LAE', np.median(meta['Z']))
-        for igal in range(flux.shape[0]):
-            ax[1, 1].plot(templatewave/1e4, templatewave * flux[igal, :], alpha=0.5)
-        xx = ax[1, 1]
-        xx.text(0.1, 0.85, 'LAE', ha='left', va='center', transform=xx.transAxes)
-        xx.text(0.92, 0.15, r'$\langle z\rangle={:.2f}$'.format(np.median(meta['Z'])), 
-                ha='right', va='center', transform=xx.transAxes)
-        #inset = fig.add_axes([0.66, 0.6, 0.25, 0.27])
-        #inset.hist(meta['Z'], density=True, bins=100)
+
+        ax[1, 1].axis('off')
+            
+        #flux = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'FLUX')
+        #meta = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'METADATA')
+        ##print('LAE', np.median(meta['Z']))
+        #for igal in range(flux.shape[0]):
+        #    ax[1, 1].plot(templatewave/1e4, templatewave * flux[igal, :], alpha=0.5)
+        #xx = ax[1, 1]
+        #xx.text(0.1, 0.85, 'LAE', ha='left', va='center', transform=xx.transAxes)
+        #xx.text(0.92, 0.15, r'$\langle z\rangle={:.2f}$'.format(np.median(meta['Z'])), 
+        #        ha='right', va='center', transform=xx.transAxes)
+        ##inset = fig.add_axes([0.66, 0.6, 0.25, 0.27])
+        ##inset.hist(meta['Z'], density=True, bins=100)
 
         for xx in (ax[0, 0], ax[1, 0]):
             xx.set_ylabel(r'Normalized $\lambda F_{\lambda}$')
         for xx in (ax[1, 0], ax[1, 1]):
-            xx.set_xlabel(r'Rest-frame Wavelength ($\mu$m)')
+            xx.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
         for xx in ax.flat:
-            xx.set_xscale('log')
+            #xx.set_xscale('log')
             xx.set_yscale('log')
-            xx.set_ylim(1e-8, 1e7)
+            #xx.set_ylim(1e-8, 1e7)
             xx.xaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: '{:g}'.format(y)))
             xx.margins(0)
         fig.tight_layout()
-        pngfile = outdir+f'/nmf-parent-templates.png'
         fig.savefig(pngfile)
         print(f'Wrote {pngfile}')
 
 
+    if args.redrock_vitiles:
+        from redrock.external.desi import rrdesi, write_zbest
+        from desispec.io import read_spectra, write_spectra
+        from desispec.util import runcmd
+        from desitarget import geomask        
+        from desispec.scripts import qsoqn, qsomgii, emlinefit
+
+        os.environ['RR_TEMPLATE_DIR'] = templatedir # note!
+
+        # LAE/LBG VI tiles from Tertiary 26
+        vi26 = read_vi_tertiary26()
+        for healpix in sorted(set(vi26['HEALPIX'])):
+            H = healpix == vi26['HEALPIX']
+            targetids = vi26[H]['TARGETID'].data
+            #targetids = ','.join(vi26[H]['TARGETID'].astype(str))
+
+            # copy the data so we can run the after-burners
+            coaddfile = os.path.join(reduxdir, f'coadd-{healpix}.fits')
+            if not os.path.isfile(coaddfile) or args.overwrite:
+                orig_coaddfile = os.path.join(tertiary26dir, f'coadd-{healpix}.fits')
+                spec = read_spectra(orig_coaddfile, targetids=targetids)
+                assert(np.all(spec.target_ids() == targetids))
+                log.info(f'Writing {len(targetids)} targets to {coaddfile}')
+                write_spectra(coaddfile, spec)
+                del spec
+
+            # copy over the original redrock results
+            orig_redrockfile_out = os.path.join(reduxdir, f'original-redrock-{healpix}.fits')
+            if not os.path.isfile(orig_redrockfile_out) or args.overwrite:
+                orig_redrockfile = os.path.join(tertiary26dir, f'redrock-{healpix}.fits')
+
+                spechdr = fitsio.read_header(coaddfile)                    
+                redhdr = fitsio.read_header(orig_redrockfile)
+                archetype_version = None
+                template_version = {redhdr['TEMNAM{:02d}'.format(nn)]: redhdr['TEMVER{:02d}'.format(nn)] for nn in np.arange(10)}
+                
+                zbest = Table.read(orig_redrockfile, 'REDSHIFTS')
+                fibermap = Table.read(orig_redrockfile, 'FIBERMAP')
+                expfibermap = Table.read(orig_redrockfile, 'EXP_FIBERMAP')
+                tsnr2 = Table.read(orig_redrockfile, 'TSNR2')
+
+                indx = geomask.match_to(targetids, zbest['TARGETID'])
+                zbest = zbest[indx]
+                fibermap = fibermap[indx]
+                expfibermap = expfibermap[np.isin(expfibermap['TARGETID'], targetids)] # note
+                tsnr2 = tsnr2[indx]
+
+                log.info(f'Writing {orig_redrockfile_out}')
+                write_zbest(orig_redrockfile_out, zbest, fibermap, expfibermap, tsnr2,
+                            template_version, archetype_version, spec_header=spechdr)
+
+                pdb.set_trace()
+                
+            redrockfile = os.path.join(reduxdir, f'redrock-{healpix}.fits')
+            rrdetailsfile = os.path.join(reduxdir, f'rrdetails-{healpix}.h5')
+            if not os.path.isfile(redrockfile) or args.overwrite:
+                #rr = Table(fitsio.read(redrockfile))
+                cmd = f'-i {coaddfile} -o {redrockfile} -d {rrdetailsfile} --gpu --max-gpuprocs=4 --mp 1'
+                print(cmd)
+                rrdesi(cmd.split())
+            else:
+                log.info(f'Skipping existing file {redrockfile}')
+
+            for prefix, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'], [qsoqn.main, qsomgii.main, emlinefit.main]):
+                outfile = os.path.join(reduxdir, f'{prefix}-{healpix}.fits')
+                if not os.path.isfile(outfile) or args.overwrite:
+                    cmd = f'desi_{prefix}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
+                    if 'qso_' in prefix:
+                        cmd += ' --target_selection all --save_target all'
+                    print(cmd)
+                    runcmd(maincmd, args=cmd.split()[1:], inputs=[coaddfile, redrockfile], outputs=[outfile])
+                else:
+                    log.info(f'Skipping existing file {outfile}')
+
+        # EDR / VI tiles
+        vi = read_vi()
+        for tileid in sorted(set(vi['TILEID'])):
+            T = tileid == vi['TILEID']
+            petals = vi['FIBER'][T] // 500
+            for petal in sorted(set(petals)):
+                P = petal == petals
+                targetids = vi[T][P]['TARGETID'].data
+                #targetids = ','.join(vi[T][P]['TARGETID'].astype(str))
+
+                # copy the data so we can run the after-burners
+                coaddfile = os.path.join(reduxdir, f'coadd-{petal}-{tileid}.fits')
+                if not os.path.isfile(coaddfile) or args.overwrite:                
+                    orig_coaddfile = glob(os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'redux', args.specprod, 'tiles',
+                                                       'cumulative', str(tileid), '*', f'coadd-{petal}-{tileid}-thru*.fits'))[0]
+                    spec = read_spectra(orig_coaddfile, targetids=targetids)
+                    assert(np.all(spec.target_ids() == targetids))
+                    log.info(f'Writing {len(targetids)} targets to {coaddfile}')
+                    write_spectra(coaddfile, spec)
+                    del spec
+                    
+                # copy over the original redrock results
+                orig_redrockfile_out = os.path.join(reduxdir, f'original-redrock-{petal}-{tileid}.fits')
+                if not os.path.isfile(orig_redrockfile_out) or args.overwrite:
+                    orig_redrockfile = glob(os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'redux', args.specprod, 'tiles',
+                                                         'cumulative', str(tileid), '*', f'redrock-{petal}-{tileid}-thru*.fits'))[0]
+
+                    spechdr = fitsio.read_header(coaddfile)                    
+                    redhdr = fitsio.read_header(orig_redrockfile)
+                    archetype_version = None
+                    template_version = {redhdr['TEMNAM{:02d}'.format(nn)]: redhdr['TEMVER{:02d}'.format(nn)] for nn in np.arange(10)}
+                    
+                    zbest = Table.read(orig_redrockfile, 'REDSHIFTS')
+                    fibermap = Table.read(orig_redrockfile, 'FIBERMAP')
+                    expfibermap = Table.read(orig_redrockfile, 'EXP_FIBERMAP')
+                    tsnr2 = Table.read(orig_redrockfile, 'TSNR2')
+
+                    indx = geomask.match_to(targetids, zbest['TARGETID'])
+                    zbest = zbest[indx]
+                    fibermap = fibermap[indx]
+                    expfibermap = expfibermap[np.isin(expfibermap['TARGETID'], targetids)] # note
+                    tsnr2 = tsnr2[indx]
+
+                    log.info(f'Writing {orig_redrockfile_out}')
+                    write_zbest(orig_redrockfile_out, zbest, fibermap, expfibermap, tsnr2,
+                                template_version, archetype_version, spec_header=spechdr)
+
+                redrockfile = os.path.join(reduxdir, f'redrock-{petal}-{tileid}.fits')
+                rrdetailsfile = os.path.join(reduxdir, f'rrdetails-{petal}-{tileid}.h5')
+                if not os.path.isfile(redrockfile) or args.overwrite:
+                    #rr = Table(fitsio.read(redrockfile))
+                    cmd = f'-i {coaddfile} -o {redrockfile} -d {rrdetailsfile} --gpu --max-gpuprocs=4 --mp 1'
+                    print(cmd)
+                    rrdesi(cmd.split())
+                else:
+                    log.info(f'Skipping existing file {redrockfile}')
+
+                for prefix, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'], [qsoqn.main, qsomgii.main, emlinefit.main]):
+                    outfile = os.path.join(reduxdir, f'{prefix}-{petal}-{tileid}.fits')
+                    if not os.path.isfile(outfile) or args.overwrite:
+                        cmd = f'desi_{prefix}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
+                        if 'qso_' in prefix:
+                            cmd += ' --target_selection all --save_target all'
+                        print(cmd)
+                        runcmd(maincmd, args=cmd.split()[1:], inputs=[coaddfile, redrockfile], outputs=[outfile])
+                    else:
+                        log.info(f'Skipping existing file {outfile}')
+
+                    
+    if args.redshift_qa:
+        # merge the redshift-fitting results with the VI
+        mergefile = os.path.join(templatedir, 'redrock-vi.fits')
+        if not os.path.isfile(mergefile) or args.overwrite:
+            rrfiles = glob(os.path.join(reduxdir, 'redrock-*.fits'))
+            rr = []
+            for rrfile in rrfiles:
+                pdb.set_trace()
+                rr1 = Table(fitsio.read(rrfile))
+                fm = Table(fitsio.read(rrfile))
+                rr.append(rr1)
+            rr = vstack(rr)
+            vi = read_vi()
+            merge = join(rr, vi, keys='TARGETID')
+            merge.write(mergefile, overwrite=True)
+            log.info(f'Wrote {len(merge)} objects to {mergefile}')
+        else:
+            merge = Table(fitsio.read(mergefile))
+            log.info(f'Read {len(merge)} objects from {mergefile}')
+
+        for targtype in ['BGS', 'LRG', 'ELG', 'QSO']:
+            I = merge['SUFFIX'] == targtype
+            res = merge[I]
+            pngfile = os.path.join(qadir, f'vi-redrock-{targtype}.png')
+            fig, ax = plt.subplots()#figsize=(8, 5))
+            ax.scatter(res['VI_Z'], res['Z'], s=15, alpha=0.5, edgecolor='k')
+            fig.tight_layout()
+            fig.savefig(pngfile)
+            log.info(f'Wrote {pngfile}')
+        pdb.set_trace()
 
 if __name__ == '__main__':
     main()
