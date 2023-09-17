@@ -10,17 +10,22 @@ Dependencies:
 --setcoverpy
 
 1. Build the parent sample:
-
-time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --match-lss
-  /global/cfs/cdirs/desi/spectro/fastspecfit/iron/v2.0/catalogs/fastspec-iron-sv3-{bright,dark}.fits
-  /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/clustering/{BGS_ANY,LRG,ELG}_{N,S}_clustering.dat.fits
+  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --match-lss
+    /global/cfs/cdirs/desi/spectro/fastspecfit/iron/v2.0/catalogs/fastspec-iron-sv3-{bright,dark}.fits
+    /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/clustering/{BGS_ANY,LRG,ELG}_{N,S}_clustering.dat.fits
 
 2. Make some parent QA:
+  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --parent-qa
 
-time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --parent-qa
+3. Build the parent (FastSpecFit, rest-frame) templates:
+  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --parent-templates
 
+4. Build the empca eigentemplates:
+  salloc -N 1 -C cpu -A desi -t 00:20:00 --qos interactive
+  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --empca-templates
 
-
+5. Generate QA of the parent templates and the resulting empca eigentemplates:
+  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --template-qa
 
 To run redrock, request the following resources:
   salloc -N 4 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
@@ -70,6 +75,8 @@ def get_vacdir(specprod='fuji', version=None):
     log.info(f'VAC dir {vacdir}')
 
     return vacdir
+
+
 
 def read_vi_tertiary26():
     """Read the tertiary26 LAE/LBG VI results.
@@ -235,6 +242,7 @@ def read_clustering(targetclass=['BGS_ANY', 'LRG', 'ELG'], specprod='iron',
     return data     
 
 def parent_qa(specprod='iron'):
+    """Build some QA of the parent sample."""
 
     import corner as cn
     from matplotlib import colors
@@ -404,7 +412,8 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4, dwave=
     ngal = len(meta)
 
     templatecache = read_ftemplates()
-    nsed = len(templatecache['templateinfo'])
+    info = templatecache['templateinfo']
+    nsed = len(info)
 
     # note the 5-Angstrom pad
     I = np.where((templatecache['templatewave'] > (minwave-5)) * (templatecache['templatewave'] < (maxwave+5)))[0]
@@ -463,13 +472,14 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4, dwave=
 
     # build emission-line spectra on a grid of line-width; then, below, choose
     # the closest one to the measured line-width
-    nominal_sigma = 90. # [km/s]
     nline = len(linewaves)
 
+    #linesigma_delta = 15. # 5.
+    #nlinesigma = int(np.ceil((linesigma_max - linesigma_min) / linesigma_delta)) + 1
+    nominal_sigma = 75. # [km/s]
     linesigma_min = 5.
-    linesigma_max = 275.
-    linesigma_delta = 50. # 5.
-    nlinesigma = int(np.ceil((linesigma_max - linesigma_min) / linesigma_delta)) + 1
+    linesigma_max = 115.
+    nlinesigma = 9
     linesigma_grid = np.linspace(linesigma_min, linesigma_max, nlinesigma)
     if not nominal_sigma in linesigma_grid:
         linesigma_grid = np.hstack((nominal_sigma, linesigma_grid))
@@ -480,6 +490,12 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4, dwave=
     linezwaves = linewaves * (1. + linevshifts / C_LIGHT)
     
     linemodels = np.zeros((nlinesigma, nsed, npix)) # [nsigma, nsed, npix]
+
+    current_palette = sns.color_palette()
+    sns.set_palette('rainbow', nlinesigma)#'Spectral')#'coolwarm')
+    #linecolors = iter(sns.husl_palette(nlinesigma, l=0.3))
+    linecolors = iter(sns.color_palette())
+    fig, ax = plt.subplots()
     for isigma in range(nlinesigma):
         print(linesigma_grid[isigma])
         linesigmas = np.zeros(nline) + linesigma_grid[isigma]
@@ -489,7 +505,20 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4, dwave=
             emlinemodel = build_emline_model(lineamps, linevshifts, linesigmas,
                                              linewaves, emlinewave=templatewave)
             linemodels[isigma, imodel, :] = emlinemodel
-
+            if info['av'][imodel] == 0. and info['zzsun'][imodel] == 0. and info['sfr'][imodel] > 0.:
+                W = np.where((templatewave > (3728.483-12.)) * (templatewave < (3728.483+12)))[0]
+                ax.plot(templatewave[W], emlinemodel[W]/np.max(emlinemodel[W]), lw=1,
+                        color=next(linecolors),
+                        label='{:.2f} km/s'.format(linesigma_grid[isigma]))
+    ax.legend(fontsize=10, loc='upper left')
+    ax.set_yticklabels([])
+    ax.set_xlabel(r'Wavelength ($\AA$)')
+    fig.tight_layout()    
+    pngfile = os.path.join(qadir, 'qa-linewidth-grid.png')    
+    fig.savefig(pngfile)
+    print(f'Wrote {pngfile}')
+    sns.set_palette(current_palette)
+        
     # now build the emission-line spectra, choosing the linemodels model closest
     # to the measured line-width
     linespectra = np.zeros_like(continuum)
@@ -513,11 +542,12 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4, dwave=
 
             linespectra[igal, :] = fast['COEFF'][igal].dot(emlinemodels.T)
 
-            #W = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]                
-            #plt.plot(templatewave[W], continuum[igal, W] + linespectra[igal, W])
-            #plt.plot(templatewave[W], templates_lowres[igal, W])
-            #plt.plot(templatewave[W], linespectra[igal, W])
-            #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp2/junk.png')
+            #if linesigma_grid[jsigma] > 150.:
+            #    W = np.where((templatewave > 4800.) * (templatewave < 5100.))[0]                
+            #    plt.plot(templatewave[W], continuum[igal, W] + linespectra[igal, W])
+            #    plt.plot(templatewave[W], templates_lowres[igal, W])
+            #    plt.plot(templatewave[W], linespectra[igal, W])
+            #    plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp2/junk.png')
     
     ## now generate the individual emission-line spectra but using the measured
     ## line-width (if any)
@@ -571,8 +601,8 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4, dwave=
 
     # normalize at 5500 A
     for igal in range(ngal):
-        norm = np.median(templates[igal, :])
-        #norm = np.interp(5500., templatewave, templates[igal, :])
+        #norm = np.median(templates[igal, :])
+        norm = np.interp(5500., templatewave, templates[igal, :])
         outmeta['TEMPLATENORM'][igal] = norm
         templates[igal, :] /= norm
         templates_lowres[igal, :] /= norm
@@ -608,6 +638,187 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4, dwave=
     fig.savefig(pngfile)
     print(f'Wrote {pngfile}')
 
+def _run_redrock(vi, run_tiles=False):
+    from redrock.external.desi import rrdesi, write_zbest
+    from desispec.io import read_spectra, write_spectra
+    from desispec.util import runcmd
+    from desispec.validredshifts import validate
+    from desispec.scripts import qsoqn, qsomgii, emlinefit
+
+    if run_tiles:
+
+
+    else:
+    
+
+
+def run_redrock():
+    """Wrapper to run Redrock on tiles / healpixels."""
+    
+    # LAE/LBG VI tiles from Tertiary 26
+    vi26 = read_vi_tertiary26()
+    _run_redrock(vi26, run_tiles=False)
+    
+    for healpix in sorted(set(vi26['HEALPIX'])):
+        H = healpix == vi26['HEALPIX']
+        targetids = vi26[H]['TARGETID'].data
+        #targetids = ','.join(vi26[H]['TARGETID'].astype(str))
+
+        # copy the data so we can run the after-burners
+        coaddfile = os.path.join(reduxdir, f'coadd-{healpix}.fits')
+        if not os.path.isfile(coaddfile) or args.overwrite:
+            orig_coaddfile = os.path.join(tertiary26dir, f'coadd-{healpix}.fits')
+            spec = read_spectra(orig_coaddfile, targetids=targetids)
+            assert(np.all(spec.target_ids() == targetids))
+            log.info(f'Writing {len(targetids)} targets to {coaddfile}')
+            write_spectra(coaddfile, spec)
+            del spec
+
+        # validate the original redrock redshifts
+        zcatfile = os.path.join(reduxdir, f'zcat-tertiary26-{healpix}.fits')
+        if not os.path.isfile(zcatfile) or args.overwrite:
+            orig_redrockfile = os.path.join(tertiary26dir, f'redrock-{healpix}.fits')
+
+            #orig_qso_qnfile = os.path.join(tertiary26dir, f'qso_qn-{healpix}.fits')
+            #orig_qso_mgiifile = os.path.join(tertiary26dir, f'qso_mgii-{healpix}.fits')
+            #orig_emlinefile = os.path.join(tertiary26dir, f'emline-{healpix}.fits')
+            #
+            #zbest = Table(fitsio.read(orig_redrockfile, 'REDSHIFTS'))
+            #qn = Table(fitsio.read(orig_qso_qnfile, 'QN_RR'))
+            #mgii = Table(fitsio.read(orig_qso_mgiifile, 'MGII'))
+            #emline = Table(fitsio.read(orig_emlinefile, 'EMLINEFIT'))
+            #
+            #zbest = zbest[geomask.match_to(targetids, zbest['TARGETID'])]
+            #qn = qn[geomask.match_to(targetids, qn['TARGETID'])]
+            #mgii = mgii[geomask.match_to(targetids, mgii['TARGETID'])]
+            #emline = emline[geomask.match_to(targetids, emline['TARGETID'])]
+
+            zcat = validate(orig_redrockfile, return_target_columns=True,
+                            extra_columns=['TARGETID', 'Z', 'ZWARN', 'COADD_FIBERSTATUS', 'SPECTYPE', 'DELTACHI2'])
+            zcat = zcat[geomask.match_to(zcat['TARGETID'], targetids)]
+            assert(np.all(zcat['TARGETID'] == targetids))
+            zcat.write(zcatfile, overwrite=True)
+            log.info(f'Wrote {len(zcat)} objects to {zcatfile}')
+
+            #spechdr = fitsio.read_header(coaddfile)                    
+            #redhdr = fitsio.read_header(orig_redrockfile)
+            #archetype_version = None
+            #template_version = {redhdr['TEMNAM{:02d}'.format(nn)]: redhdr['TEMVER{:02d}'.format(nn)] for nn in np.arange(10)}
+            #
+            #zbest = Table.read(orig_redrockfile, 'REDSHIFTS')
+            #fibermap = Table.read(orig_redrockfile, 'FIBERMAP')
+            #expfibermap = Table.read(orig_redrockfile, 'EXP_FIBERMAP')
+            #tsnr2 = Table.read(orig_redrockfile, 'TSNR2')
+            #
+            #indx = geomask.match_to(targetids, zbest['TARGETID'])
+            #zbest = zbest[indx]
+            #fibermap = fibermap[indx]
+            #expfibermap = expfibermap[np.isin(expfibermap['TARGETID'], targetids)] # note
+            #tsnr2 = tsnr2[indx]
+            #
+            #log.info(f'Writing {orig_redrockfile_out}')
+            #write_zbest(orig_redrockfile_out, zbest, fibermap, expfibermap, tsnr2,
+            #            template_version, archetype_version, spec_header=spechdr)
+
+
+        redrockfile = os.path.join(reduxdir, f'redrock-{healpix}.fits')
+        rrdetailsfile = os.path.join(reduxdir, f'rrdetails-{healpix}.h5')
+        if not os.path.isfile(redrockfile) or args.overwrite:
+            #rr = Table(fitsio.read(redrockfile))
+            cmd = f'-i {coaddfile} -o {redrockfile} -d {rrdetailsfile} --gpu --max-gpuprocs=4 --mp 1'
+            print(cmd)
+            rrdesi(cmd.split())
+        else:
+            log.info(f'Skipping existing file {redrockfile}')
+
+        for prefix, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'], [qsoqn.main, qsomgii.main, emlinefit.main]):
+            outfile = os.path.join(reduxdir, f'{prefix}-{healpix}.fits')
+            if not os.path.isfile(outfile) or args.overwrite:
+                cmd = f'desi_{prefix}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
+                if 'qso_' in prefix:
+                    cmd += ' --target_selection all --save_target all'
+                print(cmd)
+                runcmd(maincmd, args=cmd.split()[1:], inputs=[coaddfile, redrockfile], outputs=[outfile])
+            else:
+                log.info(f'Skipping existing file {outfile}')
+
+    # EDR / VI tiles
+    vi = read_vi()
+    for tileid in sorted(set(vi['TILEID'])):
+        T = tileid == vi['TILEID']
+        petals = vi['FIBER'][T] // 500
+        for petal in sorted(set(petals)):
+            P = petal == petals
+            targetids = vi[T][P]['TARGETID'].data
+            #targetids = ','.join(vi[T][P]['TARGETID'].astype(str))
+
+            # copy the data so we can run the after-burners
+            coaddfile = os.path.join(reduxdir, f'coadd-{petal}-{tileid}.fits')
+            if not os.path.isfile(coaddfile) or args.overwrite:                
+                orig_coaddfile = glob(os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'redux', args.specprod, 'tiles',
+                                                   'cumulative', str(tileid), '*', f'coadd-{petal}-{tileid}-thru*.fits'))[0]
+                spec = read_spectra(orig_coaddfile, targetids=targetids)
+                assert(np.all(spec.target_ids() == targetids))
+                log.info(f'Writing {len(targetids)} targets to {coaddfile}')
+                write_spectra(coaddfile, spec)
+                del spec
+                
+            # copy over the original redrock results
+            zcatfile = os.path.join(reduxdir, f'zcat-{args.specprod}-{petal}-{tileid}.fits')
+            if not os.path.isfile(zcatfile) or args.overwrite:
+                orig_redrockfile = glob(os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'redux', args.specprod, 'tiles',
+                                                     'cumulative', str(tileid), '*', f'redrock-{petal}-{tileid}-thru*.fits'))[0]
+
+                zcat = validate(orig_redrockfile, return_target_columns=True,
+                                extra_columns=['TARGETID', 'Z', 'ZWARN', 'COADD_FIBERSTATUS', 'SPECTYPE', 'DELTACHI2'])
+                zcat = zcat[geomask.match_to(zcat['TARGETID'], targetids)]
+                assert(np.all(zcat['TARGETID'] == targetids))
+                zcat.write(zcatfile, overwrite=True)
+                log.info(f'Wrote {len(zcat)} objects to {zcatfile}')
+
+                #spechdr = fitsio.read_header(coaddfile)                    
+                #redhdr = fitsio.read_header(orig_redrockfile)
+                #archetype_version = None
+                #template_version = {redhdr['TEMNAM{:02d}'.format(nn)]: redhdr['TEMVER{:02d}'.format(nn)] for nn in np.arange(10)}
+                #
+                #zbest = Table.read(orig_redrockfile, 'REDSHIFTS')
+                #fibermap = Table.read(orig_redrockfile, 'FIBERMAP')
+                #expfibermap = Table.read(orig_redrockfile, 'EXP_FIBERMAP')
+                #tsnr2 = Table.read(orig_redrockfile, 'TSNR2')
+                #
+                #indx = geomask.match_to(targetids, zbest['TARGETID'])
+                #zbest = zbest[indx]
+                #fibermap = fibermap[indx]
+                #expfibermap = expfibermap[np.isin(expfibermap['TARGETID'], targetids)] # note
+                #tsnr2 = tsnr2[indx]
+                #
+                #log.info(f'Writing {orig_redrockfile_out}')
+                #write_zbest(orig_redrockfile_out, zbest, fibermap, expfibermap, tsnr2,
+                #            template_version, archetype_version, spec_header=spechdr)
+
+            redrockfile = os.path.join(reduxdir, f'redrock-{petal}-{tileid}.fits')
+            rrdetailsfile = os.path.join(reduxdir, f'rrdetails-{petal}-{tileid}.h5')
+            if not os.path.isfile(redrockfile) or args.overwrite:
+                #rr = Table(fitsio.read(redrockfile))
+                cmd = f'-i {coaddfile} -o {redrockfile} -d {rrdetailsfile} --gpu --max-gpuprocs=4 --mp 1'
+                print(cmd)
+                rrdesi(cmd.split())
+            else:
+                log.info(f'Skipping existing file {redrockfile}')
+
+            for prefix, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'], [qsoqn.main, qsomgii.main, emlinefit.main]):
+                outfile = os.path.join(reduxdir, f'{prefix}-{petal}-{tileid}.fits')
+                if not os.path.isfile(outfile) or args.overwrite:
+                    cmd = f'desi_{prefix}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
+                    if 'qso_' in prefix:
+                        cmd += ' --target_selection all --save_target all'
+                    print(cmd)
+                    runcmd(maincmd, args=cmd.split()[1:], inputs=[coaddfile, redrockfile], outputs=[outfile])
+                else:
+                    log.info(f'Skipping existing file {outfile}')
+    
+
+
 def main():
     """Main wrapper."""
 
@@ -615,11 +826,11 @@ def main():
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--match-lss', action='store_true', help='Match to the LSS catalogs (no figures, just catalogs).')
-    parser.add_argument('--parent-templates', action='store_true', help='Build the parent rest-frame templates.')
     parser.add_argument('--parent-qa', action='store_true', help='QA of the parent sample.')
+    parser.add_argument('--parent-templates', action='store_true', help='Build the parent rest-frame templates.')
     parser.add_argument('--empca-templates', action='store_true', help='Run empca on the output of --parent-templates.')
-    parser.add_argument('--redrock-vitiles', action='store_true', help='Run Redrock on the VI tiles.')
     parser.add_argument('--template-qa', action='store_true', help='Template QA.')
+    parser.add_argument('--redrock-vitiles', action='store_true', help='Run Redrock on the VI tiles.')
     parser.add_argument('--redshift-qa', action='store_true', help='Redshift QA.')
 
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
@@ -644,15 +855,14 @@ def main():
     if args.parent_qa:
         parent_qa(specprod=args.specprod)
 
-
     # build the rest-frame templates
     if args.parent_templates:
         for targtype, nrows in zip(['BGS_ANY', 'LRG', 'ELG'], [10000, 5000, 5000]):
-            data = read_clustering(targetclass=targtype)#, rows=np.arange(10))
-            fast, meta = data[targtype]['fast'], data[targtype]['meta']
+            data = read_clustering(targetclass=targtype, read_lss=True, trim_broad=True)#, rows=np.arange(10))
+            fast, meta, lss = data[targtype]['fast'], data[targtype]['meta'], data[targtype]['lss']
             del data
-
-            I = rand.choice(len(meta), size=nrows, replace=False)
+            weight = lss['WEIGHT'] / np.sum(lss['WEIGHT'])
+            I = rand.choice(len(meta), size=nrows, p=weight, replace=False)
 
             outfile = os.path.join(datadir, f'ftemplates-{args.specprod}-{targtype}.fits')            
             restframe_templates(fast[I], meta[I], outfile, minwave=args.minwave,
@@ -699,8 +909,88 @@ def main():
 
 
     if args.template_qa:
-        # compare the new and old PCA templates
+
+        # 4-panel SED figure
+        pngfile = os.path.join(qadir, f'ftemplates-{args.specprod}.png')
+
+        current_palette = sns.color_palette()
+        sns.set_palette('rainbow')#'Spectral')#'coolwarm')
+        #sns.set(context='talk', style='ticks', font_scale=0.6)#, rc=rc)
+        nplot = 30
+
+        fig = plt.figure(figsize=(10, 8))
+        gs = fig.add_gridspec(nrows=4, ncols=4)#, height_ratios=[1, 0.5])
+
+        def _makeplot(xx, targtype, wavelims=None, xlabel=False, ylabel=False, zoom=False, zoomlabel=None):
+            templatefile = os.path.join(datadir, f'ftemplates-{args.specprod}-{targtype}.fits')
+            templatewave = fitsio.read(templatefile, 'WAVE')
+            if wavelims is not None:
+                W = np.where((templatewave > wavelims[0]) * (templatewave < wavelims[1]))[0]
+            else:
+                W = np.arange(len(templatewave))
+            flux = fitsio.read(templatefile, 'FLUX')
+            meta = fitsio.read(templatefile, 'METADATA')
+            I = rand.choice(len(meta), size=nplot, replace=False)
+            ylim = [np.min(templatewave[np.newaxis, :][:, W] * flux[I, :][:, W]),
+                    np.max(templatewave[np.newaxis, :][:, W] * flux[I, :][:, W])]
+            for igal in I:
+                if zoom:
+                    xx.plot(templatewave[W], templatewave[W] * flux[igal, W], alpha=0.5, lw=1, color='gray')
+                else:
+                    xx.plot(templatewave[W], templatewave[W] * flux[igal, W], alpha=0.5, lw=1, color='gray')
+            if zoom:
+                xx.set_ylim(ylim[0], ylim[1]*1.5)
+            else:
+                xx.set_ylim(ylim)
+            #xx.set_ylim(1, np.max(templatewave[W] * flux[I, :][:, W]))
+            xx.set_yscale('log')
+            xx.set_yticklabels([])
+            xx.margins(x=0)
+            if zoom:
+                xx.set_xticklabels([])
+                if zoomlabel:
+                    xx.text(0.05, 0.92, zoomlabel, ha='left', va='top', transform=xx.transAxes, fontsize=10)
+            else:
+                xx.set_xscale('log')
+                if ylabel:
+                    xx.set_ylabel(r'Normalized $\lambda F_{\lambda}$')
+                if xlabel:
+                    xx.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
+                    xx.xaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: '{:g}'.format(y)))
+                else:
+                    xx.set_xticklabels([])
+                xx.text(0.05, 0.95, f'{targtype.replace("_ANY", "")}', ha='left', va='top', transform=xx.transAxes)
+                xx.text(0.94, 0.11, r'$\langle z\rangle={:.2f}$'.format(np.median(meta['Z'])), 
+                        ha='right', va='center', transform=xx.transAxes)
+
+        xx = fig.add_subplot(gs[:2, :2]) # rows x cols
+        _makeplot(xx, 'BGS_ANY', wavelims=None, ylabel=True)
         
+        xx = fig.add_subplot(gs[:2, 2:]) # rows x cols
+        _makeplot(xx, 'LRG', wavelims=None)
+        
+        xx = fig.add_subplot(gs[2:, :2]) # rows x cols
+        _makeplot(xx, 'ELG', wavelims=None, ylabel=True, xlabel=True)
+
+        xx = fig.add_subplot(gs[2, 2]) # rows x cols
+        _makeplot(xx, 'ELG', wavelims=[1215.67-12, 1215.67+12], zoom=True, zoomlabel=r'Ly$\alpha$')
+
+        xx = fig.add_subplot(gs[2, 3]) # rows x cols
+        _makeplot(xx, 'ELG', wavelims=[3728.483-12, 3728.483+12], zoom=True, zoomlabel=r'[OII] $\lambda\lambda3726,29$')
+
+        xx = fig.add_subplot(gs[3, 2]) # rows x cols
+        _makeplot(xx, 'ELG', wavelims=[5008.238-12, 5008.238+12], zoom=True, zoomlabel=r'[O III] $\lambda5007$')
+        
+        xx = fig.add_subplot(gs[3, 3]) # rows x cols
+        _makeplot(xx, 'ELG', wavelims=[6564.613-12, 6564.613+12], zoom=True, zoomlabel=r'H$\alpha$')
+        
+        fig.tight_layout()
+        fig.savefig(pngfile)
+        log.info(f'Wrote {pngfile}')
+
+        sns.set_palette(current_palette)
+
+        # compare the new and old PCA templates        
         hdr = fitsio.read_header(empca_outfile, ext='BASIS_VECTORS')
         ncomp = hdr['NAXIS2']
         wave = np.arange(hdr['NAXIS1']) * hdr['CDELT1'] + hdr['CRVAL1']
@@ -744,231 +1034,9 @@ def main():
         fig.savefig(pngfile)
         log.info(f'Wrote {pngfile}')
 
-        pngfile = os.path.join(qadir, f'ftemplates-{args.specprod}.png')
-
-        # 4-panel SED figure
-        #sns.set(context='talk', style='ticks', font_scale=0.6)#, rc=rc)
-
-        nplot = 30
-        fig, ax = plt.subplots(2, 2, sharex=True, sharey=False, figsize=(10, 8))
-        for ii, (xx, targtype) in enumerate(zip(ax.flat, ['BGS_ANY', 'LRG', 'ELG', ''])):
-            if ii == 3:
-                continue
-            templatefile = os.path.join(datadir, f'ftemplates-{args.specprod}-{targtype}.fits')
-            if ii == 0:
-                templatewave = fitsio.read(templatefile, 'WAVE')
-                W = np.arange(len(templatewave))
-                W = np.where((templatewave > 3727-20.) * (templatewave < 3727+20.))[0]
-            flux = fitsio.read(templatefile, 'FLUX')
-            meta = fitsio.read(templatefile, 'METADATA')
-            I = rand.choice(len(meta), size=nplot, replace=False)
-            for igal in I:
-                xx.plot(templatewave[W], templatewave[W] * flux[igal, W], alpha=0.5)
-            xx.set_ylim(1, np.max(templatewave[W] * flux[I, :][:, W]))
-            xx.text(0.1, 0.85, f'{targtype.replace("_ANY", "")}', ha='left', va='center', transform=xx.transAxes)
-            xx.text(0.92, 0.15, r'$\langle z\rangle={:.2f}$'.format(np.median(meta['Z'])), 
-                    ha='right', va='center', transform=xx.transAxes)
-
-            #inset = fig.add_axes([0.66, 0.6, 0.25, 0.27])
-            #inset.hist(meta['Z'], density=True, bins=100)
-
-        ax[1, 1].axis('off')
-            
-        #flux = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'FLUX')
-        #meta = fitsio.read(outdir+'/fastspec-vi-tertiary26-templates.fits', 'METADATA')
-        ##print('LAE', np.median(meta['Z']))
-        #for igal in range(flux.shape[0]):
-        #    ax[1, 1].plot(templatewave/1e4, templatewave * flux[igal, :], alpha=0.5)
-        #xx = ax[1, 1]
-        #xx.text(0.1, 0.85, 'LAE', ha='left', va='center', transform=xx.transAxes)
-        #xx.text(0.92, 0.15, r'$\langle z\rangle={:.2f}$'.format(np.median(meta['Z'])), 
-        #        ha='right', va='center', transform=xx.transAxes)
-        ##inset = fig.add_axes([0.66, 0.6, 0.25, 0.27])
-        ##inset.hist(meta['Z'], density=True, bins=100)
-
-        for xx in (ax[0, 0], ax[1, 0]):
-            xx.set_ylabel(r'Normalized $\lambda F_{\lambda}$')
-        for xx in (ax[1, 0], ax[1, 1]):
-            xx.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
-        for xx in ax.flat:
-            #xx.set_xscale('log')
-            xx.set_yscale('log')
-            #xx.set_ylim(1e-8, 1e7)
-            xx.xaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: '{:g}'.format(y)))
-            xx.margins(0)
-        fig.tight_layout()
-        fig.savefig(pngfile)
-        print(f'Wrote {pngfile}')
-
-
     if args.redrock_vitiles:
-        from redrock.external.desi import rrdesi, write_zbest
-        from desispec.io import read_spectra, write_spectra
-        from desispec.util import runcmd
-        from desispec.validredshifts import validate
-        from desispec.scripts import qsoqn, qsomgii, emlinefit
-
         os.environ['RR_TEMPLATE_DIR'] = templatedir # note!
-
-        # LAE/LBG VI tiles from Tertiary 26
-        vi26 = read_vi_tertiary26()
-        for healpix in sorted(set(vi26['HEALPIX'])):
-            H = healpix == vi26['HEALPIX']
-            targetids = vi26[H]['TARGETID'].data
-            #targetids = ','.join(vi26[H]['TARGETID'].astype(str))
-
-            # copy the data so we can run the after-burners
-            coaddfile = os.path.join(reduxdir, f'coadd-{healpix}.fits')
-            if not os.path.isfile(coaddfile) or args.overwrite:
-                orig_coaddfile = os.path.join(tertiary26dir, f'coadd-{healpix}.fits')
-                spec = read_spectra(orig_coaddfile, targetids=targetids)
-                assert(np.all(spec.target_ids() == targetids))
-                log.info(f'Writing {len(targetids)} targets to {coaddfile}')
-                write_spectra(coaddfile, spec)
-                del spec
-
-            # validate the original redrock redshifts
-            zcatfile = os.path.join(reduxdir, f'zcat-tertiary26-{healpix}.fits')
-            if not os.path.isfile(zcatfile) or args.overwrite:
-                orig_redrockfile = os.path.join(tertiary26dir, f'redrock-{healpix}.fits')
-
-                #orig_qso_qnfile = os.path.join(tertiary26dir, f'qso_qn-{healpix}.fits')
-                #orig_qso_mgiifile = os.path.join(tertiary26dir, f'qso_mgii-{healpix}.fits')
-                #orig_emlinefile = os.path.join(tertiary26dir, f'emline-{healpix}.fits')
-                #
-                #zbest = Table(fitsio.read(orig_redrockfile, 'REDSHIFTS'))
-                #qn = Table(fitsio.read(orig_qso_qnfile, 'QN_RR'))
-                #mgii = Table(fitsio.read(orig_qso_mgiifile, 'MGII'))
-                #emline = Table(fitsio.read(orig_emlinefile, 'EMLINEFIT'))
-                #
-                #zbest = zbest[geomask.match_to(targetids, zbest['TARGETID'])]
-                #qn = qn[geomask.match_to(targetids, qn['TARGETID'])]
-                #mgii = mgii[geomask.match_to(targetids, mgii['TARGETID'])]
-                #emline = emline[geomask.match_to(targetids, emline['TARGETID'])]
-
-                zcat = validate(orig_redrockfile, return_target_columns=True,
-                                extra_columns=['TARGETID', 'Z', 'ZWARN', 'COADD_FIBERSTATUS', 'SPECTYPE', 'DELTACHI2'])
-                zcat = zcat[geomask.match_to(zcat['TARGETID'], targetids)]
-                assert(np.all(zcat['TARGETID'] == targetids))
-                zcat.write(zcatfile, overwrite=True)
-                log.info(f'Wrote {len(zcat)} objects to {zcatfile}')
-
-                #spechdr = fitsio.read_header(coaddfile)                    
-                #redhdr = fitsio.read_header(orig_redrockfile)
-                #archetype_version = None
-                #template_version = {redhdr['TEMNAM{:02d}'.format(nn)]: redhdr['TEMVER{:02d}'.format(nn)] for nn in np.arange(10)}
-                #
-                #zbest = Table.read(orig_redrockfile, 'REDSHIFTS')
-                #fibermap = Table.read(orig_redrockfile, 'FIBERMAP')
-                #expfibermap = Table.read(orig_redrockfile, 'EXP_FIBERMAP')
-                #tsnr2 = Table.read(orig_redrockfile, 'TSNR2')
-                #
-                #indx = geomask.match_to(targetids, zbest['TARGETID'])
-                #zbest = zbest[indx]
-                #fibermap = fibermap[indx]
-                #expfibermap = expfibermap[np.isin(expfibermap['TARGETID'], targetids)] # note
-                #tsnr2 = tsnr2[indx]
-                #
-                #log.info(f'Writing {orig_redrockfile_out}')
-                #write_zbest(orig_redrockfile_out, zbest, fibermap, expfibermap, tsnr2,
-                #            template_version, archetype_version, spec_header=spechdr)
-
-
-            redrockfile = os.path.join(reduxdir, f'redrock-{healpix}.fits')
-            rrdetailsfile = os.path.join(reduxdir, f'rrdetails-{healpix}.h5')
-            if not os.path.isfile(redrockfile) or args.overwrite:
-                #rr = Table(fitsio.read(redrockfile))
-                cmd = f'-i {coaddfile} -o {redrockfile} -d {rrdetailsfile} --gpu --max-gpuprocs=4 --mp 1'
-                print(cmd)
-                rrdesi(cmd.split())
-            else:
-                log.info(f'Skipping existing file {redrockfile}')
-
-            for prefix, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'], [qsoqn.main, qsomgii.main, emlinefit.main]):
-                outfile = os.path.join(reduxdir, f'{prefix}-{healpix}.fits')
-                if not os.path.isfile(outfile) or args.overwrite:
-                    cmd = f'desi_{prefix}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
-                    if 'qso_' in prefix:
-                        cmd += ' --target_selection all --save_target all'
-                    print(cmd)
-                    runcmd(maincmd, args=cmd.split()[1:], inputs=[coaddfile, redrockfile], outputs=[outfile])
-                else:
-                    log.info(f'Skipping existing file {outfile}')
-
-        # EDR / VI tiles
-        vi = read_vi()
-        for tileid in sorted(set(vi['TILEID'])):
-            T = tileid == vi['TILEID']
-            petals = vi['FIBER'][T] // 500
-            for petal in sorted(set(petals)):
-                P = petal == petals
-                targetids = vi[T][P]['TARGETID'].data
-                #targetids = ','.join(vi[T][P]['TARGETID'].astype(str))
-
-                # copy the data so we can run the after-burners
-                coaddfile = os.path.join(reduxdir, f'coadd-{petal}-{tileid}.fits')
-                if not os.path.isfile(coaddfile) or args.overwrite:                
-                    orig_coaddfile = glob(os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'redux', args.specprod, 'tiles',
-                                                       'cumulative', str(tileid), '*', f'coadd-{petal}-{tileid}-thru*.fits'))[0]
-                    spec = read_spectra(orig_coaddfile, targetids=targetids)
-                    assert(np.all(spec.target_ids() == targetids))
-                    log.info(f'Writing {len(targetids)} targets to {coaddfile}')
-                    write_spectra(coaddfile, spec)
-                    del spec
-                    
-                # copy over the original redrock results
-                zcatfile = os.path.join(reduxdir, f'zcat-{args.specprod}-{petal}-{tileid}.fits')
-                if not os.path.isfile(zcatfile) or args.overwrite:
-                    orig_redrockfile = glob(os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'redux', args.specprod, 'tiles',
-                                                         'cumulative', str(tileid), '*', f'redrock-{petal}-{tileid}-thru*.fits'))[0]
-
-                    zcat = validate(orig_redrockfile, return_target_columns=True,
-                                    extra_columns=['TARGETID', 'Z', 'ZWARN', 'COADD_FIBERSTATUS', 'SPECTYPE', 'DELTACHI2'])
-                    zcat = zcat[geomask.match_to(zcat['TARGETID'], targetids)]
-                    assert(np.all(zcat['TARGETID'] == targetids))
-                    zcat.write(zcatfile, overwrite=True)
-                    log.info(f'Wrote {len(zcat)} objects to {zcatfile}')
-
-                    #spechdr = fitsio.read_header(coaddfile)                    
-                    #redhdr = fitsio.read_header(orig_redrockfile)
-                    #archetype_version = None
-                    #template_version = {redhdr['TEMNAM{:02d}'.format(nn)]: redhdr['TEMVER{:02d}'.format(nn)] for nn in np.arange(10)}
-                    #
-                    #zbest = Table.read(orig_redrockfile, 'REDSHIFTS')
-                    #fibermap = Table.read(orig_redrockfile, 'FIBERMAP')
-                    #expfibermap = Table.read(orig_redrockfile, 'EXP_FIBERMAP')
-                    #tsnr2 = Table.read(orig_redrockfile, 'TSNR2')
-                    #
-                    #indx = geomask.match_to(targetids, zbest['TARGETID'])
-                    #zbest = zbest[indx]
-                    #fibermap = fibermap[indx]
-                    #expfibermap = expfibermap[np.isin(expfibermap['TARGETID'], targetids)] # note
-                    #tsnr2 = tsnr2[indx]
-                    #
-                    #log.info(f'Writing {orig_redrockfile_out}')
-                    #write_zbest(orig_redrockfile_out, zbest, fibermap, expfibermap, tsnr2,
-                    #            template_version, archetype_version, spec_header=spechdr)
-
-                redrockfile = os.path.join(reduxdir, f'redrock-{petal}-{tileid}.fits')
-                rrdetailsfile = os.path.join(reduxdir, f'rrdetails-{petal}-{tileid}.h5')
-                if not os.path.isfile(redrockfile) or args.overwrite:
-                    #rr = Table(fitsio.read(redrockfile))
-                    cmd = f'-i {coaddfile} -o {redrockfile} -d {rrdetailsfile} --gpu --max-gpuprocs=4 --mp 1'
-                    print(cmd)
-                    rrdesi(cmd.split())
-                else:
-                    log.info(f'Skipping existing file {redrockfile}')
-
-                for prefix, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'], [qsoqn.main, qsomgii.main, emlinefit.main]):
-                    outfile = os.path.join(reduxdir, f'{prefix}-{petal}-{tileid}.fits')
-                    if not os.path.isfile(outfile) or args.overwrite:
-                        cmd = f'desi_{prefix}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
-                        if 'qso_' in prefix:
-                            cmd += ' --target_selection all --save_target all'
-                        print(cmd)
-                        runcmd(maincmd, args=cmd.split()[1:], inputs=[coaddfile, redrockfile], outputs=[outfile])
-                    else:
-                        log.info(f'Skipping existing file {outfile}')
+        run_redrock()        
 
                     
     if args.redshift_qa:
@@ -1005,7 +1073,6 @@ def main():
             for rrfile in rrfiles_tiles:
                 zcat_new_tiles1 = validate(rrfile, return_target_columns=True,
                                            extra_columns=['TARGETID', 'Z', 'ZWARN', 'COADD_FIBERSTATUS', 'SPECTYPE', 'DELTACHI2'])
-                #pdb.set_trace()
                 zcat_new_tiles.append(zcat_new_tiles1)
             zcat_new_tiles = vstack(zcat_new_tiles)
             merge_new_tiles = join(zcat_new_tiles, vi, keys='TARGETID')            
