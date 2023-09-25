@@ -85,6 +85,22 @@ zscan_priors = {
     '02': '-0.005,4.0,3e-4'
     }
 
+zlims = {
+    'BGS-zscan01':    [-0.15, 2.],
+    'LRG-zscan01':    [-0.15, 2.],
+    'ELG-zscan01':    [-0.15, 4.],
+    'QSO-zscan01':    [-0.15, 5.],
+    'LAELBG-zscan01': [-0.15, 5.],
+    'BGS-zscan02':    [-0.15, 4.],
+    'LRG-zscan02':    [-0.15, 4.],
+    'ELG-zscan02':    [-0.15, 4.],
+    'QSO-zscan02':    [-0.15, 5.],
+    'LAELBG-zscan02': [-0.15, 5.],
+    }
+
+# See Lan+23 (Fig 7) and Raichoor+23 (Fig 12)
+dchi2dict = {'BGS': 40., 'LRG': 15., 'ELG': 9., 'QSO': None, 'LAELBG': 30.}
+
 def get_version(specprod):
     ver = {'fuji': 'v3.0', 'guadalupe': 'v3.0', 'iron': 'v2.0'}
     return ver[specprod]    
@@ -975,8 +991,6 @@ def qa_zcompleteness(specprod='iron'):
     """Redshift completeness results.
 
     """
-    zlims = {'BGS': [-0.1, 2.], 'LRG': [-0.1, 2.], 'ELG': [-0.1, 4.], 'QSO': [-0.1, 7.], 'LAELBG': [-0.1, 7.]}
-
     def zbins(targtype, dz=0.1, edges=False):
         zmin, zmax = zlims[targtype]
         if edges:
@@ -985,92 +999,141 @@ def qa_zcompleteness(specprod='iron'):
             bins = np.arange(zmin, zmax, dz) + dz / 2 # bin centers
         return bins
 
-    def dchi2bins(edges=False):
-        mn, mx, dx = 0.0, 4.0, 0.3
-        if edges:
-            bins = np.arange(mn, mx, dx) # bin left edges
+    def dchi2bins(hist=False):
+        mn, mx, dx = 0.5, 5., 0.3
+        bins = np.arange(mn, mx, dx) # bin left edges
+        bins = np.hstack((bins, np.max(bins) + dx)) # include right-most edge
+        if hist:
+            return bins
         else:
-            bins = np.arange(mn, mx, dx) + dx / 2 # bin centers
-        return bins
+            return bins[1:]
 
-    def zhist(zobj, targtype):
-        bins = zbins(targtype, edges=True)
-        hist, _ = np.histogram(zobj, bins=len(bins), range=(bins.min(), bins.max()))
-        return bins, hist
-    
     def dchi2hist(dchi2):
-        bins = dchi2bins(edges=True)
-        hist, _ = np.histogram(dchi2, bins=len(bins), range=(bins.min(), bins.max()))
+        bins = dchi2bins()
+        hist, _ = np.histogram(dchi2, bins=dchi2bins(hist=True))
         return bins, hist
+
+    def _makeplot(old, new, targtype, targclass):
+
+        dchi2cut = dchi2dict[targtype]
+
+        sns.set_palette('Set2')
+        colors1 = sns.color_palette('muted')
+        colors2 = sns.color_palette('dark')
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        for cat, col1, col2, label in zip([new, old], [colors1[3], colors1[0]], [colors2[3], colors2[0]], ['RR New', 'RR Iron']):
+            # redshift success
+            G = (C_LIGHT * np.abs(cat['Z_RR'] - cat['VI_Z']) / (1. + cat['VI_Z'])) < 1e3 # good
+            H = ~G # bad
+            bins, numer = dchi2hist(np.log10(cat['DELTACHI2'][G]))
+            _, denom = dchi2hist(np.log10(cat['DELTACHI2']))
+            cnumer = np.cumsum(numer[::-1])[::-1]
+            cdenom = np.cumsum(denom[::-1])[::-1]
+            W = denom > 0
+            if np.any(W):
+                #frac = cnumer[W] / cdenom[W]
+                frac = numer[W] / denom[W]
+                #print(label, bins[W], frac)
+                ax.plot(bins[W], frac, color=col1, ls='-', lw=3,
+                        label=f'{label}: Redshift Success')#, marker=marker)
+            # cumulative fraction with <deltach2
+            frac = np.cumsum(denom) / len(cat)
+            ax.plot(bins, frac, color=col2, ls='--', lw=3, label=r'{}: $F(<\Delta\chi^2)$'.format(label))#, marker=marker)
+                
+        ax.axhline(y=1, color='k', lw=1, ls='-', alpha=0.5)
+        if dchi2cut is not None:
+            ax.axvline(x=np.log10(dchi2cut), color='k', ls='-', lw=1, alpha=0.5)
+        ax.set_ylim(0, 1.2)
+        ax.set_xlim(0.5, 5)
+        ax.margins(x=0)
+        ax.set_xlabel(r'$\log_{10} (\Delta\chi^2)$')
+        ax.set_ylabel('Fraction')
+        txt = [targclass, f'N={len(new)}']
+        ax.text(0.96, 0.96, '\n'.join(txt), va='top', ha='right',
+                transform=ax.transAxes, fontsize=12)#, bbox=bbox)
+        if dchi2cut is not None:
+            xytext = (0.6, 1.06)
+            if np.log10(dchi2cut) < 1.:
+                xytext = (1.5, 1.06)
+            ax.annotate(r'$\Delta\chi^2='+f'{dchi2cut:.0f}$', xy=(np.log10(dchi2cut), 1.02), xytext=xytext,
+                        xycoords='data', arrowprops=dict(alpha=0.5, facecolor='black', lw=1, shrink=0.001),
+                        va='bottom', ha='left', fontsize=12)
+        
+        hh, ll = ax.get_legend_handles_labels()
+        srt = [1, 3, 0, 2]
+        ax.legend([hh[ii] for ii in srt], [ll[ii] for ii in srt], fontsize=10, loc='lower right')
+        #ax.legend(fontsize=10)
+
+        #twin_ax = ax.twinx()
+        #twin_ax.set_ylabel('Sample Completeness Fraction')
+        #twin_ax.set_ylim(0, 1.1)
     
+        fig.tight_layout()
+        pngfile = os.path.join(qadir, f'qa-dchi2cut-{targclass}.png')
+        fig.savefig(pngfile)
+        log.info(f'Wrote {pngfile}')
+
     # zscan01 - VI tiles
     zcatfile = os.path.join(projectdir, f'zcat-{specprod}.fits')
     zcat_old = Table(fitsio.read(zcatfile))
     log.info(f'Read {len(zcat_old)} objects from {zcatfile}')
-
+    
     zcatfile = os.path.join(projectdir, f'zcat-{specprod}-zscan01.fits')
     zcat_new = Table(fitsio.read(zcatfile))
     log.info(f'Read {len(zcat_new)} objects from {zcatfile}')
     assert(np.all(zcat_old['TARGETID'] == zcat_new['TARGETID']))
-
-    targtypes = ['BGS', 'BGS', 'LRG', 'ELG']
-    targclasses = ['BGS_BRIGHT', 'BGS_FAINT', 'LRG', 'ELG']
-
-    fig, axes = plt.subplots(2, 2, figsize=(8, 6), sharex=True, sharey=True)
-    for xx, targtype, targclass in zip(axes.flat, targtypes, targclasses):
-
-        for allcat, ls, col in zip([zcat_old, zcat_new], ['-', '--'], ['dodgerblue', 'tomato']):
-            N = (allcat[targclass]) * (allcat['ZWARN'] == 0) * (allcat['COADD_FIBERSTATUS'] == 0)
-            cat = allcat[N]
     
-            G = np.where((C_LIGHT * np.abs(cat['Z_RR'] - cat['VI_Z']) / (1. + cat['VI_Z'])) < 1e3)[0] # good
-            bins, numer = dchi2hist(np.log10(cat['DELTACHI2'][G]))
-            _, denom = dchi2hist(np.log10(cat['DELTACHI2']))
-            W = denom > 0
-            if np.any(W):
-                xx.plot(bins[W], numer[W] / denom[W], marker='o', color=col, ls=ls, lw=2)#, label=label)
-            xx.axhline(y=1, color='gray', alpha=0.7)
-            xx.set_ylim(0, 1.1)
-            #xx.set_xlim(np.min(bins), np.max(bins))
-        xx.legend(loc='upper right', frameon=False)
-
-    fig.tight_layout()
-    pngfile = os.path.join(qadir, f'qa-zcompleteness.png')
-    fig.savefig(pngfile)
-    log.info(f'Wrote {pngfile}')
+    targtypes = ['BGS', 'BGS', 'LRG', 'ELG', 'QSO']
+    targclasses = ['BGS_BRIGHT', 'BGS_FAINT', 'LRG', 'ELG', 'QSO']
+    for targtype, targclass in zip(targtypes, targclasses):
+        old = zcat_old[zcat_old[targclass] * (zcat_old['ZWARN'] == 0) * (zcat_old['COADD_FIBERSTATUS'] == 0)]
+        new = zcat_new[zcat_new[targclass] * (zcat_new['ZWARN'] == 0) * (zcat_new['COADD_FIBERSTATUS'] == 0)]
+        _makeplot(old, new, targtype, targclass)
         
+    # zscan02 - VI healpix
+    zscan = 'zscan02'
+    zcatfile = os.path.join(projectdir, f'zcat-tertiary26.fits')
+    zcat_old = Table(fitsio.read(zcatfile))
+    zcat_old['LAE-LBG'] = np.ones(len(zcat_old), bool)
+    log.info(f'Read {len(zcat_old)} objects from {zcatfile}')
+
+    zcatfile = os.path.join(projectdir, f'zcat-tertiary26-{zscan}.fits')
+    zcat_new = Table(fitsio.read(zcatfile))
+    zcat_new['LAE-LBG'] = np.ones(len(zcat_new), bool)
+    log.info(f'Read {len(zcat_new)} objects from {zcatfile}')
+    assert(np.all(zcat_old['TARGETID'] == zcat_new['TARGETID']))
+
+    old = zcat_old[zcat_old['LAE-LBG'] * (zcat_old['ZWARN'] == 0) * (zcat_old['COADD_FIBERSTATUS'] == 0)]
+    new = zcat_new[zcat_new['LAE-LBG'] * (zcat_new['ZWARN'] == 0) * (zcat_new['COADD_FIBERSTATUS'] == 0)]
+    _makeplot(old, new, targtype='LAELBG', targclass='LAE-LBG')
+    
 def qa_zvz(specprod='iron'):
     """Redshift vs redshift fitting results.
 
     """
     # make the plots
-    zlims = {'BGS': [-0.1, 2.], 'LRG': [-0.1, 2.], 'ELG': [-0.1, 4.], 'QSO': [-0.1, 7.], 'LAELBG': [-0.1, 7.]}
-
-    # See Lan+23 (Fig 7) and Raichoor+23 (Fig 12)
-    dchi2 = {'BGS': 40., 'LRG': 15., 'ELG': 9., 'QSO': None, 'LAELBG': None}
-
     sns.set(context='talk', style='ticks', font_scale=0.7, palette='Set2')
 
     def _plot_onerow(rowaxes, cat, targtype, remove_xticklabels=False, ylabel=None):
 
-        dchi2cut = dchi2[targtype]
+        dchi2cut = dchi2dict[targtype]
         zwarn = (cat['ZWARN'] == 0)
         coadd_fiberstatus = (cat['COADD_FIBERSTATUS'] == 0)
+        I = np.where(coadd_fiberstatus * zwarn)[0]
+        
         if dchi2cut is not None:
-            I = np.where(coadd_fiberstatus * zwarn * (cat['DELTACHI2'] > dchi2cut))[0]
-        else:
-            I = np.where(coadd_fiberstatus * zwarn)[0]
-            #I = np.arange(len(cat))
-
-        if dchi2cut is not None:
+            J = np.where(coadd_fiberstatus * zwarn * (cat['DELTACHI2'] > dchi2cut))[0]
             dchi2txt = [r'$\Delta\chi^2>{:.1f}$'.format(dchi2cut)]
         else:
+            J = I
             dchi2txt = [r'No $\Delta\chi^2$ cut']
-            
+
+        goodcat = cat[J]
+        cat = cat[I]
+
         bbox = dict(boxstyle='round', facecolor='lightgray', alpha=0.4)
         
-        goodcat = cat[I]
-
         if targtype == 'LAELBG':
             vi_spectypes = np.array(['LBG', 'LAE', 'QSO', 'Interloper'])
             vi_colors = np.array(['tomato', 'purple', 'dodgerblue', 'forestgreen'])
@@ -1092,11 +1155,13 @@ def qa_zvz(specprod='iron'):
 
             N, Idoom, statstxt = _zstats(plotcat['Z_RR'][S], plotcat['VI_Z'][S])#, spectype=spectype)
             if spectype and len(S) > 0:
-                print('#####', spectype)
+                #print('#####', spectype)
                 if 'VI_SPECTYPE' in plotcat.colnames:                
-                    print(plotcat[S][Idoom]['Z_RR', 'VI_Z', 'ZWARN', 'SPECTYPE', 'VI_SPECTYPE', 'DELTACHI2'])
+                    #print(plotcat[S][Idoom]['Z_RR', 'VI_Z', 'ZWARN', 'SPECTYPE', 'VI_SPECTYPE', 'DELTACHI2'])
+                    pass
                 else:
-                    print(plotcat[S][Idoom]['Z_RR', 'VI_Z', 'ZWARN', 'SPECTYPE', 'DELTACHI2'])
+                    #print(plotcat[S][Idoom]['Z_RR', 'VI_Z', 'ZWARN', 'SPECTYPE', 'DELTACHI2'])
+                    pass
 
             if spectype == 'STAR' and len(S) > 0:
                 zmax = C_LIGHT * np.max(np.abs(plotcat['Z_RR'][S]))
@@ -1120,9 +1185,9 @@ def qa_zvz(specprod='iron'):
                     xx.set_xlabel('RR Redshift [km/s]')
                 txt = dchi2txt + [f'RR: {spectype}']
                 xx.text(0.06, 0.96, '\n'.join(txt), va='top', ha='left',
-                        transform=xx.transAxes, fontsize=10, bbox=bbox)
+                        transform=xx.transAxes, fontsize=9, bbox=bbox)
                 xx.text(0.96, 0.06, f'N={len(S)}', va='bottom', ha='right',
-                        transform=xx.transAxes, fontsize=10, bbox=bbox)
+                        transform=xx.transAxes, fontsize=9, bbox=bbox)
             else:
                 if 'VI_SPECTYPE' in plotcat.colnames:
                     nsort = np.argsort([np.sum(plotcat['VI_SPECTYPE'][S] == vi_spectype) for vi_spectype in vi_spectypes])[::-1]
@@ -1138,7 +1203,7 @@ def qa_zvz(specprod='iron'):
     
                 if ixx == 0:
                     #txt = ['zwarn==0', 'coadd_fiberstatus==0']
-                    txt = ['All']
+                    txt = ['All (no warnings)']
                     extratxt = [f'N(zwarn=0): {np.sum(~zwarn)}', f'N(coadd_fiberstatus)=0: {np.sum(~coadd_fiberstatus)}']
                 else:
                     txt = dchi2txt
@@ -1148,17 +1213,17 @@ def qa_zvz(specprod='iron'):
                     txt = dchi2txt + [f'RR: {spectype}']
     
                 xx.text(0.06, 0.96, '\n'.join(txt), va='top', ha='left',
-                        transform=xx.transAxes, fontsize=10, bbox=bbox)
+                        transform=xx.transAxes, fontsize=9, bbox=bbox)
                 if extratxt:
                     xx.text(0.06, 0.86, '\n'.join(extratxt), va='top', ha='left',
                             transform=xx.transAxes, fontsize=7, bbox=bbox)
                     
                 xx.text(0.96, 0.06, '\n'.join(statstxt), va='bottom', ha='right',
-                        transform=xx.transAxes, fontsize=10, bbox=bbox)
+                        transform=xx.transAxes, fontsize=9, bbox=bbox)
 
-            if ixx == len(rowaxes)-2:
+            if ixx == len(rowaxes)-1:
                 hh, ll = rowaxes[0].get_legend_handles_labels()                
-                xx.legend(hh, ll, loc='upper right', fontsize=8)
+                xx.legend(hh, ll, loc='upper right', fontsize=7)
 
         if remove_xticklabels:
             for xx in rowaxes:
@@ -1176,7 +1241,7 @@ def qa_zvz(specprod='iron'):
         # bottom row - new templates
         _plot_onerow(axes[1, :], new, targtype, ylabel='Redshift [New]')
 
-        zlim = zlims[targtype]
+        zlim = zlims[f'{targtype}-{zscan}']
         for xx in axes[:, :-1].flat:
             xx.set_xlim(zlim)
             xx.set_ylim(zlim)
@@ -1226,11 +1291,26 @@ def qa_zvz(specprod='iron'):
     for targtype, targclass in zip(targtypes, targclasses):
         I = zcat_new[targclass]
         _plot_allrows(zcat_old[I], zcat_new[I], targtype=targtype, zscan=zscan, targclass=targclass)
-
-    pdb.set_trace()
-
+        
     # zscan01 - VI tiles
     zscan = 'zscan01'
+    zcatfile = os.path.join(projectdir, f'zcat-{specprod}.fits')
+    zcat_old = Table(fitsio.read(zcatfile))
+    log.info(f'Read {len(zcat_old)} objects from {zcatfile}')
+
+    zcatfile = os.path.join(projectdir, f'zcat-{specprod}-{zscan}.fits')
+    zcat_new = Table(fitsio.read(zcatfile))
+    log.info(f'Read {len(zcat_new)} objects from {zcatfile}')
+    assert(np.all(zcat_old['TARGETID'] == zcat_new['TARGETID']))
+
+    targtypes = ['BGS', 'BGS', 'LRG', 'ELG', 'QSO']
+    targclasses = ['BGS_BRIGHT', 'BGS_FAINT', 'LRG', 'ELG', 'QSO']
+    for targtype, targclass in zip(targtypes, targclasses):
+        I = zcat_new[targclass]
+        _plot_allrows(zcat_old[I], zcat_new[I], targtype=targtype, zscan=zscan, targclass=targclass)
+
+    # zscan02 - VI tiles
+    zscan = 'zscan02'
     zcatfile = os.path.join(projectdir, f'zcat-{specprod}.fits')
     zcat_old = Table(fitsio.read(zcatfile))
     log.info(f'Read {len(zcat_old)} objects from {zcatfile}')
@@ -1584,12 +1664,12 @@ def main():
         # make some plots.
         gather_redrock_results(specprod=args.specprod, overwrite=args.overwrite)
 
-        ## QA - redshift completeness results
-        #qa_zcompleteness(specprod=args.specprod)
+        # QA - redshift completeness results
+        qa_zcompleteness(specprod=args.specprod)
+        return
 
         # QA - redshift vs redshift results
         qa_zvz(specprod=args.specprod)
-        return
 
         # QA - redshift distribution of the VI tiles.
         qa_vi_zhist()
