@@ -20,9 +20,10 @@ Dependencies:
 3. Build the parent (FastSpecFit, rest-frame) templates:
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --parent-templates
 
-4. Build the empca eigentemplates:
+4. Build the empca and NMF eigentemplates:
   salloc -N 1 -C cpu -A desi -t 00:20:00 --qos interactive
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --empca-templates
+  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --nmf-templates
 
 5. Generate QA of the parent templates and the resulting empca eigentemplates:
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --template-qa
@@ -31,7 +32,7 @@ Dependencies:
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --gather-specprod-results
 
 7. Run Redrock with a few different priors:
-  salloc -N 4 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
+  salloc -N 1 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --run-redrock
 
   salloc -N 4 -C cpu -A desi -t 04:00:00 --qos interactive
@@ -45,9 +46,13 @@ Dependencies:
       -o /global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/redux/redrock-27247.fits \
       -d /global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/redux/rrdetails-27247.h5 --gpu --max-gpuprocs=4 --mp 1
 
-7. Investigate outliers...
+7. Build QA:
+  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --redshift-qa
 
-fastspec /global/cfs/cdirs/desi/spectro/redux/iron/tiles/cumulative/80613/20210324/redrock-2-80613-thru20210324.fits --targetids 39633324615930329 -o fastspec.fits --input-redshifts 1.9227369195305137
+
+8. Investigate outliers...
+
+  fastspec /global/cfs/cdirs/desi/spectro/redux/iron/tiles/cumulative/80613/20210324/redrock-2-80613-thru20210324.fits --targetids 39633324615930329 -o fastspec.fits --input-redshifts 1.9227369195305137
 fastqa fastspec.fits -o ioannis/tmp2
 
 """
@@ -88,12 +93,12 @@ zscan_priors = {
 zlims = {
     'BGS-zscan01':    [-0.15, 2.],
     'LRG-zscan01':    [-0.15, 2.],
-    'ELG-zscan01':    [-0.15, 4.],
+    'ELG-zscan01':    [-0.15, 5.],
     'QSO-zscan01':    [-0.15, 5.],
     'LAELBG-zscan01': [-0.15, 5.],
     'BGS-zscan02':    [-0.15, 4.],
     'LRG-zscan02':    [-0.15, 4.],
-    'ELG-zscan02':    [-0.15, 4.],
+    'ELG-zscan02':    [-0.15, 5.],
     'QSO-zscan02':    [-0.15, 5.],
     'LAELBG-zscan02': [-0.15, 5.],
     }
@@ -692,8 +697,8 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4, dwave=
 
     # normalize at 5500 A
     for igal in range(ngal):
-        #norm = np.median(templates[igal, :])
-        norm = np.interp(5500., templatewave, templates[igal, :])
+        norm = np.mean(templates[igal, :])
+        #norm = np.interp(5500., templatewave, templates[igal, :])
         outmeta['TEMPLATENORM'][igal] = norm
         templates[igal, :] /= norm
         templates_lowres[igal, :] /= norm
@@ -1000,7 +1005,7 @@ def qa_zcompleteness(specprod='iron'):
         return bins
 
     def dchi2bins(hist=False):
-        mn, mx, dx = 0.5, 5., 0.3
+        mn, mx, dx = 0.5, 4.9, 0.2
         bins = np.arange(mn, mx, dx) # bin left edges
         bins = np.hstack((bins, np.max(bins) + dx)) # include right-most edge
         if hist:
@@ -1028,18 +1033,25 @@ def qa_zcompleteness(specprod='iron'):
             H = ~G # bad
             bins, numer = dchi2hist(np.log10(cat['DELTACHI2'][G]))
             _, denom = dchi2hist(np.log10(cat['DELTACHI2']))
-            cnumer = np.cumsum(numer[::-1])[::-1]
-            cdenom = np.cumsum(denom[::-1])[::-1]
+            cnumer = np.cumsum(numer)
+            cdenom = np.cumsum(denom)
+            frac = np.zeros_like(bins)
             W = denom > 0
             if np.any(W):
                 #frac = cnumer[W] / cdenom[W]
-                frac = numer[W] / denom[W]
+                frac[W] = numer[W] / denom[W]
                 #print(label, bins[W], frac)
-                ax.plot(bins[W], frac, color=col1, ls='-', lw=3,
+                ax.plot(bins[W], frac[W], color=col1, ls='-', lw=3,
                         label=f'{label}: Redshift Success')#, marker=marker)
             # cumulative fraction with <deltach2
-            frac = np.cumsum(denom) / len(cat)
-            ax.plot(bins, frac, color=col2, ls='--', lw=3, label=r'{}: $F(<\Delta\chi^2)$'.format(label))#, marker=marker)
+            frac = 1 - np.cumsum(denom) / len(cat)
+            ax.plot(bins, frac, color=col2, ls='--', lw=3, label=r'{}: $F(>\Delta\chi^2)$'.format(label))#, marker=marker)
+            #frac = np.zeros_like(bins)
+            #W = cdenom > 0
+            #if np.any(W):
+            #    frac[W] = cnumer[W] / cdenom[W]
+            #    print(label, frac)
+            #    ax.plot(bins, frac, color=col2, ls='--', lw=3, label=r'{}: $F(>\Delta\chi^2)$'.format(label))#, marker=marker)
                 
         ax.axhline(y=1, color='k', lw=1, ls='-', alpha=0.5)
         if dchi2cut is not None:
@@ -1054,7 +1066,7 @@ def qa_zcompleteness(specprod='iron'):
                 transform=ax.transAxes, fontsize=12)#, bbox=bbox)
         if dchi2cut is not None:
             xytext = (0.6, 1.06)
-            if np.log10(dchi2cut) < 1.:
+            if np.log10(dchi2cut) < 1.18:
                 xytext = (1.5, 1.06)
             ax.annotate(r'$\Delta\chi^2='+f'{dchi2cut:.0f}$', xy=(np.log10(dchi2cut), 1.02), xytext=xytext,
                         xycoords='data', arrowprops=dict(alpha=0.5, facecolor='black', lw=1, shrink=0.001),
@@ -1074,6 +1086,23 @@ def qa_zcompleteness(specprod='iron'):
         fig.savefig(pngfile)
         log.info(f'Wrote {pngfile}')
 
+    # zscan02 - VI healpix
+    zscan = 'zscan02'
+    zcatfile = os.path.join(projectdir, f'zcat-tertiary26.fits')
+    zcat_old = Table(fitsio.read(zcatfile))
+    zcat_old['LAE-LBG'] = np.ones(len(zcat_old), bool)
+    log.info(f'Read {len(zcat_old)} objects from {zcatfile}')
+
+    zcatfile = os.path.join(projectdir, f'zcat-tertiary26-{zscan}.fits')
+    zcat_new = Table(fitsio.read(zcatfile))
+    zcat_new['LAE-LBG'] = np.ones(len(zcat_new), bool)
+    log.info(f'Read {len(zcat_new)} objects from {zcatfile}')
+    assert(np.all(zcat_old['TARGETID'] == zcat_new['TARGETID']))
+
+    old = zcat_old[zcat_old['LAE-LBG'] * (zcat_old['ZWARN'] == 0) * (zcat_old['COADD_FIBERSTATUS'] == 0)]
+    new = zcat_new[zcat_new['LAE-LBG'] * (zcat_new['ZWARN'] == 0) * (zcat_new['COADD_FIBERSTATUS'] == 0)]
+    _makeplot(old, new, targtype='LAELBG', targclass='LAE-LBG')
+
     # zscan01 - VI tiles
     zcatfile = os.path.join(projectdir, f'zcat-{specprod}.fits')
     zcat_old = Table(fitsio.read(zcatfile))
@@ -1091,23 +1120,6 @@ def qa_zcompleteness(specprod='iron'):
         new = zcat_new[zcat_new[targclass] * (zcat_new['ZWARN'] == 0) * (zcat_new['COADD_FIBERSTATUS'] == 0)]
         _makeplot(old, new, targtype, targclass)
         
-    # zscan02 - VI healpix
-    zscan = 'zscan02'
-    zcatfile = os.path.join(projectdir, f'zcat-tertiary26.fits')
-    zcat_old = Table(fitsio.read(zcatfile))
-    zcat_old['LAE-LBG'] = np.ones(len(zcat_old), bool)
-    log.info(f'Read {len(zcat_old)} objects from {zcatfile}')
-
-    zcatfile = os.path.join(projectdir, f'zcat-tertiary26-{zscan}.fits')
-    zcat_new = Table(fitsio.read(zcatfile))
-    zcat_new['LAE-LBG'] = np.ones(len(zcat_new), bool)
-    log.info(f'Read {len(zcat_new)} objects from {zcatfile}')
-    assert(np.all(zcat_old['TARGETID'] == zcat_new['TARGETID']))
-
-    old = zcat_old[zcat_old['LAE-LBG'] * (zcat_old['ZWARN'] == 0) * (zcat_old['COADD_FIBERSTATUS'] == 0)]
-    new = zcat_new[zcat_new['LAE-LBG'] * (zcat_new['ZWARN'] == 0) * (zcat_new['COADD_FIBERSTATUS'] == 0)]
-    _makeplot(old, new, targtype='LAELBG', targclass='LAE-LBG')
-    
 def qa_zvz(specprod='iron'):
     """Redshift vs redshift fitting results.
 
@@ -1204,7 +1216,7 @@ def qa_zvz(specprod='iron'):
                 if ixx == 0:
                     #txt = ['zwarn==0', 'coadd_fiberstatus==0']
                     txt = ['All (no warnings)']
-                    extratxt = [f'N(zwarn=0): {np.sum(~zwarn)}', f'N(coadd_fiberstatus)=0: {np.sum(~coadd_fiberstatus)}']
+                    extratxt = [f'N(zwarn!=0): {np.sum(~zwarn)}', f'N(coadd_fiberstatus)!=0: {np.sum(~coadd_fiberstatus)}']
                 else:
                     txt = dchi2txt
                     extratxt = None
@@ -1274,6 +1286,48 @@ def qa_zvz(specprod='iron'):
         fig.savefig(pngfile)
         log.info(f'Wrote {pngfile}')
 
+    def _plot_all_targetclass(cats, targtypes, targclasses, zscan, pngfile):
+
+        ncat = len(cats)
+
+        fig, axes = plt.subplots(5, 5, figsize=(14, 15))
+
+        for ii in range(ncat):
+            remxlabels = ii < ncat-1
+            _plot_onerow(axes[ii, :], cats[ii], targtypes[ii], remove_xticklabels=remxlabels,
+                         ylabel=f'{targclasses[ii]}\n Redshift [Iron]')
+            zlim = zlims[f'{targtypes[ii]}-{zscan}']
+            for xx in axes[ii, :-1].flat:
+                xx.set_xlim(zlim)
+                xx.set_ylim(zlim)
+                xx.plot(zlim, zlim, color='k', lw=1, alpha=0.5, zorder=0)
+
+        Qcut = '2.5'
+
+        # x-label
+        llpos = axes[-1, 0].get_position()
+        lrpos = axes[-1, -2].get_position()
+        xpos = (lrpos.x1 - llpos.x0) / 2 + llpos.x0
+        ypos = llpos.y0 - 0.05
+        fig.text(xpos, ypos, f'Redshift [VI; Q>{Qcut}]', ha='center', va='center')
+            
+        fig.subplots_adjust(bottom=0.1, left=0.07, right=0.95, top=0.95, wspace=0.1, hspace=0.1)
+        fig.savefig(pngfile)
+        log.info(f'Wrote {pngfile}')
+
+    # zscan01,zscan02 - VI tiles, all targets
+    for zscan in ['zscan01', 'zscan02']:
+        pngfile = os.path.join(qadir, f'zvz-{zscan}-all.png')
+        zcatfile = os.path.join(projectdir, f'zcat-{specprod}-{zscan}.fits')
+        zcat_new = Table(fitsio.read(zcatfile))
+        log.info(f'Read {len(zcat_new)} objects from {zcatfile}')
+    
+        targtypes = ['BGS', 'BGS', 'LRG', 'ELG', 'QSO']
+        targclasses = ['BGS_BRIGHT', 'BGS_FAINT', 'LRG', 'ELG', 'QSO']
+        cats = [zcat_new[zcat_new[targclass]] for targclass in targclasses]
+        # hard-code zscan here so we get consistent redshift limits.
+        _plot_all_targetclass(cats, targtypes, targclasses, zscan='zscan02', pngfile=pngfile) 
+
     # zscan02 - VI healpix
     zscan = 'zscan02'
     zcatfile = os.path.join(projectdir, f'zcat-tertiary26.fits')
@@ -1326,27 +1380,32 @@ def qa_zvz(specprod='iron'):
         I = zcat_new[targclass]
         _plot_allrows(zcat_old[I], zcat_new[I], targtype=targtype, zscan=zscan, targclass=targclass)
 
-def build_redrock_templates(specprod='iron', niter=10, ncomp=10, minwave=400., dwave=0.2):
+def build_redrock_templates(specprod='iron', niter=10, ncomp=10, minwave=400., dwave=0.2, nmf=False):
     """Build new templates."""
 
     import redrock
     from astropy.io import fits
-    from empca import empca
 
     flux = []
     for targtype in ['BGS_ANY', 'LRG', 'ELG']:
         templatefile = os.path.join(datadir, f'ftemplates-{specprod}-{targtype}.fits')
         log.info(f'Reading {templatefile}')
-        flux.append(fitsio.read(templatefile, 'FLUX'))
+        flux.append(fitsio.read(templatefile, 'FLUX', rows=np.arange(10)))
     flux = np.vstack(flux) # [ngal, nwave]
     ngal = flux.shape[0]
 
-    model = empca(flux, niter=niter, nvec=ncomp)
+    if nmf:
+        from negative_noise_nmf import fit_NMF
+        H, W = fit_NMF(X=flux, V=np.ones_like(flux), n_templates=ncomp)
+        pdb.set_trace()
+    else:
+        from empca import empca
+        model = empca(flux, niter=niter, nvec=ncomp)
+        
+        empca_eigenvec = model.eigvec  # [ncomp, npix]
+        empca_eigencoeff = model.coeff # [ngal, ncomp]
+        empca_model = empca_eigencoeff.dot(empca_eigenvec)
     
-    empca_eigenvec = model.eigvec  # [ncomp, npix]
-    empca_eigencoeff = model.coeff # [ngal, ncomp]
-    empca_model = empca_eigencoeff.dot(empca_eigenvec)
-
     header = fits.Header()
     header['CRVAL1'] = (minwave, 'restframe starting wavelength [Angstroms]')
     header['CDELT1'] = dwave
@@ -1515,6 +1574,7 @@ def main():
     parser.add_argument('--parent-qa', action='store_true', help='QA of the parent sample.')
     parser.add_argument('--parent-templates', action='store_true', help='Build the parent rest-frame templates.')
     parser.add_argument('--empca-templates', action='store_true', help='Run empca on the output of --parent-templates.')
+    parser.add_argument('--nmf-templates', action='store_true', help='Run NMF on the output of --parent-templates.')
     parser.add_argument('--template-qa', action='store_true', help='Template QA.')
     parser.add_argument('--gather-specprod-results', action='store_true', help='Gather the specprod Redrock results for the VI tiles/healpixels.')
     parser.add_argument('--run-redrock', action='store_true', help='Run Redrock on the VI tiles/healpixels.')
@@ -1559,6 +1619,11 @@ def main():
         # build the new PCA / redrock templates
         build_redrock_templates(specprod=args.specprod, niter=args.niter, ncomp=args.ncomp,
                                 minwave=args.minwave, dwave=args.dwave)
+
+    if args.nmf_templates:
+        # build the new NMF Redrock templates
+        build_redrock_templates(specprod=args.specprod, niter=args.niter, ncomp=args.ncomp,
+                                minwave=args.minwave, dwave=args.dwave, nmf=True)
 
     if args.template_qa:
         qa_redrock_templates(ncomp=args.ncomp)
@@ -1652,9 +1717,8 @@ def main():
         os.environ['RR_TEMPLATE_DIR'] = templatedir # note!
 
         # Run Redrock on the VI tiles with a redshift scan to z=1.7 and to z=4.
-        #run_redrock_tiles(zscan_prior='01', specprod=args.specprod, overwrite=args.overwrite) 
+        run_redrock_tiles(zscan_prior='01', specprod=args.specprod, overwrite=args.overwrite) 
         run_redrock_tiles(zscan_prior='02', specprod=args.specprod, overwrite=args.overwrite)
-        return
                     
         # LAE/LBG VI tiles from Tertiary 26
         run_redrock_healpix(zscan_prior='02', specprod=args.specprod, overwrite=args.overwrite)
@@ -1664,20 +1728,19 @@ def main():
         # make some plots.
         gather_redrock_results(specprod=args.specprod, overwrite=args.overwrite)
 
-        # QA - redshift completeness results
-        qa_zcompleteness(specprod=args.specprod)
-        return
-
         # QA - redshift vs redshift results
         qa_zvz(specprod=args.specprod)
+
+        # QA - redshift completeness results
+        qa_zcompleteness(specprod=args.specprod)
 
         # QA - redshift distribution of the VI tiles.
         qa_vi_zhist()
 
     if args.run_fastspecfit:
         from fastspecfit.fastspecfit import fastspec
-        
-        merge, merge_new = merge_vi_rr_results(specprod=args.specprod, overwrite=args.overwrite)
+
+        gather_redrock_results(specprod=args.specprod, overwrite=args.overwrite)        
 
         # temporary hack
         merge = merge[merge['BGS_BRIGHT']]
