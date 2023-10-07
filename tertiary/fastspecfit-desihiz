@@ -1,0 +1,276 @@
+#!/usr/bin/env python
+"""
+Fit the DESI-II Tertiary tiles / observations--
+  https://data.desi.lbl.gov/desi/users/raichoor/tertiary-status/tertiary-status.html
+
+--Tertiary 15 - XMM - LAE/LBG
+--Tertiary 18 - XMM-LSS - ODIN + WIRO LAE
+--Tertiary 23 - COSMOS - 4+1
+--Tertiary 26 - COSMOS - LBG/LAE/ELG
+--Tertiary 34,35 - NGC4993
+
+time $HOME/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --selection suprime --vi-redshifts --nolog --mp 128 --overwrite
+
+
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --mp 128 --tertiary 18
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --mp 128 --tertiary 18 --merge
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --mp 128 --tertiary 18 --fastphot
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --mp 128 --tertiary 18 --fastphot --merge
+
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --tertiary 18 --vi-redshifts --mp 24
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --tertiary 18 --vi-redshifts --merge --makeqa --mp 24
+
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --tertiary 26 --vi-redshifts --mp 128
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --tertiary 26 --vi-redshifts --merge --makeqa --mp 128
+
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --mp 128 --tertiary 23
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --mp 128 --tertiary 23 --merge
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --mp 128 --tertiary 23 --fastphot
+time /global/u2/i/ioannis/code/desihub/fastspecfit-projects/tertiary/fastspecfit-desihiz --mp 128 --tertiary 23 --fastphot --merge
+
+rrdesi -i $DESI_ROOT/users/raichoor/laelbg/daily/healpix/tertiary26-thru20230416/coadd-27238.fits -o ./redrock-nmf-27238.fits --targetids 39089837499746048,39089837499745286 --details ./redrock-nmf-27238.h5 --mp 1
+
+"""
+import pdb # for debugging
+
+import os, time
+from glob import glob
+import numpy as np
+import fitsio
+from astropy.table import Table, vstack
+
+from desispec.parallel import stdouterr_redirected
+from desimodel.footprint import radec2pix
+from desiutil.log import get_logger
+log = get_logger()
+
+def parse_fphotodir(fphotodir):
+    # parse the extension name, if any
+    fphotoext = None
+    photodir = os.path.dirname(fphotodir)
+    photobase = os.path.basename(fphotodir)
+    if '[' in photobase and ']' in photobase:
+        try:
+            fphotoext = photobase[photobase.find('[')+1:photobase.find(']')]
+            fphotodir = os.path.join(photodir, photobase[:photobase.find('[')])
+        except:
+            pass
+    return fphotodir, fphotoext        
+
+def main():
+    """Main wrapper
+
+    """
+    import argparse    
+    from importlib import resources
+
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--selection', type=str, choices=['odin', 'suprime', 'clauds'], help='Sample selection to model.')
+    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
+    parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
+    parser.add_argument('--outdir', type=str, default=None, help='Output directory.')
+    parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
+    parser.add_argument('--fastphot', action='store_true', help='Fit just the broadband photometry.')
+    parser.add_argument('--vi-redshifts', action='store_true', help='Refit at the VI redshifts.')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing files.')
+    parser.add_argument('--nolog', action='store_true', help='Do not write a log (useful for debugging).')
+    parser.add_argument('--redrock', action='store_true', help='Run Redrock.')
+    parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
+    parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
+    parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
+    args = parser.parse_args()
+
+    desi_root = os.getenv('DESI_ROOT')
+
+    if args.outdir is None:
+        args.outdir = os.path.join(desi_root, 'users', 'ioannis', 'desihiz')
+
+    fspecdirs = {
+        'odin': desi_root+'/users/raichoor/laelbg/odin/test/forjohn/v0/desi-odin.fits[SPECINFO]',
+        'clauds': desi_root+'/users/raichoor/laelbg/clauds/test/forjohn/v0/desi-clauds.fits[SPECINFO]',
+        'suprime': desi_root+'/users/raichoor/laelbg/suprime/test/forjohn/v0/desi-suprime.fits[SPECINFO]',
+        #'odin': args.outdir+'/phot/desi-odin.fits[SPECINFO]',
+        #'odin': desi_root+'/users/raichoor/laelbg/odin/v20230915/desi-odin.fits[SPECINFO]',
+        #'suprime': args.outdir+'/phot/desi-suprime.fits[SPECINFO]',
+        #'suprime': desi_root+'/users/raichoor/laelbg/suprime/v20230915/desi-suprime.fits[SPECINFO]',
+        }
+
+    fphotodirs = {
+        'odin': desi_root+'/users/raichoor/laelbg/odin/test/forjohn/v0/desi-odin.fits[PHOTINFO]',
+        'clauds': desi_root+'/users/raichoor/laelbg/clauds/test/forjohn/v0/desi-clauds.fits[PHOTOFFINFO]',
+        'suprime': desi_root+'/users/raichoor/laelbg/suprime/test/forjohn/v0/desi-suprime.fits[PHOTINFO]',
+        #'odin': args.outdir+'/phot/desi-odin.fits[PHOTINFO]',
+        #'odin': desi_root+'/users/raichoor/laelbg/odin/v20230915/desi-odin.fits[PHOTINFO]',
+        #'clauds': desi_root+'/users/raichoor/laelbg/clauds/test/forjohn/v0/desi-clauds.fits[PHOTOFFINFO]',
+        #'suprime': args.outdir+'/phot/desi-suprime.fits[PHOTINFO]',
+        #'suprime': desi_root+'/users/raichoor/laelbg/suprime/v20230915/desi-suprime.fits[PHOTINFO]',
+        }
+
+    fphotofiles = {
+        'odin': args.outdir+'/phot/odin-photoinfo.yaml',
+        'clauds': args.outdir+'/phot/clauds-photoinfo.yaml',
+        'suprime': args.outdir+'/phot/suprime-photoinfo.yaml',
+        }
+
+    fspecdir = fspecdirs[args.selection]
+    fphotodir = fphotodirs[args.selection]
+    fphotofile = fphotofiles[args.selection]
+
+    fspecdir, fspecext = parse_fphotodir(fspecdir)
+    fphotobasedir, fphotoext = parse_fphotodir(fphotodir)
+
+    if args.fastphot:
+        extname = 'FASTPHOT'
+        prefix = 'fastphot'
+        fits = 'fits'
+    else:
+        extname = 'FASTSPEC'
+        prefix = 'fastspec'
+        fits = 'fits.gz'
+
+    if args.vi_redshifts:
+        prefix += '-vi'
+        
+    outdir = os.path.join(args.outdir, args.selection, prefix)
+
+    if not os.path.isdir(outdir):
+        os.makedirs(outdir, exist_ok=True)
+
+    if args.merge:
+        from fastspecfit.mpi import _domerge
+        mergefile = os.path.join(args.outdir, args.selection, f'{prefix}-{args.selection}.fits')
+        if not os.path.isfile(mergefile) or args.overwrite:
+            fastfiles = glob(os.path.join(outdir, f'{prefix}-*.fits*'))
+            #fastfiles = glob(os.path.join(outdir, f'{prefix}?????.fits*'))
+            _domerge(fastfiles, extname=extname, mergefile=mergefile,
+                     fastphot=args.fastphot, mp=args.mp)
+        else:
+            log.info(f'Output file {mergefile} exists; use --overwrite to, well, overwrite.')
+    elif args.makeqa:
+        qadir = os.path.join(args.outdir, tertiary, f'{fcmd}', 'qa')
+        if not os.path.isdir(qadir):
+            os.makedirs(qadir, exist_ok=True)
+        fastfiles = glob(os.path.join(args.outdir, tertiary, f'{fcmd}', f'{prefix}?????.fits*'))
+        for fastfile in fastfiles:
+            healpix = os.path.basename(fastfile).split('-')[1].split('.')[0]
+            redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
+            cmd = f'fastspecfit-qa {fastfile} -o {qadir} --redrockfiles {redrockfile} --mp {args.mp} '
+            cmd += f'--fphotodir {fphotodir} --fphotofile {fphotofile} --maxphotwave {maxphotwave}'
+            if args.ntargets:
+                cmd += f' --ntargets {args.ntargets}'
+            if args.overwrite:
+                cmd += ' --overwrite'
+            log.info(cmd)
+            err = subprocess.call(cmd.split())
+    elif args.redrock:
+        outdir = os.path.join(args.outdir, tertiary)
+        #log.info('Hack -- just refitting a small subset of objects!')
+        #mergefile = os.path.join(outdir, 'fastspec-vi-tertiary26.fits')
+        #mm = Table(fitsio.read(mergefile, 'METADATA'))
+        mergefile = os.path.join(outdir, 'VI_dey_Subaru.fits.gz')
+        mm = Table(fitsio.read(mergefile))
+        mm.rename_column('VI_TARGETID', 'TARGETID')
+        mm['HEALPIX'] = radec2pix(64, mm['RA'], mm['DEC'])        
+
+        for healpix in sorted(set(mm['HEALPIX'])):
+            I = mm['HEALPIX'] == healpix
+            targetids = ','.join(mm['TARGETID'][I].astype(str))
+
+            coaddfile = os.path.join(datadir, f'coadd-{healpix}.fits')
+            redrockfile = os.path.join(outdir, f'redrock-nmf-{healpix}.fits')
+
+            cmd = f'rrdesi -i {coaddfile} -o {redrockfile} --targetids {targetids} --mp {args.mp}'
+            log.info(cmd)
+            err = subprocess.call(cmd.split())            
+    elif args.makehtml:
+        raise NotImplementedError
+    else:
+        fphoto = Table(fitsio.read(fphotobasedir, ext=fphotoext))
+        log.info(f'Read {len(fphoto):,d} objects from {fphotobasedir}')
+
+        fspec = Table(fitsio.read(fspecdir, ext=fspecext))
+        log.info(f'Read {len(fspec):,d} objects from {fspecdir}')
+        assert(np.all(fspec['TARGETID'] == fphoto['TARGETID']))
+
+        if args.targetids:
+            I = np.where(np.isin(fspec['TARGETID'], np.array(','.split(args.targetids))))[0]
+            log.info(f'Trimming to {len(I):,d} specified TARGETIDs.')
+            fphoto = fphoto[I]
+            fspec = fspec[I]
+
+        if args.vi_redshifts:
+            I = np.where(np.isfinite(fspec['VI_Z']) * (fspec['VI_Z'] > 1e-3) * (fspec['VI_QUALITY'] >= 3.))[0]
+            log.info(f'Trimming to {len(I):,d} objects with VI_Z>0.001 and VI_QUALITY>=3.')
+            fphoto = fphoto[I]
+            fspec = fspec[I]
+
+        for coaddfile in sorted(set(fspec['COADDFN']))[:1]:
+            I = coaddfile == fspec['COADDFN']
+            if args.vi_redshifts:
+                targetids = ','.join(fspec['TARGETID'][I].astype(str))
+                input_redshifts = ','.join(fspec['VI_Z'][I].astype(str))
+                
+            redrockfile = coaddfile.replace('coadd-', 'redrock-')
+            fastfile = os.path.join(outdir, os.path.basename(redrockfile).replace('redrock-', f'{prefix}-'))
+            if not args.fastphot:
+                fastfile += '.gz'
+            if not os.path.isfile(fastfile) or args.overwrite:
+                cmdargs = f'{redrockfile} -o {fastfile} --mp {args.mp} --fphotodir={fphotodir} --fphotofile={fphotofile}'
+                if args.ntargets:
+                    cmdargs += f' --ntargets {args.ntargets}'
+                if args.vi_redshifts:
+                    cmdargs += f' --targetids {targetids} --input-redshifts {input_redshifts}'
+
+                if args.fastphot:
+                    from fastspecfit.fastspecfit import fastphot as fast
+                    log.info(f'fastphot {cmdargs}')
+                else:
+                    from fastspecfit.fastspecfit import fastspec as fast
+                    log.info(f'fastspec {cmdargs}')
+                if args.nolog:
+                    fast(args=cmdargs.split())
+                else:
+                    logfile = fastfile.replace('.fits', '.log').replace('.gz', '')
+                    with stdouterr_redirected(to=logfile, overwrite=True):
+                        fast(args=cmdargs.split())
+            else:
+                log.info(f'Output file {fastfile} exists and --overwrite not set.')
+
+    #if args.vi_redshifts:
+    #    # Fit at the VI redshifts (only for Tertiary 18 or Tertiary 26).
+    #    if args.merge:
+    #        from fastspecfit.mpi import _domerge
+    #        mergefile = os.path.join(args.outdir, tertiary, f'{prefix}vi-{tertiary}.fits')
+    #        if not os.path.isfile(mergefile) or args.overwrite:
+    #            fastfiles = glob(os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-?????.fits*'))
+    #            _domerge(fastfiles, extname=fcmd.upper(), mergefile=mergefile,
+    #                     fastphot=args.fastphot, mp=args.mp)
+    #        else:
+    #            log.info(f'Output file {mergefile} exists; use --overwrite to, well, overwrite.')
+    #    elif args.makeqa:
+    #        qadir = os.path.join(args.outdir, tertiary, f'{prefix}vi', 'qa')
+    #        if not os.path.isdir(qadir):
+    #            os.makedirs(qadir, exist_ok=True)
+    #        fastfiles = glob(os.path.join(args.outdir, tertiary, f'{prefix}vi', f'{prefix}vi-?????.fits*'))
+    #        for fastfile in fastfiles:#[0:1]:
+    #            healpix = os.path.basename(fastfile).split('-')[2].split('.')[0]
+    #            redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
+    #            cmd = f'fastspecfit-qa {fastfile} -o {qadir} --redrockfiles {redrockfile} --mp {args.mp} '
+    #            cmd += f'--fphotodir {fphotodir} --fphotofile {fphotofile} --maxphotwave {maxphotwave} '
+    #            cmd += f'--emline_snrmin 1.0 --nsmoothspec 2'
+    #            if args.ntargets:
+    #                cmd += ' --ntargets {}'.format(args.ntargets)
+    #            if args.overwrite:
+    #                cmd += ' --overwrite'
+    #            #log.info('HACK!!!')
+    #            #cmd += ' --targetids 39089837499745334'
+    #            log.info(cmd)
+    #            err = subprocess.call(cmd.split())
+    #    elif args.makehtml:
+    #        raise NotImplementedError
+    #    else:
+    #        pass
+
+
+if __name__ == '__main__':
+    main()
