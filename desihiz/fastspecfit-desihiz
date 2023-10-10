@@ -1,13 +1,27 @@
 #!/usr/bin/env python
-"""
-Fit the DESI-II Tertiary tiles / observations--
+
+"""Fit the DESI-2 Hiz observations--
   https://data.desi.lbl.gov/desi/users/raichoor/tertiary-status/tertiary-status.html
 
-salloc -N 1 -C cpu -A desi -t 02:00:00 --qos interactive
-time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --vi-redshifts --mp 128 --overwrite --selection suprime 
+Three selections: odin, suprime, clauds
 
-salloc -N 1 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
-time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --run-redrock --selection suprime
+1. Run FastSpecFit with the VI redshifts.
+  salloc -N 1 -C cpu -A desi -t 03:00:00 --qos interactive
+  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --fastspec --selection suprime --mp 128 --vi-redshifts --overwrite 
+
+
+1. Run Redrock with the updated templates from the redrock-templates project.
+  salloc -N 1 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
+  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --run-redrock --selection suprime
+
+2. Gather Redrock fitting results.
+  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --gather-redrock --selection suprime
+
+3. Run FastSpecFit both with and without the VI redshifts.
+  salloc -N 1 -C cpu -A desi -t 02:00:00 --qos interactive
+  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --fastspec --selection suprime --mp 128 --overwrite 
+  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --fastspec --selection suprime --mp 128 --vi-redshifts --overwrite 
+
 
 """
 import pdb # for debugging
@@ -18,8 +32,7 @@ import numpy as np
 import fitsio
 from astropy.table import Table, vstack
 
-from desispec.parallel import stdouterr_redirected
-from desimodel.footprint import radec2pix
+from desitarget import geomask
 from desiutil.log import get_logger
 log = get_logger()
 
@@ -91,6 +104,98 @@ def read_desihiz(selection='odin', targetids=None, vi_redshifts=False):
 
     return fphoto, fspec
 
+def gather_redrock(selection='odin'):
+    """Merge the redrock results and make sure the final catalog is row-matched to
+    the parent catalog from Anand.
+
+    """
+    redrockdir = os.path.join(projectdir, selection, 'redux')
+    fphoto, fspec = read_desihiz(selection=selection)
+
+    rrmergefile = os.path.join(projectdir, selection, f'redrock-{selection}.fits')
+    if not os.path.isfile(rrmergefile) or overwrite:
+        zcat = []
+        rrfiles = glob(os.path.join(redrockdir, '*', 'redrock-?????.fits'))
+        if len(rrfiles) > 0:
+            for rrfile in rrfiles:
+                zcat.append(Table(fitsio.read(rrfile, 'REDSHIFTS')))
+            zcat = vstack(zcat)
+
+            zcat = zcat[geomask.match_to(zcat['TARGETID'], fspec['TARGETID'])]
+            assert(np.all(zcat['TARGETID'] == fspec['TARGETID']))
+            
+            zcat.write(rrmergefile, overwrite=True)
+            log.info(f'Wrote {len(zcat):,d} objects to {rrmergefile}')
+
+def run_fastspec(selection='odin', targetids=None, fastphot=False, vi_redshifts=False,
+                 mp=1, ntargets=None, nolog=False, overwrite=False):
+    """Wrapper to run FastSpecFit.
+
+    """
+    from desispec.parallel import stdouterr_redirected
+
+    if fastphot:
+        extname = 'FASTPHOT'
+        prefix = 'fastphot'
+        fits = 'fits'
+    else:
+        extname = 'FASTSPEC'
+        prefix = 'fastspec'
+        fits = 'fits.gz'
+
+    if vi_redshifts:
+        prefix += '-vi'
+        
+    fphoto, fspec = read_desihiz(selection=selection, targetids=targetids,
+                                 vi_redshifts=vi_redshifts)
+
+    fphotodir = fphotodirs[selection]    
+    fphotofile = fphotofiles[selection]
+
+    for orig_coaddfile in sorted(set(fspec['COADDFN'])):
+        I = orig_coaddfile == fspec['COADDFN']
+        healpix = fspec['HEALPIX'][I][0]
+        
+        if vi_redshifts:
+            targetids = ','.join(fspec['TARGETID'][I].astype(str))
+            input_redshifts = ','.join(fspec['VI_Z'][I].astype(str))
+
+        # look for the coadd and redrock file after running --run-redrock
+        subdir = orig_coaddfile.split('/')[-2]
+        coadddir = os.path.join(projectdir, selection, 'redux', subdir)
+
+        fastdir = os.path.join(projectdir, selection, prefix, subdir)
+        if not os.path.isdir(fastdir):
+            os.makedirs(fastdir, exist_ok=True)
+        fastfile = os.path.join(fastdir, f'{prefix}-{healpix}.fits')
+
+        if not fastphot:
+            fastfile += '.gz'
+
+        redrockfile = os.path.join(projectdir, selection, 'redux', subdir, f'redrock-{healpix}.fits')
+
+        if not os.path.isfile(fastfile) or overwrite:
+            cmdargs = f'{redrockfile} -o {fastfile} --mp {mp} --fphotodir={fphotodir} --fphotofile={fphotofile} --ignore-quasarnet'
+            if ntargets:
+                cmdargs += f' --ntargets {ntargets}'
+            if vi_redshifts:
+                cmdargs += f' --targetids {targetids} --input-redshifts {input_redshifts}'
+            if fastphot:
+                from fastspecfit.fastspecfit import fastphot as fast
+                log.info(f'fastphot {cmdargs}')
+            else:
+                from fastspecfit.fastspecfit import fastspec as fast
+                log.info(f'fastspec {cmdargs}')
+            if nolog:
+                fast(args=cmdargs.split())
+            else:
+                logfile = fastfile.replace('.fits', '.log').replace('.gz', '')
+                with stdouterr_redirected(to=logfile, overwrite=True):
+                    fast(args=cmdargs.split())
+        else:
+            log.info(f'Output file {fastfile} exists and --overwrite not set.')
+
+
 def run_redrock(selection='odin', targetids=None, rrdetails=False, overwrite=False):
     """Wrapper to run Redrock on the VI healpixels.
 
@@ -98,16 +203,20 @@ def run_redrock(selection='odin', targetids=None, rrdetails=False, overwrite=Fal
     from redrock.external.desi import rrdesi
     from desispec.io import read_spectra, write_spectra
 
-    outdir = os.path.join(projectdir, selection, 'redux')
-    if not os.path.isdir(outdir):
-        os.makedirs(outdir, exist_ok=True)
+    baseoutdir = os.path.join(projectdir, selection, 'redux')
+    if not os.path.isdir(baseoutdir):
+        os.makedirs(baseoutdir, exist_ok=True)
 
     fphoto, fspec = read_desihiz(selection=selection, targetids=targetids)
-
     for orig_coaddfile in sorted(set(fspec['COADDFN'])):
         I = orig_coaddfile == fspec['COADDFN']
         healpix = fspec['HEALPIX'][I][0]
         alltargetids = fspec['TARGETID'][I].data
+
+        subdir = orig_coaddfile.split('/')[-2]
+        outdir = os.path.join(projectdir, selection, 'redux', subdir)
+        if not os.path.isdir(outdir):
+            os.makedirs(baseoutdir, exist_ok=True)
 
         # copy the data just in case we want to run the after-burners
         coaddfile = os.path.join(outdir, f'coadd-{healpix}.fits')
@@ -138,37 +247,31 @@ def main():
     from importlib import resources
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--selection', type=str, choices=['odin', 'suprime', 'clauds'], help='Sample selection to model.')
+    parser.add_argument('--selection', type=str, required=True, choices=['odin', 'suprime', 'clauds'], help='Sample selection to model.')
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
     parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
     parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
+
+    parser.add_argument('--fastspec', action='store_true', help='Run fastspec.')
     parser.add_argument('--fastphot', action='store_true', help='Fit just the broadband photometry.')
-    parser.add_argument('--vi-redshifts', action='store_true', help='Refit at the VI redshifts.')
-    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing files.')
-    parser.add_argument('--nolog', action='store_true', help='Do not write a log (useful for debugging).')
+    parser.add_argument('--fastspec-qa', action='store_true', help='Build fastspecfit QA.')
+
     parser.add_argument('--run-redrock', action='store_true', help='Run Redrock.')
-    parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
-    parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
+    parser.add_argument('--gather-redrock', action='store_true', help='Gather the Redrock results.')
+    parser.add_argument('--gather-fastspec', action='store_true', help='Merge all individual fast{spec,phot} catalogs into one large file.')
     parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
+
+    parser.add_argument('--vi-redshifts', action='store_true', help='Refit at the VI redshifts.')
+    parser.add_argument('--nolog', action='store_true', help='Do not write a log (useful for debugging).')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing files.')
     args = parser.parse_args()
 
-    if args.fastphot:
-        extname = 'FASTPHOT'
-        prefix = 'fastphot'
-        fits = 'fits'
-    else:
-        extname = 'FASTSPEC'
-        prefix = 'fastspec'
-        fits = 'fits.gz'
+    if args.fastspec or args.fastphot:
+        run_fastspec(selection=args.selection, targetids=args.targetids, fastphot=args.fastphot,
+                     vi_redshifts=args.vi_redshifts, overwrite=args.overwrite, nolog=args.nolog,
+                     ntargets=args.ntargets, mp=args.mp)
 
-    if args.vi_redshifts:
-        prefix += '-vi'
-        
-    fastdir = os.path.join(projectdir, args.selection, prefix)
-    if not os.path.isdir(fastdir):
-        os.makedirs(fastdir, exist_ok=True)
-
-    if args.merge:
+    if args.gather_fastspec:
         from fastspecfit.mpi import _domerge
         mergefile = os.path.join(projectdir, args.selection, f'{prefix}-{args.selection}.fits')
         if not os.path.isfile(mergefile) or args.overwrite:
@@ -178,11 +281,13 @@ def main():
                      fastphot=args.fastphot, mp=args.mp)
         else:
             log.info(f'Output file {mergefile} exists; use --overwrite to, well, overwrite.')
-    elif args.makeqa:
-        qadir = os.path.join(projectdir, tertiary, f'{fcmd}', 'qa')
+            
+    if args.fastspec_qa:
+        qadir = os.path.join(projectdir, args.selection, f'qa-{prefix}')
         if not os.path.isdir(qadir):
             os.makedirs(qadir, exist_ok=True)
-        fastfiles = glob(os.path.join(projectdir, tertiary, f'{fcmd}', f'{prefix}?????.fits*'))
+            
+        fastfiles = glob(os.path.join(fastdir, f'{prefix}-*.fits*'))
         for fastfile in fastfiles:
             healpix = os.path.basename(fastfile).split('-')[1].split('.')[0]
             redrockfile = os.path.join(datadir, f'redrock-{healpix}.fits')
@@ -194,49 +299,16 @@ def main():
                 cmd += ' --overwrite'
             log.info(cmd)
             err = subprocess.call(cmd.split())
-    elif args.run_redrock:
+            
+    if args.run_redrock:
         os.environ['RR_TEMPLATE_DIR'] = templatedir # note!
         run_redrock(selection=args.selection, targetids=args.targetids, overwrite=args.overwrite)
-    elif args.makehtml:
-        raise NotImplementedError
-    else:
-        fphoto, fspec = read_desihiz(selection=args.selection, targetids=args.targetids,
-                                     vi_redshifts=args.vi_redshifts)
         
-        fphotofile = fphotofiles[selection]
-
-        for coaddfile in sorted(set(fspec['COADDFN'])):
-            I = coaddfile == fspec['COADDFN']
-            if args.vi_redshifts:
-                targetids = ','.join(fspec['TARGETID'][I].astype(str))
-                input_redshifts = ','.join(fspec['VI_Z'][I].astype(str))
-                
-            redrockfile = coaddfile.replace('coadd-', 'redrock-')
-            fastfile = os.path.join(fastdir, os.path.basename(redrockfile).replace('redrock-', f'{prefix}-'))
-            if not args.fastphot:
-                fastfile += '.gz'
-            if not os.path.isfile(fastfile) or args.overwrite:
-                cmdargs = f'{redrockfile} -o {fastfile} --mp {args.mp} --fphotodir={fphotodir} --fphotofile={fphotofile}'
-                if args.ntargets:
-                    cmdargs += f' --ntargets {args.ntargets}'
-                if args.vi_redshifts:
-                    cmdargs += f' --targetids {targetids} --input-redshifts {input_redshifts}'
-
-                if args.fastphot:
-                    from fastspecfit.fastspecfit import fastphot as fast
-                    log.info(f'fastphot {cmdargs}')
-                else:
-                    from fastspecfit.fastspecfit import fastspec as fast
-                    log.info(f'fastspec {cmdargs}')
-                if args.nolog:
-                    fast(args=cmdargs.split())
-                else:
-                    logfile = fastfile.replace('.fits', '.log').replace('.gz', '')
-                    with stdouterr_redirected(to=logfile, overwrite=True):
-                        fast(args=cmdargs.split())
-            else:
-                log.info(f'Output file {fastfile} exists and --overwrite not set.')
-
+    if args.gather_redrock:
+        gather_redrock(selection=args.selection)
+        
+    if args.makehtml:
+        raise NotImplementedError
 
 if __name__ == '__main__':
     main()

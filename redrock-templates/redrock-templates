@@ -9,29 +9,36 @@ Dependencies:
 --empca
 --setcoverpy
 
-1. Build the parent sample:
+1. Run fastspec on the desihiz suprime/odin/clauds VI samples.
+  salloc -N 1 -C cpu -A desi -t 04:00:00 --qos interactive
+  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --desihiz-fastspec --mp 64
+
+2. Gather the desihiz fastspec results and apply some basic redshift cuts.
+  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --desihiz-gather-fastspec --mp 48
+
+3. Build the BGS/LRG/ELG parent samples.
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --match-lss
     /global/cfs/cdirs/desi/spectro/fastspecfit/iron/v2.0/catalogs/fastspec-iron-sv3-{bright,dark}.fits
     /global/cfs/cdirs/desi/vac/edr/lss/v2.0/LSScats/clustering/{BGS_ANY,LRG,ELG}_{N,S}_clustering.dat.fits
 
-2. Make some parent QA:
+4. Make some parent QA:
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --parent-qa
 
-3. Build the parent (FastSpecFit, rest-frame) templates:
+5. Build the initial parent (FastSpecFit, rest-frame) templates:
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --parent-templates
 
-4. Build the empca and NMF eigentemplates:
+6. Build the empca (and NMF?) eigentemplates:
   salloc -N 1 -C cpu -A desi -t 00:20:00 --qos interactive
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --empca-templates
-  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --nmf-templates
+  [time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --nmf-templates]
 
-5. Generate QA of the parent templates and the resulting empca eigentemplates:
+7. Generate QA of the parent templates and the resulting empca eigentemplates:
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --template-qa
 
-6. Gather the --specprod Redrock results for the VI tiles and healpixels.
+8. Gather the {specprod} (iron) Redrock results for the VI tiles and healpixels.
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --gather-specprod-results
 
-7. Run Redrock with a few different priors:
+9. Run Redrock with a few different priors:
   salloc -N 1 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --run-redrock
 
@@ -74,13 +81,14 @@ from fastspecfit.util import trapz_rebin
 import seaborn as sns
 sns.set(context='talk', style='ticks', font_scale=0.9, palette='Set2')
 
-projectdir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'redrock-templates')
+desi_root = os.getenv('DESI_ROOT')
+projectdir = os.path.join(desi_root, 'users', 'ioannis', 'fastspecfit', 'redrock-templates')
 templatedir = os.path.join(projectdir, 'rrtemplates')
 fastdir = os.path.join(projectdir, 'fastspec')
 datadir = os.path.join(projectdir, 'data')
 qadir = os.path.join(projectdir, 'qa')
 
-tertiary26dir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'raichoor', 'laelbg', 'daily', 'healpix', 'tertiary26-thru20230416-v2')
+#tertiary26dir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'raichoor', 'laelbg', 'daily', 'healpix', 'tertiary26-thru20230416-v2')
 
 rrtemplatefile = os.path.join(templatedir, 'rrtemplate-galaxy.fits')
 
@@ -105,6 +113,24 @@ zlims = {
 
 # See Lan+23 (Fig 7) and Raichoor+23 (Fig 12)
 dchi2dict = {'BGS': 40., 'LRG': 15., 'ELG': 9., 'QSO': None, 'LAELBG': 30.}
+
+# from the desihiz project
+desihizdir = os.path.join(desi_root, 'users', 'ioannis', 'desihiz')
+fspecdirs = {
+    'odin': desi_root+'/users/raichoor/laelbg/odin/test/forjohn/v0/desi-odin.fits[SPECINFO]',
+    'clauds': desi_root+'/users/raichoor/laelbg/clauds/test/forjohn/v0/desi-clauds.fits[SPECINFO]',
+    'suprime': desi_root+'/users/raichoor/laelbg/suprime/test/forjohn/v0/desi-suprime.fits[SPECINFO]',
+    }
+fphotodirs = {
+    'odin': desi_root+'/users/raichoor/laelbg/odin/test/forjohn/v0/desi-odin.fits[PHOTINFO]',
+    'clauds': desi_root+'/users/raichoor/laelbg/clauds/test/forjohn/v0/desi-clauds.fits[PHOTOFFINFO]',
+    'suprime': desi_root+'/users/raichoor/laelbg/suprime/test/forjohn/v0/desi-suprime.fits[PHOTINFO]',
+    }
+fphotofiles = {
+    'odin': desihizdir+'/phot/odin-photoinfo.yaml',
+    'clauds': desihizdir+'/phot/clauds-photoinfo.yaml',
+    'suprime': desihizdir+'/phot/suprime-photoinfo.yaml',
+    }
 
 def get_version(specprod):
     ver = {'fuji': 'v3.0', 'guadalupe': 'v3.0', 'iron': 'v2.0'}
@@ -189,6 +215,131 @@ def read_vi(quality=2.5):
     allvi = allvi[uindx]
     
     return allvi
+
+def parse_fphotodir(fphotodir):
+    # parse the extension name, if any
+    fphotoext = None
+    photodir = os.path.dirname(fphotodir)
+    photobase = os.path.basename(fphotodir)
+    if '[' in photobase and ']' in photobase:
+        try:
+            fphotoext = photobase[photobase.find('[')+1:photobase.find(']')]
+            fphotodir = os.path.join(photodir, photobase[:photobase.find('[')])
+        except:
+            pass
+    return fphotodir, fphotoext        
+
+def read_desihiz(selection='odin', targetids=None, vi_redshifts=False):
+
+    fspecdir = fspecdirs[selection]
+    fphotodir = fphotodirs[selection]
+
+    fspecdir, fspecext = parse_fphotodir(fspecdir)
+    fphotobasedir, fphotoext = parse_fphotodir(fphotodir)
+
+    fphoto = Table(fitsio.read(fphotobasedir, ext=fphotoext))
+    log.info(f'Read {len(fphoto):,d} objects from {fphotobasedir}')
+
+    fspec = Table(fitsio.read(fspecdir, ext=fspecext))
+    log.info(f'Read {len(fspec):,d} objects from {fspecdir}')
+    assert(np.all(fspec['TARGETID'] == fphoto['TARGETID']))
+
+    if targetids:
+        I = np.where(np.isin(fspec['TARGETID'], np.array(','.split(targetids))))[0]
+        log.info(f'Trimming to {len(I):,d} specified TARGETIDs.')
+        fphoto = fphoto[I]
+        fspec = fspec[I]
+
+    if vi_redshifts:
+        #I = np.where(np.isfinite(fspec['VI_Z']) * (fspec['VI_Z'] > 1e-3))[0]
+        #log.info(f'Trimming to {len(I):,d} objects with VI_Z>0.001.')
+        I = np.where(np.isfinite(fspec['VI_Z']) * (fspec['VI_Z'] > 1e-3) * (fspec['VI_QUALITY'] >= 3.))[0]
+        log.info(f'Trimming to {len(I):,d} objects with VI_Z>0.001 and VI_QUALITY>=3.')
+        fphoto = fphoto[I]
+        fspec = fspec[I]
+
+    return fphoto, fspec
+
+def desihiz_fastspec(mp=1, overwrite=False):
+    """Wrapper to run FastSpecFit.
+
+    """
+    from desispec.parallel import stdouterr_redirected
+    from fastspecfit.fastspecfit import fastspec as fast
+
+    nolog = False
+    vi_redshifts = True
+
+    extname = 'FASTSPEC'
+    prefix = 'fastspec'
+    fits = 'fits.gz'
+    if vi_redshifts:
+        prefix += '-vi'
+
+    for selection in ['suprime', 'odin', 'clauds']:
+        fphoto, fspec = read_desihiz(selection=selection, vi_redshifts=vi_redshifts)
+        fphotodir = fphotodirs[selection]    
+        fphotofile = fphotofiles[selection]
+    
+        for coaddfile in sorted(set(fspec['COADDFN'])):
+            redrockfile = coaddfile.replace('coadd-', 'redrock-')
+            subdir = coaddfile.split('/')[-2]
+
+            I = coaddfile == fspec['COADDFN']
+            healpix = fspec['HEALPIX'][I][0]
+            
+            if vi_redshifts:
+                targetids = ','.join(fspec['TARGETID'][I].astype(str))
+                input_redshifts = ','.join(fspec['VI_Z'][I].astype(str))
+
+            fastdir = os.path.join(projectdir, prefix, selection, subdir)
+            if not os.path.isdir(fastdir):
+                os.makedirs(fastdir, exist_ok=True)
+            fastfile = os.path.join(fastdir, f'{prefix}-{healpix}.fits.gz')
+    
+            if not os.path.isfile(fastfile) or overwrite:
+                cmdargs = f'{redrockfile} -o {fastfile} --mp {mp} --fphotodir={fphotodir} --fphotofile={fphotofile} --ignore-quasarnet'
+                if vi_redshifts:
+                    cmdargs += f' --targetids {targetids} --input-redshifts {input_redshifts}'
+                log.info(f'fastspec {cmdargs}')
+                if nolog:
+                    fast(args=cmdargs.split())
+                else:
+                    logfile = fastfile.replace('.fits', '.log').replace('.gz', '')
+                    with stdouterr_redirected(to=logfile, overwrite=True):
+                        fast(args=cmdargs.split())
+            else:
+                log.info(f'Output file {fastfile} exists and --overwrite not set.')
+
+def desihiz_gather_fastspec(mp=1, overwrite=False):
+    """Gather the desihiz fastspec results."""
+    from fastspecfit.io import read_fastspecfit, write_fastspecfit
+    from fastspecfit.mpi import _domerge
+    for selection in ['suprime', 'odin', 'clauds']:    
+        mergefile = os.path.join(datadir, f'fastspec-vi-desihiz-{selection}.fits')
+        if not os.path.isfile(mergefile) or overwrite:
+            fastfiles = glob(os.path.join(projectdir, 'fastspec-vi', selection, '*', 'fastspec-vi-?????.fits.gz'))
+            _domerge(fastfiles, extname='FASTSPEC', mergefile=mergefile, mp=mp)
+        else:
+            log.info(f'Output file {mergefile} exists; use --overwrite to, well, overwrite.')
+
+    # Now merge the results after applying some basic redshift cuts.
+    fastfile = os.path.join(datadir, 'fastspec-vi-desihiz.fits')    
+    fast, meta = [], []
+    for selection in ['suprime', 'odin', 'clauds']:
+        mergefile = os.path.join(datadir, f'fastspec-vi-desihiz-{selection}.fits')
+        allfast, allmeta, _, _ = read_fastspecfit(mergefile)
+        allmeta['SELECTION'] = selection
+        # trim to 2 < z < 4
+        I = (np.sum(allfast['COEFF'], axis=1) > 0.) * (allmeta['Z'] > 2.) * (allmeta['Z'] < 4.)
+        fast.append(allfast[I])
+        meta.append(allmeta[I])
+    fast = vstack(fast)
+    meta = vstack(meta)
+    write_fastspecfit(fast, meta, outfile=fastfile, verbose=True)
+
+    #dd = fitsio.read('/global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/data/fastspec-vi-desihiz.fits', 'METADATA')
+    #plt.clf() ; _=plt.hist(dd['Z'], bins=100) ; plt.yscale('log') ; plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp/junk.png')
 
 def match_lss(specprod='iron', overwrite=False):
     """Match to the clustering catalogs (full and clustering).
@@ -1570,6 +1721,8 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--desihiz-fastspec', action='store_true', help='Run fastspec on the desihiz sample.')
+    parser.add_argument('--desihiz-gather-fastspec', action='store_true', help='Gather the desihiz fastspec results.')
     parser.add_argument('--match-lss', action='store_true', help='Match to the LSS catalogs (no figures, just catalogs).')
     parser.add_argument('--parent-qa', action='store_true', help='QA of the parent sample.')
     parser.add_argument('--parent-templates', action='store_true', help='Build the parent rest-frame templates.')
@@ -1593,7 +1746,20 @@ def main():
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')    
     args = parser.parse_args()
 
+    # https://docs.nersc.gov/development/languages/python/parallel-python/#use-the-spawn-start-method
+    if args.mp > 1 and 'NERSC_HOST' in os.environ:
+        import multiprocessing
+        multiprocessing.set_start_method('spawn')
+
     rand = np.random.RandomState(seed=1)
+
+    # run fastspec on the VId desihiz sample.
+    if args.desihiz_fastspec:
+        desihiz_fastspec(mp=args.mp, overwrite=args.overwrite)
+
+    # gather the desihiz fastspec results
+    if args.desihiz_gather_fastspec:
+        desihiz_gather_fastspec(mp=args.mp, overwrite=args.overwrite)
 
     # build the parent samples
     if args.match_lss:
@@ -1604,6 +1770,26 @@ def main():
 
     # build the rest-frame templates
     if args.parent_templates:
+        # desihiz
+        from fastspecfit.io import read_fastspecfit
+        fast, meta = [], []
+        for selection, nrows in zip(['suprime', 'odin', 'clauds'], [500, 500, 500]):
+            fastfile = os.path.join(datadir, f'fastspec-vi-desihiz-{selection}.fits')
+            allfast, allmeta, _, _ = read_fastspecfit(fastfile)
+
+            I = rand.choice(len(allmeta), size=nrows, replace=False)
+            fast.append(allfast[I])
+            meta.append(allmeta[I])
+
+        fast = vstack(fast)
+        meta = vstack(meta)
+    
+        outfile = os.path.join(datadir, f'ftemplates-vi-desihiz.fits')            
+        restframe_templates(fast, meta, outfile, minwave=args.minwave,
+                            maxwave=args.maxwave, dwave=args.dwave)
+        pdb.set_trace()
+    
+        # desi-main
         for targtype, nrows in zip(['BGS_ANY', 'LRG', 'ELG'], [10000, 5000, 5000]):
             data = read_clustering(targetclass=targtype, read_lss=True, trim_broad=True)#, rows=np.arange(10))
             fast, meta, lss = data[targtype]['fast'], data[targtype]['meta'], data[targtype]['lss']
