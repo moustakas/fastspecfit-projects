@@ -9,9 +9,10 @@ Dependencies:
 --empca
 --setcoverpy
 
-1. Run fastspec on the desihiz suprime/odin/clauds VI samples.
+1. Run fastspec on the desihiz suprime/odin/clauds VI samples and, optionally, generate QA.
   salloc -N 1 -C cpu -A desi -t 04:00:00 --qos interactive
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --desihiz-fastspec --mp 64
+  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --desihiz-fastspec-qa --ntargets 2 --mp 2
 
 2. Gather the desihiz fastspec results and apply some basic redshift cuts.
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --desihiz-gather-fastspec --mp 48
@@ -42,9 +43,6 @@ Dependencies:
   salloc -N 1 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --run-redrock
 
-  salloc -N 4 -C cpu -A desi -t 04:00:00 --qos interactive
-  srun -N 4 --ntasks 16 ./redrock-templates.sh
-
   For testing:
     salloc -N 1 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
     fastspecfit
@@ -53,14 +51,13 @@ Dependencies:
       -o /global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/redux/redrock-27247.fits \
       -d /global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/redux/rrdetails-27247.h5 --gpu --max-gpuprocs=4 --mp 1
 
-7. Build QA:
+10. Gather the Redrock fitting results and build QA:
   time $HOME/code/desihub/fastspecfit-projects/redrock-templates/redrock-templates --redshift-qa
 
 
-8. Investigate outliers...
-
-  fastspec /global/cfs/cdirs/desi/spectro/redux/iron/tiles/cumulative/80613/20210324/redrock-2-80613-thru20210324.fits --targetids 39633324615930329 -o fastspec.fits --input-redshifts 1.9227369195305137
-fastqa fastspec.fits -o ioannis/tmp2
+11. Investigate outliers...
+  fastspec /global/cfs/cdirs/desi/spectro/redux/iron/tiles/cumulative/80613/20210324/redrock-2-80613-thru20210324.fits --targetids 39633324615930329 -o fastspec.fits --input-  redshifts 1.9227369195305137
+  fastqa fastspec.fits -o ioannis/tmp2
 
 """
 import os, pdb
@@ -103,16 +100,16 @@ zlims = {
     'LRG-zscan01':    [-0.15, 2.],
     'ELG-zscan01':    [-0.15, 5.],
     'QSO-zscan01':    [-0.15, 5.],
-    'LAELBG-zscan01': [-0.15, 5.],
+    'desihiz-zscan01': [-0.15, 5.],
     'BGS-zscan02':    [-0.15, 4.],
     'LRG-zscan02':    [-0.15, 4.],
     'ELG-zscan02':    [-0.15, 5.],
     'QSO-zscan02':    [-0.15, 5.],
-    'LAELBG-zscan02': [-0.15, 5.],
+    'desihiz-zscan02': [-0.15, 5.],
     }
 
 # See Lan+23 (Fig 7) and Raichoor+23 (Fig 12)
-dchi2dict = {'BGS': 40., 'LRG': 15., 'ELG': 9., 'QSO': None, 'LAELBG': 30.}
+dchi2dict = {'BGS': 40., 'LRG': 15., 'ELG': 9., 'QSO': None, 'desihiz': 30.}
 
 # from the desihiz project
 desihizdir = os.path.join(desi_root, 'users', 'ioannis', 'desihiz')
@@ -149,51 +146,51 @@ def get_vacdir(specprod='fuji', version=None):
 
     return vacdir
 
-def read_vi_tertiary26():
-    """Read the tertiary26 LAE/LBG VI results.
-
-    """
-    from desimodel.footprint import radec2pix    
-        
-    vifile = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'tertiary', 'deep-photometry', 'vi', 'FINAL_VI_Subaru_COSMOS.fits')
-    vi = Table(fitsio.read(vifile))
-    vi.rename_columns(['VI_Z_FINAL', 'VI_QUALITY_FINAL', 'VI_COMMENTS_FINAL'], ['VI_Z', 'VI_QUALITY', 'VI_COMMENTS'])
-    I = np.where(vi['VI_QUALITY'] >=3)[0]
-    #I = (vi['VI_QUALITY'] >=3) * (vi['TERTIARY_TARGET'] == 'LAE_SUBARU ') * (vi['VI_Z'] > 2.4)#1e-3)    
-    log.info(f'Trimming to {len(I):,d}/{len(vi):,d} VI redshifts in {vifile}')
-    vi = vi[I]
-
-    # Now read the 'merge' catalog to figure out which healpixels we care about.
-    mergefile = os.path.join(tertiary26dir, 'merge-tertiary26-thru20230416-v2.fits')
-    mm = Table(fitsio.read(mergefile))
-    log.info(f'Read {len(mm):,d} objects from {mergefile}')
-    mm['HEALPIX'] = radec2pix(nside=64, ra=mm['TARGET_RA'], dec=mm['TARGET_DEC'])
-
-    mm = mm[geomask.match_to(mm['TARGETID'], vi['TARGETID'])]
-    assert(np.all(mm['TARGETID'] == vi['TARGETID']))
-    vi['HEALPIX'] = mm['HEALPIX']
-
-    vi['SUFFIX'] = 'LAELBG'
-    vi['GOOD_LAELBG'] = np.ones(len(vi), bool)
-
-    # assign a spectral type
-    vi['VI_SPECTYPE'] = ['Interloper'] # default
-    
-    I = ['LBG' in comment.upper() for comment in vi['VI_COMMENTS']]
-    vi['VI_SPECTYPE'][I] = 'LBG'
-    
-    I = ['LAE' in comment.upper() for comment in vi['VI_COMMENTS']]
-    vi['VI_SPECTYPE'][I] = 'LAE'
-    
-    I = ['QSO' in comment.upper() for comment in vi['VI_COMMENTS']]
-    vi['VI_SPECTYPE'][I] = 'QSO'
-
-    #I = ['STAR' in comment.upper() for comment in vi['VI_COMMENTS']]
-    #vi['VI_SPECTYPE'][I] = 'STAR'
-    
-    #vi = join(mm, vi, keys='TARGETID')
-
-    return vi
+#def read_vi_tertiary26():
+#    """Read the tertiary26 LAE/LBG VI results.
+#
+#    """
+#    from desimodel.footprint import radec2pix    
+#        
+#    vifile = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'tertiary', 'deep-photometry', 'vi', 'FINAL_VI_Subaru_COSMOS.fits')
+#    vi = Table(fitsio.read(vifile))
+#    vi.rename_columns(['VI_Z_FINAL', 'VI_QUALITY_FINAL', 'VI_COMMENTS_FINAL'], ['VI_Z', 'VI_QUALITY', 'VI_COMMENTS'])
+#    I = np.where(vi['VI_QUALITY'] >=3)[0]
+#    #I = (vi['VI_QUALITY'] >=3) * (vi['TERTIARY_TARGET'] == 'LAE_SUBARU ') * (vi['VI_Z'] > 2.4)#1e-3)    
+#    log.info(f'Trimming to {len(I):,d}/{len(vi):,d} VI redshifts in {vifile}')
+#    vi = vi[I]
+#
+#    # Now read the 'merge' catalog to figure out which healpixels we care about.
+#    mergefile = os.path.join(tertiary26dir, 'merge-tertiary26-thru20230416-v2.fits')
+#    mm = Table(fitsio.read(mergefile))
+#    log.info(f'Read {len(mm):,d} objects from {mergefile}')
+#    mm['HEALPIX'] = radec2pix(nside=64, ra=mm['TARGET_RA'], dec=mm['TARGET_DEC'])
+#
+#    mm = mm[geomask.match_to(mm['TARGETID'], vi['TARGETID'])]
+#    assert(np.all(mm['TARGETID'] == vi['TARGETID']))
+#    vi['HEALPIX'] = mm['HEALPIX']
+#
+#    vi['SUFFIX'] = 'LAELBG'
+#    vi['GOOD_LAELBG'] = np.ones(len(vi), bool)
+#
+#    # assign a spectral type
+#    vi['VI_SPECTYPE'] = ['Interloper'] # default
+#    
+#    I = ['LBG' in comment.upper() for comment in vi['VI_COMMENTS']]
+#    vi['VI_SPECTYPE'][I] = 'LBG'
+#    
+#    I = ['LAE' in comment.upper() for comment in vi['VI_COMMENTS']]
+#    vi['VI_SPECTYPE'][I] = 'LAE'
+#    
+#    I = ['QSO' in comment.upper() for comment in vi['VI_COMMENTS']]
+#    vi['VI_SPECTYPE'][I] = 'QSO'
+#
+#    #I = ['STAR' in comment.upper() for comment in vi['VI_COMMENTS']]
+#    #vi['VI_SPECTYPE'][I] = 'STAR'
+#    
+#    #vi = join(mm, vi, keys='TARGETID')
+#
+#    return vi
 
 def read_vi(quality=2.5):
     # see https://data.desi.lbl.gov/doc/releases/edr/vac/vi/
@@ -260,15 +257,12 @@ def read_desihiz(selection='odin', targetids=None, vi_redshifts=False):
 
     return fphoto, fspec
 
-def desihiz_fastspec(mp=1, overwrite=False):
+def desihiz_fastspec(mp=1, vi_redshifts=True, nolog=False, overwrite=False):
     """Wrapper to run FastSpecFit.
 
     """
     from desispec.parallel import stdouterr_redirected
     from fastspecfit.fastspecfit import fastspec as fast
-
-    nolog = False
-    vi_redshifts = True
 
     extname = 'FASTSPEC'
     prefix = 'fastspec'
@@ -311,6 +305,48 @@ def desihiz_fastspec(mp=1, overwrite=False):
             else:
                 log.info(f'Output file {fastfile} exists and --overwrite not set.')
 
+
+def desihiz_fastspec_qa(mp=1, targetids=None, ntargets=None, vi_redshifts=True, overwrite=False):
+    """Wrapper to generate FastSpecFit QA.
+
+    """
+    from fastspecfit.qa import fastqa
+
+    extname = 'FASTSPEC'
+    prefix = 'fastspec'
+    fits = 'fits.gz'
+    if vi_redshifts:
+        prefix += '-vi'
+
+    for selection in ['clauds']: #['suprime', 'odin', 'clauds']:
+        qadir = os.path.join(projectdir, prefix, selection, 'qa')
+        if not os.path.isdir(qadir):
+            os.makedirs(qadir, exist_ok=True)
+
+        fphoto, fspec = read_desihiz(selection=selection, vi_redshifts=vi_redshifts)
+        fphotodir = fphotodirs[selection]    
+        fphotofile = fphotofiles[selection]
+
+        for coaddfile in sorted(set(fspec['COADDFN'])):
+            redrockfile = coaddfile.replace('coadd-', 'redrock-')
+            subdir = coaddfile.split('/')[-2]
+
+            I = coaddfile == fspec['COADDFN']
+            healpix = fspec['HEALPIX'][I][0]
+
+            fastfile = os.path.join(projectdir, prefix, selection, subdir, f'{prefix}-{healpix}.fits.gz')
+            cmdargs = f'{fastfile} --redrockfiles {redrockfile} --mp {mp} --fphotodir={fphotodir} --fphotofile={fphotofile} -o {qadir} --nsmoothspec 2'
+            if ntargets or targetids:
+                if targetids:
+                    cmdargs += f' --targetids {targetids}'
+                else:
+                    cmdargs += f' --ntargets {ntargets}'
+            if overwrite:
+                cmdargs += ' --overwrite'
+            log.info(f'fastqa {cmdargs}')
+            fastqa(args=cmdargs.split())
+
+
 def desihiz_gather_fastspec(mp=1, overwrite=False):
     """Gather the desihiz fastspec results."""
     from fastspecfit.io import read_fastspecfit, write_fastspecfit
@@ -331,7 +367,7 @@ def desihiz_gather_fastspec(mp=1, overwrite=False):
         allfast, allmeta, _, _ = read_fastspecfit(mergefile)
         allmeta['SELECTION'] = selection
         # trim to 2 < z < 4
-        I = (np.sum(allfast['COEFF'], axis=1) > 0.) * (allmeta['Z'] > 2.) * (allmeta['Z'] < 4.)
+        I = (allfast['LOGMSTAR'] > 0.) * (allmeta['Z'] > 2.) * (allmeta['Z'] < 4.)
         fast.append(allfast[I])
         meta.append(allmeta[I])
     fast = vstack(fast)
@@ -559,14 +595,62 @@ def parent_qa(specprod='iron'):
     fig.savefig(pngfile)
     print(f'Wrote {pngfile}')
 
-def qa_vi_zhist():
-    """Redshift histogram of VId targets.
+def qa_zhist(vi=True):
+    """Redshift histogram.
 
     """
     from matplotlib import colors
 
+    zcatfile = os.path.join(projectdir, f'zcat-newtemplates-desihiz-zscan02.fits')
+    zcat = Table(fitsio.read(zcatfile))
+    if vi:
+        I = np.isfinite(zcat['VI_Z']) (zcat['VI_QUALITY'] >= 3.)
+    else:
+        I = (zcat['ZWARN'] == 0) * (zcat['COADD_FIBERSTATUS'] == 0) * (zcat['DELTACHI2'] > dchi2dict['desihiz'])
+    zcat = zcat[I]
+    
+    #vihiz = []
+    #for selection in ['suprime', 'odin', 'clauds']:    
+    #    _, _vihiz = read_desihiz(selection=selection)
+    #    _vihiz['SELECTION'] = selection
+    #    vihiz.append(_vihiz)
+    #vihiz = vstack(vihiz)
+
+    # VI - desihiz
+    cols = np.array([colors.to_hex(col) for col in ['darkgreen', 'darkred', 'darkblue']])
+    
+    zlim = (-0.1, 3.8)
+    
+    fig, xx = plt.subplots(figsize=(8, 6))
+    for selection, col in zip(['odin', 'clauds', 'suprime'], cols):
+        I = np.where(zcat['SELECTION'] == selection)[0]
+        if vi:
+            xx.hist(zcat['VI_Z'][I], bins=100, color=col, range=zlim, alpha=0.5,
+                    label=f'{selection} (N={len(I):,d})')
+        else:
+            xx.hist(zcat['Z'][I], bins=100, color=col, range=zlim, alpha=0.5,
+                    label=f'{selection} (N={len(I):,d})')
+    xx.legend(loc='upper left', fontsize=12)
+    if vi:
+        xx.set_xlabel('VI Redshift (Q>=3)')
+    else:
+        xx.set_xlabel('RR Redshift')
+    xx.set_ylabel('Number')
+    #xx.set_yscale('log')
+    xx.margins(x=0)
+    fig.tight_layout()
+
+    if vi:
+        pngfile = os.path.join(qadir, 'qa-desihiz-vi-zhist.png')
+    else:
+        pngfile = os.path.join(qadir, 'qa-desihiz-zhist.png')
+    fig.savefig(pngfile)
+    print(f'Wrote {pngfile}')
+
+    pdb.set_trace()
+
+    # VI/SV1 + desihiz
     vi = read_vi()
-    vi26 = read_vi_tertiary26()
 
     cols = np.array([colors.to_hex(col) for col in ['darkgreen', 'darkred', 'darkblue', 'black', 'orange']])
     
@@ -579,8 +663,9 @@ def qa_vi_zhist():
         I = np.where(vi['SUFFIX'] == targtype)[0]
         xx.hist(vi['VI_Z'][I], bins=50, color=col, range=zlim, alpha=0.5,
                 label=f'{targtype} (N={len(I):,d})')
-    xx.hist(vi26['VI_Z'], bins=50, color=cols[-1], range=zlim, alpha=0.5,
-            label=f'LAE/LBG (N={len(vi26):,d})')
+
+    xx.hist(vihiz['VI_Z'], bins=50, color=cols[-1], range=zlim, alpha=0.5,
+            label=f'LAE/LBG (N={len(vihiz):,d})')
 
     hh, ll = xx.get_legend_handles_labels()
     xx.legend([hh[ii] for ii in srt+[4,]], [ll[ii] for ii in srt+[4,]], loc='upper right', fontsize=11)
@@ -850,6 +935,8 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4, dwave=
     for igal in range(ngal):
         norm = np.mean(templates[igal, :])
         #norm = np.interp(5500., templatewave, templates[igal, :])
+        #if norm == 0:
+        #    pdb.set_trace()
         outmeta['TEMPLATENORM'][igal] = norm
         templates[igal, :] /= norm
         templates_lowres[igal, :] /= norm
@@ -886,16 +973,16 @@ def restframe_templates(fast, meta, outfile, minwave=400., maxwave=1.1e4, dwave=
     print(f'Wrote {pngfile}')
 
 def gather_specprod_results(specprod='iron', overwrite=False):
-    """Wrapper to run Redrock on tiles / healpixels.
+    """Wrapper to gather nominal Redrock results.
 
     """
     from desispec.validredshifts import validate
 
-    zcatdir = os.path.join(projectdir, f'redux-{specprod}')
+    # VI tiles
+    zcatdir = os.path.join(projectdir, f'redux-{specprod}templates', 'vitiles')
     if not os.path.isdir(zcatdir):
         os.makedirs(zcatdir, exist_ok=True)
 
-    # VI tiles
     vi = read_vi()
     for tileid in sorted(set(vi['TILEID'])):
         T = tileid == vi['TILEID']
@@ -916,30 +1003,33 @@ def gather_specprod_results(specprod='iron', overwrite=False):
                 zcat.write(zcatfile, overwrite=True)
                 log.info(f'Wrote {len(zcat)} objects to {zcatfile}')
 
-    # VI healpixels
-    zcatdir = os.path.join(projectdir, f'redux-tertiary26')
-    if not os.path.isdir(zcatdir):
-        os.makedirs(zcatdir, exist_ok=True)
+    # desihiz healpixels
+    for selection in ['suprime', 'odin', 'clauds']:
+        fphoto, fspec = read_desihiz(selection=selection)
+        for coaddfile in sorted(set(fspec['COADDFN'])):
+            I = coaddfile == fspec['COADDFN']
+            healpix = fspec['HEALPIX'][I][0]
+            alltargetids = fspec['TARGETID'][I].data            
 
-    vi = read_vi_tertiary26()
-    for healpix in sorted(set(vi['HEALPIX'])):
-        H = healpix == vi['HEALPIX']
-        targetids = vi[H]['TARGETID'].data
+            redrockfile = coaddfile.replace('coadd-', 'redrock-')
+            subdir = coaddfile.split('/')[-2]            
 
-        # validate the original redrock redshifts
-        zcatfile = os.path.join(zcatdir, f'zcat-tertiary26-{healpix}.fits')
-        if not os.path.isfile(zcatfile) or overwrite:
-            orig_redrockfile = os.path.join(tertiary26dir, f'redrock-{healpix}.fits')
+            zcatdir = os.path.join(projectdir, f'redux-{specprod}templates', 'desihiz', selection, subdir)
+            if not os.path.isdir(zcatdir):
+                os.makedirs(zcatdir, exist_ok=True)
 
-            zcat = validate(orig_redrockfile, return_target_columns=True,
-                            extra_columns=['TARGETID', 'Z', 'Z_RR', 'ZWARN', 'COADD_FIBERSTATUS', 'SPECTYPE', 'DELTACHI2'])
-            zcat = zcat[geomask.match_to(zcat['TARGETID'], targetids)]
-            assert(np.all(zcat['TARGETID'] == targetids))
-            zcat.write(zcatfile, overwrite=True)
-            log.info(f'Wrote {len(zcat)} objects to {zcatfile}')
+            # validate the original redrock redshifts
+            zcatfile = os.path.join(zcatdir, f'zcat-{healpix}.fits')
+            if not os.path.isfile(zcatfile) or overwrite:
+                zcat = validate(redrockfile, return_target_columns=True,
+                                extra_columns=['TARGETID', 'Z', 'Z_RR', 'ZWARN', 'COADD_FIBERSTATUS', 'SPECTYPE', 'DELTACHI2'])
+                zcat = zcat[geomask.match_to(zcat['TARGETID'], alltargetids)]
+                assert(np.all(zcat['TARGETID'] == alltargetids))
+                zcat.write(zcatfile, overwrite=True)
+                log.info(f'Wrote {len(zcat)} objects to {zcatfile}')
 
 
-def run_redrock_tiles(zscan_prior='01', specprod='iron', rrdetails=False, overwrite=False):
+def run_redrock_tiles(zscan_prior='01', specprod='iron', afterburners=True, rrdetails=False, overwrite=False):
     """Wrapper to run Redrock on the VI tiles.
 
     """
@@ -947,11 +1037,12 @@ def run_redrock_tiles(zscan_prior='01', specprod='iron', rrdetails=False, overwr
     from desispec.io import read_spectra, write_spectra
     from desispec.util import runcmd
     from desispec.scripts import qsoqn, qsomgii, emlinefit
+    from desispec.validredshifts import validate
 
     # set the redshift scan prior
     zscan_galaxy = zscan_priors[zscan_prior]
 
-    outdir = os.path.join(projectdir, f'redux-zscan{zscan_prior}')
+    outdir = os.path.join(projectdir, f'redux-newtemplates-zscan{zscan_prior}', 'vitiles')
     if not os.path.isdir(outdir):
         os.makedirs(outdir, exist_ok=True)
 
@@ -978,6 +1069,7 @@ def run_redrock_tiles(zscan_prior='01', specprod='iron', rrdetails=False, overwr
             rrdetailsfile = os.path.join(outdir, f'rrdetails-{petal}-{tileid}.h5')
             if not os.path.isfile(redrockfile) or overwrite:
                 #cmd = f'-i {coaddfile} -o {redrockfile} -d {rrdetailsfile} --mp 1'
+                #cmd = f'-i {coaddfile} -o {redrockfile} --mp 24'
                 cmd = f'-i {coaddfile} -o {redrockfile} --gpu --max-gpuprocs=4 --mp 1'
                 if rrdetails:
                     cmd += f' -d {rrdetailsfile}'
@@ -988,19 +1080,27 @@ def run_redrock_tiles(zscan_prior='01', specprod='iron', rrdetails=False, overwr
             else:
                 log.info(f'Skipping existing file {redrockfile}')
 
-            for prefix, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'], [qsoqn.main, qsomgii.main, emlinefit.main]):
-                outfile = os.path.join(outdir, f'{prefix}-{petal}-{tileid}.fits')
-                if not os.path.isfile(outfile) or overwrite:
-                    cmd = f'desi_{prefix}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
-                    if 'qso_' in prefix:
-                        cmd += ' --target_selection all --save_target all'
-                    log.info(f'{runcmd} {cmd}')
-                    runcmd(maincmd, args=cmd.split()[1:], inputs=[coaddfile, redrockfile], outputs=[outfile])
-                else:
-                    log.info(f'Skipping existing file {outfile}')
+            if afterburners:
+                for prefix, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'], [qsoqn.main, qsomgii.main, emlinefit.main]):
+                    outfile = os.path.join(outdir, f'{prefix}-{petal}-{tileid}.fits')
+                    if not os.path.isfile(outfile) or overwrite:
+                        cmd = f'desi_{prefix}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
+                        if 'qso_' in prefix:
+                            cmd += ' --target_selection all --save_target all'
+                        log.info(f'{runcmd} {cmd}')
+                        runcmd(maincmd, args=cmd.split()[1:], inputs=[coaddfile, redrockfile], outputs=[outfile])
+                    else:
+                        log.info(f'Skipping existing file {outfile}')
+
+            # validate to create the summary catalog
+            zcatfile = os.path.join(outdir, f'zcat-{petal}-{tileid}.fits')
+            zcat = validate(redrockfile, return_target_columns=True, 
+                            extra_columns=['TARGETID', 'Z', 'Z_RR', 'ZWARN', 'COADD_FIBERSTATUS', 'SPECTYPE', 'DELTACHI2'])
+            zcat.write(zcatfile, overwrite=True)
+            log.info(f'Wrote {len(zcat)} objects to {zcatfile}')
 
 
-def run_redrock_healpix(zscan_prior='02', specprod='iron', rrdetails=False, overwrite=False):
+def run_redrock_desihiz(zscan_prior='02', afterburners=True, rrdetails=False, overwrite=False):
     """Wrapper to run Redrock on the VI healpixels.
 
     """
@@ -1008,122 +1108,139 @@ def run_redrock_healpix(zscan_prior='02', specprod='iron', rrdetails=False, over
     from desispec.io import read_spectra, write_spectra
     from desispec.util import runcmd
     from desispec.scripts import qsoqn, qsomgii, emlinefit
-
+    from desispec.validredshifts import validate
+    
     # set the redshift scan prior
     zscan_galaxy = zscan_priors[zscan_prior]
 
-    outdir = os.path.join(projectdir, f'redux-zscan{zscan_prior}')
-    if not os.path.isdir(outdir):
-        os.makedirs(outdir, exist_ok=True)
+    for selection in ['suprime', 'odin', 'clauds']:
+        baseoutdir = os.path.join(projectdir, f'redux-newtemplates-zscan{zscan_prior}', 'desihiz', selection)
+        if not os.path.isdir(baseoutdir):
+            os.makedirs(baseoutdir, exist_ok=True)
+    
+        fphoto, fspec = read_desihiz(selection=selection)
+        for orig_coaddfile in sorted(set(fspec['COADDFN'])):
+            log.info(f'Working on {orig_coaddfile}')
+            
+            I = orig_coaddfile == fspec['COADDFN']
+            healpix = fspec['HEALPIX'][I][0]
+            alltargetids = fspec['TARGETID'][I].data
+    
+            subdir = orig_coaddfile.split('/')[-2]
+            outdir = os.path.join(baseoutdir, subdir)
+            if not os.path.isdir(outdir):
+                os.makedirs(outdir, exist_ok=True)
+    
+            # copy the data just in case we want to run the after-burners
+            coaddfile = os.path.join(outdir, f'coadd-{healpix}.fits')
+            if not os.path.isfile(coaddfile) or overwrite:
+                spec = read_spectra(orig_coaddfile, targetids=alltargetids)
+                assert(np.all(spec.target_ids() == alltargetids))
+                log.info(f'Writing {len(alltargetids)} targets to {coaddfile}')
+                write_spectra(coaddfile, spec)
+                del spec
 
-    vi = read_vi_tertiary26()
-    for healpix in sorted(set(vi['HEALPIX'])):
-        H = healpix == vi['HEALPIX']
-        targetids = vi[H]['TARGETID'].data
-
-        # copy the data so we can run the after-burners
-        coaddfile = os.path.join(outdir, f'coadd-{healpix}.fits')
-        if not os.path.isfile(coaddfile) or overwrite:
-            orig_coaddfile = os.path.join(tertiary26dir, f'coadd-{healpix}.fits')
-            spec = read_spectra(orig_coaddfile, targetids=targetids)
-            assert(np.all(spec.target_ids() == targetids))
-            log.info(f'Writing {len(targetids)} targets to {coaddfile}')
-            write_spectra(coaddfile, spec)
-            del spec
-
-        redrockfile = os.path.join(outdir, f'redrock-{healpix}.fits')
-        rrdetailsfile = os.path.join(outdir, f'rrdetails-{healpix}.h5')
-        if not os.path.isfile(redrockfile) or overwrite:
-            #cmd = f'-i {coaddfile} -o {redrockfile} -d {rrdetailsfile} --mp 1'
-            cmd = f'-i {coaddfile} -o {redrockfile} --gpu --max-gpuprocs=4 --mp 1'
-            if rrdetails:
-                cmd += f' -d {rrdetailsfile}'
-            if zscan_galaxy is not None:
-                cmd += f' --zscan-galaxy={zscan_galaxy}'
-            log.info(f'rrdesi {cmd}')
-            rrdesi(cmd.split())
-        else:
-            log.info(f'Skipping existing file {redrockfile}')
-
-        for prefix, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'], [qsoqn.main, qsomgii.main, emlinefit.main]):
-            outfile = os.path.join(outdir, f'{prefix}-{healpix}.fits')
-            if not os.path.isfile(outfile) or overwrite:
-                cmd = f'desi_{prefix}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
-                if 'qso_' in prefix:
-                    cmd += ' --target_selection all --save_target all'
-                log.info(f'{runcmd} {cmd}')
-                runcmd(maincmd, args=cmd.split()[1:], inputs=[coaddfile, redrockfile], outputs=[outfile])
+            redrockfile = os.path.join(outdir, f'redrock-{healpix}.fits')
+            rrdetailsfile = os.path.join(outdir, f'rrdetails-{healpix}.h5')
+            if not os.path.isfile(redrockfile) or overwrite:
+                #cmd = f'-i {coaddfile} -o {redrockfile} --mp 24 --zscan-galaxy={zscan_galaxy}'
+                cmd = f'-i {coaddfile} -o {redrockfile} --gpu --max-gpuprocs=4 --mp 1 --zscan-galaxy={zscan_galaxy}'
+                if rrdetails:
+                    cmd += f' -d {rrdetailsfile}'
+                log.info(f'rrdesi {cmd}')
+                rrdesi(cmd.split())
             else:
-                log.info(f'Skipping existing file {outfile}')
+                log.info(f'Skipping existing file {redrockfile}')
+
+            if afterburners:
+                for prefix, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'], [qsoqn.main, qsomgii.main, emlinefit.main]):
+                    outfile = os.path.join(outdir, f'{prefix}-{healpix}.fits')
+                    if not os.path.isfile(outfile) or overwrite:
+                        cmd = f'desi_{prefix}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
+                        if 'qso_' in prefix:
+                            cmd += ' --target_selection all --save_target all'
+                        log.info(f'{runcmd} {cmd}')
+                        runcmd(maincmd, args=cmd.split()[1:], inputs=[coaddfile, redrockfile], outputs=[outfile])
+                    else:
+                        log.info(f'Skipping existing file {outfile}')
+
+            # validate to create the summary catalog
+            zcatfile = os.path.join(outdir, f'zcat-{healpix}.fits')
+            zcat = validate(redrockfile, return_target_columns=True, 
+                            extra_columns=['TARGETID', 'Z', 'Z_RR', 'ZWARN', 'COADD_FIBERSTATUS', 'SPECTYPE', 'DELTACHI2'])
+            zcat.write(zcatfile, overwrite=True)
+            log.info(f'Wrote {len(zcat)} objects to {zcatfile}')
 
 
 def gather_redrock_results(specprod='iron', overwrite=False):
     """Merge the EDR redshift-fitting results with the VI results.
 
     """
-    from desispec.validredshifts import validate
-
     # Iron - VI tiles
-    out_zcatfile = os.path.join(projectdir, f'zcat-{specprod}.fits')
+    out_zcatfile = os.path.join(projectdir, f'zcat-{specprod}templates-vitiles.fits')
     if not os.path.isfile(out_zcatfile) or overwrite:
         vi = read_vi()
-        zcatfiles = glob(os.path.join(projectdir, f'redux-{specprod}', f'zcat-{specprod}-[0-9]-?????.fits'))
+        zcatfiles = glob(os.path.join(projectdir, f'redux-{specprod}templates', 'vitiles', f'zcat-{specprod}-[0-9]-?????.fits'))
         zcat = vstack([Table(fitsio.read(zcatfile)) for zcatfile in zcatfiles])
         zcat = join(zcat, vi, keys='TARGETID')
         zcat.write(out_zcatfile, overwrite=True)
         log.info(f'Wrote {len(zcat):,d} objects to {out_zcatfile}')
 
-    # tertiary26 - VI healpix
-    out_zcatfile = os.path.join(projectdir, f'zcat-tertiary26.fits')
+    # Iron - desihiz healpixels
+    out_zcatfile = os.path.join(projectdir, f'zcat-{specprod}templates-desihiz.fits')
     if not os.path.isfile(out_zcatfile) or overwrite:
-        vi = read_vi_tertiary26()        
-        zcatfiles = glob(os.path.join(projectdir, 'redux-tertiary26', f'zcat-tertiary26-?????.fits'))
-        zcat = vstack([Table(fitsio.read(zcatfile)) for zcatfile in zcatfiles])
-        zcat = join(zcat, vi, keys='TARGETID')
-        zcat.write(out_zcatfile, overwrite=True)
-        log.info(f'Wrote {len(zcat):,d} objects to {out_zcatfile}')
+        allzcat = []
+        for selection in ['suprime', 'odin', 'clauds']:    
+            _, vi = read_desihiz(selection=selection)
+            zcatfiles = glob(os.path.join(projectdir, f'redux-{specprod}templates', 'desihiz', selection, '*', 'zcat-?????.fits'))
+            zcat = vstack([Table(fitsio.read(zcatfile)) for zcatfile in zcatfiles])
+            zcat = join(zcat, vi, keys='TARGETID')
+            if np.all(zcat['COADD_FIBERSTATUS_1'] == zcat['COADD_FIBERSTATUS_2']):
+                zcat.remove_column('COADD_FIBERSTATUS_2')
+                zcat.rename_column('COADD_FIBERSTATUS_1', 'COADD_FIBERSTATUS')
+            else:
+                raise ValueError('Mismatch here')
+            zcat['SELECTION'] = selection
+            allzcat.append(zcat)
+        allzcat = vstack(allzcat)
+        allzcat.write(out_zcatfile, overwrite=True)
+        log.info(f'Wrote {len(allzcat):,d} objects to {out_zcatfile}')
 
     # loop on all the redshift scans
     for zscan_prior in zscan_priors.keys():
-        outdir = os.path.join(projectdir, f'redux-zscan{zscan_prior}')
-        if not os.path.isdir(outdir):
-            continue
-
-        # VI / Iron tiles
-        out_zcatfile = os.path.join(projectdir, f'zcat-{specprod}-zscan{zscan_prior}.fits')
+        # new templates - VI tiles
+        out_zcatfile = os.path.join(projectdir, f'zcat-newtemplates-vitiles-zscan{zscan_prior}.fits')
         if not os.path.isfile(out_zcatfile) or overwrite:
-            zcat = []
-            rrfiles = glob(os.path.join(outdir, 'redrock-[0-9]-?????.fits'))
-            if len(rrfiles) > 0:
-                for rrfile in rrfiles:
-                    zcat1 = validate(rrfile, return_target_columns=True,
-                                     extra_columns=['TARGETID', 'Z', 'Z_RR', 'ZWARN', 'COADD_FIBERSTATUS', 'SPECTYPE', 'DELTACHI2'])
-                    zcat.append(zcat1)
-                zcat = vstack(zcat)
-        
+            zcatdir = os.path.join(projectdir, f'redux-newtemplates-zscan{zscan_prior}', 'vitiles')
+            if os.path.isdir(zcatdir):
                 vi = read_vi()
+                zcatfiles = glob(os.path.join(zcatdir, f'zcat-[0-9]-?????.fits'))
+                zcat = vstack([Table(fitsio.read(zcatfile)) for zcatfile in zcatfiles])
                 zcat = join(zcat, vi, keys='TARGETID')
-        
                 zcat.write(out_zcatfile, overwrite=True)
                 log.info(f'Wrote {len(zcat):,d} objects to {out_zcatfile}')
 
-        # VI / tertiary26 healpix
-        out_zcatfile = os.path.join(projectdir, f'zcat-tertiary26-zscan{zscan_prior}.fits')
+        # new templates - desihiz healpixels
+        out_zcatfile = os.path.join(projectdir, f'zcat-newtemplates-desihiz-zscan{zscan_prior}.fits')
         if not os.path.isfile(out_zcatfile) or overwrite:
-            zcat = []
-            rrfiles = glob(os.path.join(outdir, 'redrock-?????.fits'))
-            if len(rrfiles) > 0:
-                for rrfile in rrfiles:
-                    zcat1 = validate(rrfile, return_target_columns=True,
-                                     extra_columns=['TARGETID', 'Z', 'Z_RR', 'ZWARN', 'COADD_FIBERSTATUS', 'SPECTYPE', 'DELTACHI2'])
-                    zcat.append(zcat1)
-                zcat = vstack(zcat)
-
-                vi = read_vi_tertiary26()
-                zcat = join(zcat, vi, keys='TARGETID')
-
-                zcat.write(out_zcatfile, overwrite=True)
-                log.info(f'Wrote {len(zcat):,d} objects to {out_zcatfile}')
+            zcatdir = os.path.join(projectdir, f'redux-newtemplates-zscan{zscan_prior}', 'desihiz')
+            if os.path.isdir(zcatdir):
+                allzcat = []
+                for selection in ['suprime', 'odin', 'clauds']:    
+                    _, vi = read_desihiz(selection=selection)
+                    zcatfiles = glob(os.path.join(zcatdir, selection, '*', 'zcat-?????.fits'))
+                    zcat = vstack([Table(fitsio.read(zcatfile)) for zcatfile in zcatfiles])
+                    zcat = join(zcat, vi, keys='TARGETID')
+                    if np.all(zcat['COADD_FIBERSTATUS_1'] == zcat['COADD_FIBERSTATUS_2']):
+                        zcat.remove_column('COADD_FIBERSTATUS_2')
+                        zcat.rename_column('COADD_FIBERSTATUS_1', 'COADD_FIBERSTATUS')
+                    else:
+                        raise ValueError('Mismatch here')
+                    zcat['SELECTION'] = selection
+                    allzcat.append(zcat)
+                allzcat = vstack(allzcat)
+                allzcat.write(out_zcatfile, overwrite=True)
+                log.info(f'Wrote {len(allzcat):,d} objects to {out_zcatfile}')
 
 
 def _zstats(z, ztrue, spectype=None):
@@ -1147,6 +1264,8 @@ def qa_zcompleteness(specprod='iron'):
     """Redshift completeness results.
 
     """
+    from matplotlib.lines import Line2D
+    
     def zbins(targtype, dz=0.1, edges=False):
         zmin, zmax = zlims[targtype]
         if edges:
@@ -1169,18 +1288,20 @@ def qa_zcompleteness(specprod='iron'):
         hist, _ = np.histogram(dchi2, bins=dchi2bins(hist=True))
         return bins, hist
 
-    def _makeplot(old, new, targtype, targclass):
+    def _makeplot(cats, labels, targtype, targclass, dvcut=1e3):
 
         dchi2cut = dchi2dict[targtype]
 
         sns.set_palette('Set2')
         colors1 = sns.color_palette('muted')
         colors2 = sns.color_palette('dark')
-        
+        colors1 = np.array([colors1[3], colors1[0], colors1[2], colors1[1]])[:len(cats)]
+        colors2 = np.array([colors2[3], colors2[0], colors2[2], colors2[1]])[:len(cats)]
+
         fig, ax = plt.subplots(figsize=(8, 6))
-        for cat, col1, col2, label in zip([new, old], [colors1[3], colors1[0]], [colors2[3], colors2[0]], ['RR New', 'RR Iron']):
+        for cat, col1, col2, label in zip(cats, colors1, colors2, labels):
             # redshift success
-            G = (C_LIGHT * np.abs(cat['Z_RR'] - cat['VI_Z']) / (1. + cat['VI_Z'])) < 1e3 # good
+            G = (C_LIGHT * np.abs(cat['Z_RR'] - cat['VI_Z']) / (1. + cat['VI_Z'])) < dvcut # good
             H = ~G # bad
             bins, numer = dchi2hist(np.log10(cat['DELTACHI2'][G]))
             _, denom = dchi2hist(np.log10(cat['DELTACHI2']))
@@ -1193,28 +1314,23 @@ def qa_zcompleteness(specprod='iron'):
                 frac[W] = numer[W] / denom[W]
                 #print(label, bins[W], frac)
                 ax.plot(bins[W], frac[W], color=col1, ls='-', lw=3,
-                        label=f'{label}: Redshift Success')#, marker=marker)
+                        label=f'{label} (N={len(cat):,d})')#, marker=marker)
+                        #label=f'{label}: Redshift Success')#, marker=marker)
             # cumulative fraction with <deltach2
             frac = 1 - np.cumsum(denom) / len(cat)
-            ax.plot(bins, frac, color=col2, ls='--', lw=3, label=r'{}: $F(>\Delta\chi^2)$'.format(label))#, marker=marker)
-            #frac = np.zeros_like(bins)
-            #W = cdenom > 0
-            #if np.any(W):
-            #    frac[W] = cnumer[W] / cdenom[W]
-            #    print(label, frac)
-            #    ax.plot(bins, frac, color=col2, ls='--', lw=3, label=r'{}: $F(>\Delta\chi^2)$'.format(label))#, marker=marker)
+            ax.plot(bins, frac, color=col2, ls='--', lw=3)#, label=r'{}: $F(>\Delta\chi^2)$'.format(label))#, marker=marker)
                 
         ax.axhline(y=1, color='k', lw=1, ls='-', alpha=0.5)
         if dchi2cut is not None:
             ax.axvline(x=np.log10(dchi2cut), color='k', ls='-', lw=1, alpha=0.5)
-        ax.set_ylim(0, 1.2)
+        ax.set_ylim(0, 1.25)
         ax.set_xlim(0.5, 5)
         ax.margins(x=0)
         ax.set_xlabel(r'$\log_{10} (\Delta\chi^2)$')
         ax.set_ylabel('Fraction')
-        txt = [targclass, f'N={len(new)}']
-        ax.text(0.96, 0.96, '\n'.join(txt), va='top', ha='right',
-                transform=ax.transAxes, fontsize=12)#, bbox=bbox)
+        #txt = [targclass, f'N={len(new)}']
+        #ax.text(0.96, 0.96, '\n'.join(txt), va='top', ha='right',
+        #        transform=ax.transAxes, fontsize=12)#, bbox=bbox)
         if dchi2cut is not None:
             xytext = (0.6, 1.06)
             if np.log10(dchi2cut) < 1.18:
@@ -1222,12 +1338,20 @@ def qa_zcompleteness(specprod='iron'):
             ax.annotate(r'$\Delta\chi^2='+f'{dchi2cut:.0f}$', xy=(np.log10(dchi2cut), 1.02), xytext=xytext,
                         xycoords='data', arrowprops=dict(alpha=0.5, facecolor='black', lw=1, shrink=0.001),
                         va='bottom', ha='left', fontsize=12)
-        
-        hh, ll = ax.get_legend_handles_labels()
-        srt = [1, 3, 0, 2]
-        ax.legend([hh[ii] for ii in srt], [ll[ii] for ii in srt], fontsize=10, loc='lower right')
-        #ax.legend(fontsize=10)
 
+        #srt = [1, 3, 0, 2]
+        hh, ll = ax.get_legend_handles_labels()
+        leg1 = ax.legend(hh, ll, fontsize=12, loc='upper right', bbox_to_anchor=(0.4, 0., 0.5, 0.5))
+        #ax.legend([hh[ii] for ii in srt], [ll[ii] for ii in srt], fontsize=10, loc='lower right')
+        #ax.legend(fontsize=10)
+        ax.add_artist(leg1)
+
+        leg2 = ax.legend([Line2D([0], [0], ls='--', color='k', lw=2),
+                          Line2D([0], [0], color='k', ls='-', lw=2)],
+                          [r'Completeness: Fraction$(>\Delta\chi^2)$', r'Success: $|\Delta z|/(1+z)<{:.0f}$ km/s'.format(dvcut)],
+                          fontsize=10, loc='upper right')
+        ax.add_artist(leg2)
+        
         #twin_ax = ax.twinx()
         #twin_ax.set_ylabel('Sample Completeness Fraction')
         #twin_ax.set_ylim(0, 1.1)
@@ -1237,22 +1361,25 @@ def qa_zcompleteness(specprod='iron'):
         fig.savefig(pngfile)
         log.info(f'Wrote {pngfile}')
 
-    # zscan02 - VI healpix
+    # zscan02 - desihiz healpixels
     zscan = 'zscan02'
-    zcatfile = os.path.join(projectdir, f'zcat-tertiary26.fits')
-    zcat_old = Table(fitsio.read(zcatfile))
-    zcat_old['LAE-LBG'] = np.ones(len(zcat_old), bool)
-    log.info(f'Read {len(zcat_old)} objects from {zcatfile}')
+    #zcatfile = os.path.join(projectdir, f'zcat-{specprod}templates-desihiz.fits')
+    #zcat_old = Table(fitsio.read(zcatfile))
+    #zcat_old['LAE-LBG'] = np.ones(len(zcat_old), bool)
+    #log.info(f'Read {len(zcat_old)} objects from {zcatfile}')
+    #old = zcat_old[zcat_old['LAE-LBG'] * (zcat_old['ZWARN'] == 0) * (zcat_old['COADD_FIBERSTATUS'] == 0)]
 
-    zcatfile = os.path.join(projectdir, f'zcat-tertiary26-{zscan}.fits')
-    zcat_new = Table(fitsio.read(zcatfile))
-    zcat_new['LAE-LBG'] = np.ones(len(zcat_new), bool)
-    log.info(f'Read {len(zcat_new)} objects from {zcatfile}')
-    assert(np.all(zcat_old['TARGETID'] == zcat_new['TARGETID']))
+    zcatfile = os.path.join(projectdir, f'zcat-newtemplates-desihiz-{zscan}.fits')
+    zcat = Table(fitsio.read(zcatfile))
+    log.info(f'Read {len(zcat)} objects from {zcatfile}')
+    cats = []
+    for selection in ['odin', 'clauds', 'suprime']:
+        I = ((zcat['SELECTION'] == selection) * (zcat['ZWARN'] == 0) * (zcat['COADD_FIBERSTATUS'] == 0) *
+             np.isfinite(zcat['VI_Z']) * (zcat['VI_Z'] > 1e-3) * (zcat['VI_QUALITY'] >= 3.))
+        cats.append(zcat[I])
+    _makeplot(cats, labels=['odin', 'clauds', 'suprime'], targtype='desihiz', targclass='desihiz')#, dvcut=250.)
 
-    old = zcat_old[zcat_old['LAE-LBG'] * (zcat_old['ZWARN'] == 0) * (zcat_old['COADD_FIBERSTATUS'] == 0)]
-    new = zcat_new[zcat_new['LAE-LBG'] * (zcat_new['ZWARN'] == 0) * (zcat_new['COADD_FIBERSTATUS'] == 0)]
-    _makeplot(old, new, targtype='LAELBG', targclass='LAE-LBG')
+    return
 
     # zscan01 - VI tiles
     zcatfile = os.path.join(projectdir, f'zcat-{specprod}.fits')
@@ -1278,9 +1405,13 @@ def qa_zvz(specprod='iron'):
     # make the plots
     sns.set(context='talk', style='ticks', font_scale=0.7, palette='Set2')
 
-    def _plot_onerow(rowaxes, cat, targtype, remove_xticklabels=False, ylabel=None):
+    def _plot_onerow(rowaxes, cat, targtype, remove_xticklabels=False, ylabel=None, desihiz=False):
 
-        dchi2cut = dchi2dict[targtype]
+        if desihiz:
+            dchi2cut = dchi2dict['desihiz']
+        else:
+            dchi2cut = dchi2dict[targtype]
+            
         zwarn = (cat['ZWARN'] == 0)
         coadd_fiberstatus = (cat['COADD_FIBERSTATUS'] == 0)
         I = np.where(coadd_fiberstatus * zwarn)[0]
@@ -1295,9 +1426,9 @@ def qa_zvz(specprod='iron'):
         goodcat = cat[J]
         cat = cat[I]
 
-        bbox = dict(boxstyle='round', facecolor='lightgray', alpha=0.4)
+        bbox = dict(boxstyle='round', facecolor='lightgray', alpha=0.8)
         
-        if targtype == 'LAELBG':
+        if desihiz:
             vi_spectypes = np.array(['LBG', 'LAE', 'QSO', 'Interloper'])
             vi_colors = np.array(['tomato', 'purple', 'dodgerblue', 'forestgreen'])
             vi_facecolors = np.array(['red', 'purple', 'blue', 'darkgreen'])
@@ -1327,7 +1458,7 @@ def qa_zvz(specprod='iron'):
                     pass
 
             if spectype == 'STAR' and len(S) > 0:
-                zmax = C_LIGHT * np.max(np.abs(plotcat['Z_RR'][S]))
+                zmax = 1.5 * C_LIGHT * np.max(np.abs(plotcat['Z_RR'][S]))
                 if 'VI_SPECTYPE' in plotcat.colnames:
                     nsort = np.argsort([np.sum(plotcat['VI_SPECTYPE'][S] == vi_spectype) for vi_spectype in vi_spectypes])[::-1]
                     for vi_spectype, vi_color in zip(vi_spectypes[nsort], vi_colors[nsort]):
@@ -1356,6 +1487,7 @@ def qa_zvz(specprod='iron'):
                     nsort = np.argsort([np.sum(plotcat['VI_SPECTYPE'][S] == vi_spectype) for vi_spectype in vi_spectypes])[::-1]
                     for vi_spectype, vi_color, vi_facecolor, vi_marker in zip(vi_spectypes[nsort], vi_colors[nsort], vi_facecolors[nsort], vi_markers[nsort]):
                         V = np.where(plotcat['VI_SPECTYPE'][S] == vi_spectype)[0]
+                        #print(vi_spectype, len(V))
                         if len(V) > 0:
                             xx.scatter(plotcat['VI_Z'][S][V], plotcat['Z_RR'][S][V], s=20, alpha=0.7,
                                        color=vi_color, marker=vi_marker, facecolor=vi_facecolor,
@@ -1395,25 +1527,34 @@ def qa_zvz(specprod='iron'):
         if ylabel:
             rowaxes[0].set_ylabel(ylabel)
 
-    def _plot_allrows(old, new, targtype, zscan, targclass=None):
+    def _plot_allrows(old, new, targtype, zscan, targclass=None, desihiz=False):
         fig, axes = plt.subplots(2, 5, figsize=(14, 6))#, sharex=True, sharey=True)
 
+        if desihiz:
+            ylabel = 'Redshift [new templates]'
+        else:
+            ylabel = 'Redshift [Iron]'
+
         # top row - old templates
-        _plot_onerow(axes[0, :], old, targtype, remove_xticklabels=True, ylabel='Redshift [Iron]')
+        _plot_onerow(axes[0, :], old, targtype, remove_xticklabels=True, ylabel=ylabel, desihiz=desihiz)
 
         # bottom row - new templates
-        _plot_onerow(axes[1, :], new, targtype, ylabel='Redshift [New]')
+        _plot_onerow(axes[1, :], new, targtype, ylabel='Redshift [New]', desihiz=desihiz)
 
-        zlim = zlims[f'{targtype}-{zscan}']
+        if desihiz:
+            zlim = zlims[f'desihiz-{zscan}']
+        else:
+            zlim = zlims[f'{targtype}-{zscan}']
+            
         for xx in axes[:, :-1].flat:
             xx.set_xlim(zlim)
             xx.set_ylim(zlim)
             xx.plot(zlim, zlim, color='k', lw=1, alpha=0.5, zorder=0)
 
-        if targtype == 'LAELBG':
+        if targtype == 'desihiz':
             axes[-1, -1].set_xticklabels([])            
 
-        if targtype == 'LAELBG':
+        if targtype == 'desihiz':
             Qcut = '3' # higher cut
         else:
             Qcut = '2.5'
@@ -1437,34 +1578,89 @@ def qa_zvz(specprod='iron'):
         fig.savefig(pngfile)
         log.info(f'Wrote {pngfile}')
 
-    def _plot_all_targetclass(cats, targtypes, targclasses, zscan, pngfile):
+    def _plot_all_targetclass(cats, targtypes, targclasses, zscan, pngfile, desihiz=False):
 
         ncat = len(cats)
 
-        fig, axes = plt.subplots(5, 5, figsize=(14, 15))
+        if desihiz:
+            ylabel = 'RR Redshift'
+        else:
+            ylabel = 'Redshift [Iron]'
+
+        fig, axes = plt.subplots(len(cats), 5, figsize=(14, len(cats)*3))
 
         for ii in range(ncat):
             remxlabels = ii < ncat-1
             _plot_onerow(axes[ii, :], cats[ii], targtypes[ii], remove_xticklabels=remxlabels,
-                         ylabel=f'{targclasses[ii]}\n Redshift [Iron]')
-            zlim = zlims[f'{targtypes[ii]}-{zscan}']
+                         ylabel=f'{targclasses[ii]}\n {ylabel}', desihiz=desihiz)
+            if desihiz:
+                zlim = zlims[f'desihiz-{zscan}']
+            else:
+                zlim = zlims[f'{targtype}-{zscan}']
+
             for xx in axes[ii, :-1].flat:
                 xx.set_xlim(zlim)
                 xx.set_ylim(zlim)
                 xx.plot(zlim, zlim, color='k', lw=1, alpha=0.5, zorder=0)
 
-        Qcut = '2.5'
+        if desihiz:
+            Qcut = '3'
+        else:
+            Qcut = '2.5'
 
         # x-label
         llpos = axes[-1, 0].get_position()
         lrpos = axes[-1, -2].get_position()
         xpos = (lrpos.x1 - llpos.x0) / 2 + llpos.x0
-        ypos = llpos.y0 - 0.05
+        ypos = llpos.y0 - 0.07 # 0.05
         fig.text(xpos, ypos, f'Redshift [VI; Q>{Qcut}]', ha='center', va='center')
             
         fig.subplots_adjust(bottom=0.1, left=0.07, right=0.95, top=0.95, wspace=0.1, hspace=0.1)
         fig.savefig(pngfile)
         log.info(f'Wrote {pngfile}')
+
+    # zscan02 - VI healpixels
+    zscan = 'zscan02'
+
+    pngfile = os.path.join(qadir, f'zvz-{zscan}-desihiz.png')
+    select = ['suprime', 'odin', 'clauds']
+    zcatfile = os.path.join(projectdir, f'zcat-newtemplates-desihiz-{zscan}.fits')    
+    #zcatfile = os.path.join(projectdir, f'zcat-{specprod}templates-desihiz.fits')
+    zcat = Table(fitsio.read(zcatfile))
+    log.info(f'Read {len(zcat)} objects from {zcatfile}')
+    zcat.rename_column('VI_SPECTYPE', 'VI_SPECTYPE_ORIG')
+    zcat['VI_SPECTYPE'] = ['Interloper'] # default
+    I = ['LBG' in comment.upper() or 'LBG' in otype.upper() for comment, otype in zip(zcat['VI_COMMENTS'], zcat['VI_SPECTYPE_ORIG'])]
+    zcat['VI_SPECTYPE'][I] = 'LBG'
+    I = ['LAE' in comment.upper() or 'LAE' in otype.upper() for comment, otype in zip(zcat['VI_COMMENTS'], zcat['VI_SPECTYPE_ORIG'])]
+    zcat['VI_SPECTYPE'][I] = 'LAE'
+    I = ['QSO' in comment.upper() or 'QSO' in otype.upper() for comment, otype in zip(zcat['VI_COMMENTS'], zcat['VI_SPECTYPE_ORIG'])]
+    zcat['VI_SPECTYPE'][I] = 'QSO'
+    cats = []
+    for selection in select:
+        I = ((zcat['SELECTION'] == selection) * #(zcat['ZWARN'] == 0) * (zcat['COADD_FIBERSTATUS'] == 0) *
+             np.isfinite(zcat['VI_Z']) * (zcat['VI_Z'] > 1e-3) * (zcat['VI_QUALITY'] >= 3.))
+        cats.append(zcat[I])
+    _plot_all_targetclass(cats, select, select, zscan='zscan02', pngfile=pngfile, desihiz=True)
+
+    return
+
+    #zscan = 'zscan02'
+    #zcatfile = os.path.join(projectdir, f'zcat-{specprod}templates-desihiz.fits')
+    #zcat_old = Table(fitsio.read(zcatfile))
+    #log.info(f'Read {len(zcat_old)} objects from {zcatfile}')
+    #
+    #zcatfile = os.path.join(projectdir, f'zcat-newtemplates-desihiz-{zscan}.fits')    
+    #zcat_new = Table(fitsio.read(zcatfile))
+    #zcat_new['LAE-LBG'] = np.ones(len(zcat_new), bool)
+    #log.info(f'Read {len(zcat_new)} objects from {zcatfile}')
+    #assert(np.all(zcat_old['TARGETID'] == zcat_new['TARGETID']))
+    #
+    #targtypes = ['desihiz']
+    #targclasses = ['desihiz']
+    #for targtype, targclass in zip(targtypes, targclasses):
+    #    I = zcat_new[targclass]
+    #    _plot_allrows(zcat_old[I], zcat_new[I], targtype=targtype, zscan=zscan, targclass=targclass)
 
     # zscan01,zscan02 - VI tiles, all targets
     for zscan in ['zscan01', 'zscan02']:
@@ -1479,24 +1675,6 @@ def qa_zvz(specprod='iron'):
         # hard-code zscan here so we get consistent redshift limits.
         _plot_all_targetclass(cats, targtypes, targclasses, zscan='zscan02', pngfile=pngfile) 
 
-    # zscan02 - VI healpix
-    zscan = 'zscan02'
-    zcatfile = os.path.join(projectdir, f'zcat-tertiary26.fits')
-    zcat_old = Table(fitsio.read(zcatfile))
-    log.info(f'Read {len(zcat_old)} objects from {zcatfile}')
-
-    zcatfile = os.path.join(projectdir, f'zcat-tertiary26-{zscan}.fits')
-    zcat_new = Table(fitsio.read(zcatfile))
-    zcat_new['LAE-LBG'] = np.ones(len(zcat_new), bool)
-    log.info(f'Read {len(zcat_new)} objects from {zcatfile}')
-    assert(np.all(zcat_old['TARGETID'] == zcat_new['TARGETID']))
-    
-    targtypes = ['LAELBG']
-    targclasses = ['LAE-LBG']
-    for targtype, targclass in zip(targtypes, targclasses):
-        I = zcat_new[targclass]
-        _plot_allrows(zcat_old[I], zcat_new[I], targtype=targtype, zscan=zscan, targclass=targclass)
-        
     # zscan01 - VI tiles
     zscan = 'zscan01'
     zcatfile = os.path.join(projectdir, f'zcat-{specprod}.fits')
@@ -1541,7 +1719,13 @@ def build_redrock_templates(specprod='iron', niter=10, ncomp=10, minwave=400., d
     for targtype in ['BGS_ANY', 'LRG', 'ELG']:
         templatefile = os.path.join(datadir, f'ftemplates-{specprod}-{targtype}.fits')
         log.info(f'Reading {templatefile}')
-        flux.append(fitsio.read(templatefile, 'FLUX', rows=np.arange(10)))
+        flux.append(fitsio.read(templatefile, 'FLUX'))#, rows=np.arange(10)))
+
+    # add desihiz
+    templatefile = os.path.join(datadir, 'ftemplates-vi-desihiz.fits')
+    log.info(f'Reading {templatefile}')
+    flux.append(fitsio.read(templatefile, 'FLUX'))#, rows=np.arange(10)))
+        
     flux = np.vstack(flux) # [ngal, nwave]
     ngal = flux.shape[0]
 
@@ -1722,6 +1906,7 @@ def main():
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--desihiz-fastspec', action='store_true', help='Run fastspec on the desihiz sample.')
+    parser.add_argument('--desihiz-fastspec-qa', action='store_true', help='Generate QA from the desihiz sample.')
     parser.add_argument('--desihiz-gather-fastspec', action='store_true', help='Gather the desihiz fastspec results.')
     parser.add_argument('--match-lss', action='store_true', help='Match to the LSS catalogs (no figures, just catalogs).')
     parser.add_argument('--parent-qa', action='store_true', help='QA of the parent sample.')
@@ -1741,7 +1926,10 @@ def main():
     parser.add_argument('--dwave', type=float, default=0.2, help='Template wavelength spacing (Angstrom).')
     parser.add_argument('--niter', type=int, default=10, help='Number of PCA iterations.')
     parser.add_argument('--ncomp', type=int, default=10, help='Number of PCA components.')
-
+    parser.add_argument('--ntargets', type=int, help='Number of targets to process.')
+    parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')    
+    parser.add_argument('--nolog', action='store_true', help='Do not write a log (useful for debugging).')
+    
     parser.add_argument('--specprod', default='iron', help='Spectroscopic production.')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')    
     args = parser.parse_args()
@@ -1755,7 +1943,11 @@ def main():
 
     # run fastspec on the VId desihiz sample.
     if args.desihiz_fastspec:
-        desihiz_fastspec(mp=args.mp, overwrite=args.overwrite)
+        desihiz_fastspec(vi_redshifts=True, nolog=args.nolog, mp=args.mp, overwrite=args.overwrite)
+
+    if args.desihiz_fastspec_qa:
+        desihiz_fastspec_qa(vi_redshifts=True, ntargets=args.ntargets, targetids=args.targetids,
+                            mp=args.mp, overwrite=args.overwrite)
 
     # gather the desihiz fastspec results
     if args.desihiz_gather_fastspec:
@@ -1776,6 +1968,10 @@ def main():
         for selection, nrows in zip(['suprime', 'odin', 'clauds'], [500, 500, 500]):
             fastfile = os.path.join(datadir, f'fastspec-vi-desihiz-{selection}.fits')
             allfast, allmeta, _, _ = read_fastspecfit(fastfile)
+
+            I = (allfast['LOGMSTAR'] > 0.) * (allmeta['Z'] > 2.) * (allmeta['Z'] < 4.)
+            allfast = allfast[I]
+            allmeta = allmeta[I]
 
             I = rand.choice(len(allmeta), size=nrows, replace=False)
             fast.append(allfast[I])
@@ -1902,12 +2098,12 @@ def main():
     if args.run_redrock:
         os.environ['RR_TEMPLATE_DIR'] = templatedir # note!
 
+        # desihiz VI healpixels
+        run_redrock_desihiz(zscan_prior='02', overwrite=args.overwrite)
+
         # Run Redrock on the VI tiles with a redshift scan to z=1.7 and to z=4.
-        run_redrock_tiles(zscan_prior='01', specprod=args.specprod, overwrite=args.overwrite) 
+        #run_redrock_tiles(zscan_prior='01', specprod=args.specprod, overwrite=args.overwrite) 
         run_redrock_tiles(zscan_prior='02', specprod=args.specprod, overwrite=args.overwrite)
-                    
-        # LAE/LBG VI tiles from Tertiary 26
-        run_redrock_healpix(zscan_prior='02', specprod=args.specprod, overwrite=args.overwrite)
 
     if args.redshift_qa:
         # Gather the EDR redshift-fitting results with the VI results and then
@@ -1920,8 +2116,11 @@ def main():
         # QA - redshift completeness results
         qa_zcompleteness(specprod=args.specprod)
 
-        # QA - redshift distribution of the VI tiles.
-        qa_vi_zhist()
+        # QA - redshift distribution of the VI healpixels.
+        qa_zhist(vi=False)
+        pdb.set_trace()
+        
+        qa_zhist(vi=True)
 
     if args.run_fastspecfit:
         from fastspecfit.fastspecfit import fastspec
