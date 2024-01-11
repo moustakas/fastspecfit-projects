@@ -375,6 +375,7 @@ def one_sedfit(phot, priors, datadir=None, verbose=False, overwrite=False):
         for band in bands:
             out[f'MODELFLUX_{band.upper()}'] = np.float32(0.0)
         out['MREMAIN'] = np.float32(0.0)
+        out['SFR'] = np.float32(0.0)
         out['CHI2'] = np.float32(0.0)
         for pp in model.theta_labels():
             out[pp.upper()] = np.float32(0.0)
@@ -390,25 +391,36 @@ def one_sedfit(phot, priors, datadir=None, verbose=False, overwrite=False):
         for band, bestmaggie in zip(bands, bestmaggies):
             out[f'MODELFLUX_{band.upper()}'] = np.float32(1e9 * bestmaggie) # [nanomaggies]
         out['MREMAIN'] = np.float32(mremain)
+
+        # get the SFR
+        from prospect.plotting.sfh import params_to_sfh, ratios_to_sfrs, sfh_to_cmf
+        # np.float32(sps.ssp.sfr * model.params["mass"])
+        if priors == 'delayedtau':
+            lookback, sfr, intsfh = params_to_sfh(model.params, time=np.array([0.]))
+        elif priors == 'continuitysfh':
+            #lookback, sfr, intsfh = params_to_sfh(model.params, time=None, agebins=model.params['agebins'])
+            sfhs = ratios_to_sfrs(model.params['logmass'], model.params['logsfr_ratios'], model.params['agebins'])
+            intsfh = sfh_to_cmf(sfhs, model.params['agebins'])
+            lookback = 10.**(model.params['agebins']-9.)
+            sfr = sfhs[0] # most recent bin
+        else:
+            raise ValueError('Code me')
+            
+        out['SFR'] = np.float32(sfr)
+                                
         out['CHI2'] = np.float32(np.sum(obs['ivarmaggies'] * (obs['maggies'] - bestmaggies)**2))
         for pp, val in zip(model.theta_labels(), model.theta):
             out[pp.upper()] = np.float32(val)
 
-    out['MREMAIN'] = mremain
-    out['CHI2'] = chi2
-    pdb.set_trace()
-    for pp, val in zip(model.theta_labels(), model.theta):
-        out[pp.upper()] = np.float32(val)
-
-    out.write(outfile, overwrite=True)
-    #with warnings.catch_warnings():
-    #    warnings.simplefilter('ignore')
-    #    prospect.io.write_results.write_hdf5(
-    #        h5file, rp, model, obs, pout['sampling'][0], pout['optimization'][0], 
-    #        tsample=pout['sampling'][1], toptimize=pout['optimization'][1])
+        out.write(outfile, overwrite=True)
+        #with warnings.catch_warnings():
+        #    warnings.simplefilter('ignore')
+        #    prospect.io.write_results.write_hdf5(
+        #        h5file, rp, model, obs, pout['sampling'][0], pout['optimization'][0], 
+        #        tsample=pout['sampling'][1], toptimize=pout['optimization'][1])
         
-    if verbose:
-        print(f'Building {outfile} took {time.time() - t0:.2f} sec')
+        if verbose:
+            print(f'Building {outfile} took {time.time() - t0:.2f} sec')
 
     return out
 
@@ -463,7 +475,7 @@ def main():
     #allphot = allphot[15:16]
     #allphot = allphot[allphot['TARGETID'] == 39633331532335268]
     #allphot = allphot[:1]
-    allphot = allphot[allphot['TARGETID'] == 39633321176598433]
+    #allphot = allphot[allphot['TARGETID'] == 39633321180792960]
 
     if args.sedfit:
         mpargs = [(phot, args.priors, datadir, args.verbose, args.overwrite) for phot in allphot]
