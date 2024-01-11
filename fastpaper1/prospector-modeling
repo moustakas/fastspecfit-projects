@@ -2,11 +2,11 @@
 """
 Fit the a single sv1/bright healpixel using Prospector.
 
-time python $HOME/code/desihub/fastspecfit-projects/fastpaper1/prospector-modeling --priors delayedtau --sedfit --verbose
-time python $HOME/code/desihub/fastspecfit-projects/fastpaper1/prospector-modeling --priors delayedtau --qaplots --verbose
+time python $HOME/code/desihub/fastspecfit-projects/fastpaper1/prospector-modeling --priors delayedtau --sedfit --verbose --mp 12
+time python $HOME/code/desihub/fastspecfit-projects/fastpaper1/prospector-modeling --priors delayedtau --qaplots --verbose --mp 12
 
-time python $HOME/code/desihub/fastspecfit-projects/fastpaper1/prospector-modeling --priors continuitysfh --sedfit --verbose
-time python $HOME/code/desihub/fastspecfit-projects/fastpaper1/prospector-modeling --priors continuitysfh --qaplots --verbose
+time python $HOME/code/desihub/fastspecfit-projects/fastpaper1/prospector-modeling --priors continuitysfh --sedfit --verbose --mp 12
+time python $HOME/code/desihub/fastspecfit-projects/fastpaper1/prospector-modeling --priors continuitysfh --qaplots --verbose --mp 12
 
 """
 import os, time, argparse, pdb
@@ -394,12 +394,18 @@ def one_sedfit(phot, priors, datadir=None, verbose=False, overwrite=False):
         for pp, val in zip(model.theta_labels(), model.theta):
             out[pp.upper()] = np.float32(val)
 
-        out.write(outfile, overwrite=True)
-        #with warnings.catch_warnings():
-        #    warnings.simplefilter('ignore')
-        #    prospect.io.write_results.write_hdf5(
-        #        h5file, rp, model, obs, pout['sampling'][0], pout['optimization'][0], 
-        #        tsample=pout['sampling'][1], toptimize=pout['optimization'][1])
+    out['MREMAIN'] = mremain
+    out['CHI2'] = chi2
+    pdb.set_trace()
+    for pp, val in zip(model.theta_labels(), model.theta):
+        out[pp.upper()] = np.float32(val)
+
+    out.write(outfile, overwrite=True)
+    #with warnings.catch_warnings():
+    #    warnings.simplefilter('ignore')
+    #    prospect.io.write_results.write_hdf5(
+    #        h5file, rp, model, obs, pout['sampling'][0], pout['optimization'][0], 
+    #        tsample=pout['sampling'][1], toptimize=pout['optimization'][1])
         
     if verbose:
         print(f'Building {outfile} took {time.time() - t0:.2f} sec')
@@ -456,6 +462,8 @@ def main():
     allphot = Table(fitsio.read(photfile, columns=cols))
     #allphot = allphot[15:16]
     #allphot = allphot[allphot['TARGETID'] == 39633331532335268]
+    #allphot = allphot[:1]
+    allphot = allphot[allphot['TARGETID'] == 39633321176598433]
 
     if args.sedfit:
         mpargs = [(phot, args.priors, datadir, args.verbose, args.overwrite) for phot in allphot]
