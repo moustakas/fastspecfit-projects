@@ -485,7 +485,7 @@ def main():
                 out = P.map(_one_sedfit, mpargs)
         else:
             out = [one_sedfit(*mparg) for mparg in mpargs]
-            
+
         out = Table(np.vstack(out))
         if len(out) != len(allphot):
             print('Missing some objects.')
