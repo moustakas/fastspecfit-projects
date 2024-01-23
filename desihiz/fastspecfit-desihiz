@@ -5,22 +5,26 @@
 
 Three selections: odin, suprime, clauds
 
+selection=odin
+
 1. Run FastSpecFit with the VI redshifts.
   salloc -N 1 -C cpu -A desi -t 03:00:00 --qos interactive
-  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --fastspec --selection suprime --mp 128 --vi-redshifts --overwrite 
+  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --fastspec --selection $selection --mp 128 --vi-redshifts --overwrite 
+
+
 
 
 1. Run Redrock with the updated templates from the redrock-templates project.
   salloc -N 1 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
-  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --run-redrock --selection suprime
+  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --run-redrock --selection $selection
 
 2. Gather Redrock fitting results.
-  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --gather-redrock --selection suprime
+  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --gather-redrock --selection $selection
 
 3. Run FastSpecFit both with and without the VI redshifts.
   salloc -N 1 -C cpu -A desi -t 02:00:00 --qos interactive
-  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --fastspec --selection suprime --mp 128 --overwrite 
-  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --fastspec --selection suprime --mp 128 --vi-redshifts --overwrite 
+  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --fastspec --selection $selection --mp 128 --overwrite 
+  time $HOME/code/desihub/fastspecfit-projects/desihiz/fastspecfit-desihiz --fastspec --selection $selection --mp 128 --vi-redshifts --overwrite 
 
 
 """
@@ -43,15 +47,15 @@ projectdir = os.path.join(desi_root, 'users', 'ioannis', 'desihiz')
 templatedir = os.path.join(os.getenv('DESI_ROOT'), 'users', 'ioannis', 'fastspecfit', 'redrock-templates', 'rrtemplates')
 
 fspecdirs = {
-    'odin': desi_root+'/users/raichoor/laelbg/odin/test/forjohn/v0/desi-odin.fits[SPECINFO]',
-    'clauds': desi_root+'/users/raichoor/laelbg/clauds/test/forjohn/v0/desi-clauds.fits[SPECINFO]',
-    'suprime': desi_root+'/users/raichoor/laelbg/suprime/test/forjohn/v0/desi-suprime.fits[SPECINFO]',
+    'odin': desi_root+'/users/raichoor/laelbg/odin/v20231120/desi-odin.fits[SPECINFO]',
+    'clauds': desi_root+'/users/raichoor/laelbg/clauds/v20231120/desi-clauds.fits[SPECINFO]',
+    'suprime': desi_root+'/users/raichoor/laelbg/suprime/v20231120/desi-suprime.fits[SPECINFO]',
     }
 
 fphotodirs = {
-    'odin': desi_root+'/users/raichoor/laelbg/odin/test/forjohn/v0/desi-odin.fits[PHOTINFO]',
-    'clauds': desi_root+'/users/raichoor/laelbg/clauds/test/forjohn/v0/desi-clauds.fits[PHOTOFFINFO]',
-    'suprime': desi_root+'/users/raichoor/laelbg/suprime/test/forjohn/v0/desi-suprime.fits[PHOTINFO]',
+    'odin': desi_root+'/users/raichoor/laelbg/odin/v20231120/desi-odin.fits[PHOTINFO]',
+    'clauds': desi_root+'/users/raichoor/laelbg/clauds/v20231120/desi-clauds.fits[PHOTV2INFO]',
+    'suprime': desi_root+'/users/raichoor/laelbg/suprime/v20231120/desi-suprime.fits[PHOTV2INFO]',
     }
 
 fphotofiles = {

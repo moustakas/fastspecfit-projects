@@ -1,0 +1,665 @@
+#!/usr/bin/env python
+
+"""Generate templates from stacks.
+
+"""
+import os, pdb
+import numpy as np
+import fitsio
+from glob import glob
+from astropy.table import Table, Column, hstack, vstack, join
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+
+from desiutil.log import get_logger
+log = get_logger()
+
+import seaborn as sns
+sns.set(context='talk', style='ticks', font_scale=0.9, palette='Set2')
+#sns.set(context='talk', style='ticks', palette='deep', font_scale=font_scale)#, rc=rc)
+colors = sns.color_palette()
+
+desi_root = os.getenv('DESI_ROOT')
+projectdir = os.path.join(desi_root, 'users', 'ioannis', 'fastspecfit', 'redrock-templates')
+fastdir = os.path.join(projectdir, 'fastspec')
+datadir = os.path.join(projectdir, 'data')
+qadir = os.path.join(projectdir, 'qa')
+
+def get_zlims(lss_specprod, targtype=None):
+    if lss_specprod == 'fuji':
+        zlims = {'BGS_ANY': [0.01, 0.6], 'LRG': [0.4, 1.1], 'ELG': [0.6, 1.6]}
+    elif lss_specprod == 'iron':
+        zlims = {'BGS_ANY': [0.01, 0.5], 'LRG': [0.4, 1.1], 'ELG_LOPnotqso': [0.8, 1.6]}
+    else:
+        raise NotImplemented
+    if targtype:
+        zlims = zlims[targtype]
+    return zlims
+
+
+def stacking_bins(targetclass='LRG', verbose=False):
+
+    # define the stacking limits and the number of bin *centers*
+
+    if targetclass == 'LRG':
+        zlim, nz = [0.4, 1.1], 7
+        mstarlim, nmstar = [10.5, 12.], 5 # Mstar
+        colorlim, ncolor = [-0.2, 1.8], 5   # r-W1
+    elif targetclass == 'ELG':
+        zlim, nz = [0.7, 1.5], 8
+        mstarlim, nmstar = [8., 11.5], 7 # Mstar
+        colorlim, ncolor = [-0.1, 0.7], 4   # g-r
+    elif targetclass == 'BGS_ANY':
+        zlim, nz = [0.05, 0.55], 10
+        mstarlim, nmstar = [8., 12.], 7 # Mstar
+        colorlim, ncolor = [0.0, 1.2], 6       # g-r
+    else:
+        raise NotImplemented
+        
+    dz = (zlim[1] - zlim[0]) / nz
+    dmstar = (mstarlim[1] - mstarlim[0]) / nmstar
+    dcolor = (colorlim[1] - colorlim[0]) / ncolor
+
+    # build the array of (left) bin *edges*
+    zgrid = np.arange(zlim[0], zlim[1], dz)
+    mstargrid = np.arange(mstarlim[0], mstarlim[1], dmstar)
+    colorgrid = np.arange(colorlim[0], colorlim[1], dcolor)
+
+    nbins = len(zgrid) * len(mstargrid) * len(colorgrid)
+
+    # pack into a table
+    bins = Table()
+    bins.add_column(Column(name='TARGETCLASS', dtype='U3', length=nbins))
+    bins.add_column(Column(name='IBIN', dtype=np.int32, length=nbins))
+    bins.add_column(Column(name='ISUBBIN', dtype=np.int16, length=nbins))
+    bins.add_column(Column(name='NOBJ', dtype=np.int32, length=nbins))
+    bins.add_column(Column(name='SNR', dtype='f4', length=nbins))
+    for col in ('ZOBJ', 'MSTAR', 'COLOR'):
+        bins.add_column(Column(name=col, dtype='f4', length=nbins)) # mean bin center
+        bins.add_column(Column(name=f'{col}MIN', dtype='f4', length=nbins))
+        bins.add_column(Column(name=f'{col}MAX', dtype='f4', length=nbins))
+        
+    bins['TARGETCLASS'] = targetclass
+    bins['IBIN'] = np.arange(nbins, dtype=np.int32)
+
+    ibin = 0
+    for zmin in zgrid:
+        for mstarmin in mstargrid:
+            for colormin in colorgrid:
+                for col, mmin, delt in zip(('ZOBJ', 'MSTAR', 'COLOR'),
+                                           (zmin, mstarmin, colormin),
+                                           (dz, dmstar, dcolor)):
+                    bins[col][ibin] = mmin + delt / 2             # bin center
+                    bins[f'{col}MIN'][ibin] = mmin        # left edge
+                    bins[f'{col}MAX'][ibin] = mmin + delt # right edge
+                ibin += 1
+
+    if verbose:
+        log.info(f'Number of {targetclass} bins = {bins}')
+
+    return bins
+
+
+def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
+    """QA of the observed- and rest-frame photometry.
+
+    """
+    from matplotlib.patches import Rectangle    
+    from matplotlib.colors import LogNorm
+
+    cmap = plt.cm.get_cmap('RdYlBu')
+    mincnt = 1
+
+    data = read_clustering(targetclass=targetclass, specprod=specprod,
+                           lss_specprod=lss_specprod,
+                           read_lss=False, trim_broad=False)
+    fast, meta, = data[targetclass]['fast'], data[targetclass]['meta']
+
+    bins  = stacking_bins(targetclass, verbose=True)
+    
+    def bgs_obs(phot, png=None):
+        robslim = (15, 21.0)
+        grobslim = (-0.2, 2.5)
+        rzobslim = (-0.5, 1.5)
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+
+        ax1.hexbin(phot['RMAG']-phot['ZMAG'], phot['GMAG']-phot['RMAG'],
+                   mincnt=mincnt, bins='log', cmap=cmap,
+                   #C=cat['weight'], reduce_C_function=np.sum
+                   extent=np.hstack((rzobslim, grobslim)))
+        ax1.set_xlabel(r'$(r - z)_{\rm obs}$')
+        ax1.set_ylabel(r'$(g - r)_{\rm obs}$')
+        ax1.set_xlim(rzobslim)
+        ax1.set_ylim(grobslim)
+
+        hb = ax2.hexbin(phot['RMAG'], phot['GMAG']-phot['RMAG'],
+                        mincnt=mincnt, bins='log', cmap=cmap,
+                        #C=cat['weight'], reduce_C_function=np.sum,
+                        extent=np.hstack((robslim, grobslim)))
+        ax2.set_xlabel(r'$r_{\rm obs}$')
+        ax2.set_ylim(grobslim)
+        ax2.set_xlim(robslim)
+
+        cax = fig.add_axes([0.88, 0.12, 0.02, 0.83])
+        formatter = ticker.LogFormatter(10, labelOnlyBase=False)
+        fig.colorbar(hb, cax=cax, format=formatter, label='Number of Galaxies')
+
+        for aa in (ax1, ax2):
+            aa.grid(True)
+
+        plt.subplots_adjust(left=0.12, top=0.95, right=0.85, bottom=0.19, wspace=0.07)
+
+        if png:
+            pngfile = os.path.join(qadir, png)
+            log.info(f'Writing {pngfile}')
+            fig.savefig(pngfile)
+            plt.close()
+            
+    def bgs_rest(phot, bins=None, png=None):
+        zlim = (-0.02, 0.62)
+        mstarlim = (7., 12.5)
+        grlim = (-0.25, 1.3)
+
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
+
+        ax1.hexbin(phot['Z'], phot['LOGMSTAR'], 
+                   mincnt=mincnt, bins='log', cmap=cmap,
+                   #C=cat['weight'], reduce_C_function=np.sum,
+                   extent=np.hstack((zlim, mstarlim)))
+        ax1.set_ylim(mstarlim)
+        ax1.set_xlim(zlim)
+        ax1.set_xlabel('Redshift')
+        ax1.set_ylabel(r'$\log_{10}\ (M/M_{\odot})$')
+        #ax1.set_ylabel(r'$M_{0.1r}$')
+        #ax1.xaxis.set_major_locator(ticker.MultipleLocator(0.2))        
+
+        if bins:
+            dx, dy = bins['ZOBJMAX'][0]-bins['ZOBJMIN'][0], bins['MSTARMAX'][0]-bins['MSTARMIN'][0]
+            [ax1.add_patch(Rectangle((xx, yy), dx, dy, facecolor='none', edgecolor='k'))
+             for xx, yy in zip(bins['ZOBJMIN'], bins['MSTARMIN'])]
+
+        ax2.hexbin(phot['Z'], phot['ABSMAG01_SDSS_G']-phot['ABSMAG01_SDSS_R'], 
+                   mincnt=mincnt, bins='log', cmap=cmap,
+                   #C=cat['weight'], reduce_C_function=np.sum,
+                   extent=np.hstack((zlim, grlim)))
+        ax2.set_xlim(zlim)
+        ax2.set_ylim(grlim)
+        ax2.set_xlabel('Redshift')
+        ax2.set_ylabel(r'$^{0.1}(g - r)$')#, labelpad=-10)
+        #ax2.xaxis.set_major_locator(ticker.MultipleLocator(0.2))        
+        #ax2.yaxis.set_major_locator(ticker.MultipleLocator(0.5))        
+
+        if bins:
+            dx, dy = bins['ZOBJMAX'][0]-bins['ZOBJMIN'][0], bins['COLORMAX'][0]-bins['COLORMIN'][0]
+            [ax2.add_patch(Rectangle((xx, yy), dx, dy, facecolor='none', edgecolor='k'))
+             for xx, yy in zip(bins['ZOBJMIN'], bins['COLORMIN'])]
+
+        hb = ax3.hexbin(phot['LOGMSTAR'], phot['ABSMAG01_SDSS_G']-phot['ABSMAG01_SDSS_R'], 
+                        mincnt=mincnt, bins='log', cmap=cmap,
+                        #C=cat['weight'], reduce_C_function=np.sum,
+                        extent=np.hstack((mstarlim, grlim)))
+        ax3.set_xlabel(r'$\log_{10}\ (M/M_{\odot})$')
+        ax3.set_ylabel(r'$^{0.1}(g - r)$')#, labelpad=-10)
+        ax3.set_xlim(mstarlim)
+        ax3.set_ylim(grlim)
+        #ax3.yaxis.set_major_locator(ticker.MultipleLocator(0.5))        
+
+        if bins:
+            dx, dy = bins['MSTARMAX'][0]-bins['MSTARMIN'][0], bins['COLORMAX'][0]-bins['COLORMIN'][0]
+            [ax3.add_patch(Rectangle((xx, yy), dx, dy, facecolor='none', edgecolor='k'))
+             for xx, yy in zip(bins['MSTARMIN'], bins['COLORMIN'])]
+            
+        ax4.axis('off')
+
+        cax = fig.add_axes([0.49, 0.12, 0.02, 0.36])
+        #cax = fig.add_axes([0.54, 0.4, 0.35, 0.03])
+        formatter = ticker.LogFormatter(10, labelOnlyBase=False)
+        fig.colorbar(hb, format=formatter, label='Number of Galaxies',
+                     cax=cax)#, orientation='horizontal')
+
+        for aa in (ax1, ax2, ax3):
+            aa.grid(True)
+
+        plt.subplots_adjust(left=0.1, top=0.95, wspace=0.3, hspace=0.3, right=0.88, bottom=0.13)
+
+        if png:
+            pngfile = os.path.join(qadir, png)
+            log.info(f'Writing {pngfile}')
+            fig.savefig(pngfile)
+            plt.close()
+
+    def elg_obs(phot, png=None):
+        gobslim = (19.5, 24.5)
+        grobslim = (-1.2, 1.2)
+        rzobslim = (-1.5, 2.2)
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+
+        ax1.hexbin(phot['RMAG']-phot['ZMAG'], phot['GMAG']-phot['RMAG'], 
+                   mincnt=mincnt, bins='log', cmap=cmap,
+                   #C=cat['weight'], reduce_C_function=np.sum,
+                   extent=np.hstack((rzobslim, grobslim)))
+        ax1.set_xlabel(r'$(r - z)_{\rm obs}$')
+        ax1.set_ylabel(r'$(g - r)_{\rm obs}$')
+        ax1.set_xlim(rzobslim)
+        ax1.set_ylim(grobslim)
+
+        hb = ax2.hexbin(phot['GMAG'], phot['GMAG']-phot['RMAG'], 
+                        mincnt=mincnt, bins='log', cmap=cmap,
+                        #C=cat['weight'], reduce_C_function=np.sum,
+                        extent=np.hstack((gobslim, grobslim)))
+        ax2.set_xlabel(r'$g_{\rm obs}$')
+        ax2.set_ylim(grobslim)
+        ax2.set_xlim(gobslim)
+
+        cax = fig.add_axes([0.88, 0.12, 0.02, 0.83])
+        formatter = ticker.LogFormatter(10, labelOnlyBase=False)
+        fig.colorbar(hb, cax=cax, format=formatter, label='Number of Galaxies')
+
+        for aa in (ax1, ax2):
+            aa.grid(True)
+
+        plt.subplots_adjust(left=0.12, top=0.95, right=0.85, bottom=0.19, wspace=0.07)
+
+        if png:
+            pngfile = os.path.join(qadir, png)
+            log.info(f'Writing {pngfile}')
+            fig.savefig(pngfile)
+            plt.close()
+            
+    def elg_rest(phot, bins=None, png=None):
+        zlim = (0.5, 1.7)
+        mstarlim = (6., 13.)
+        grlim = (-0.5, 1.0)
+
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
+
+        ax1.hexbin(phot['Z'], phot['LOGMSTAR'], 
+                   mincnt=mincnt, bins='log', cmap=cmap,
+                   #C=cat['weight'], reduce_C_function=np.sum,
+                   extent=np.hstack((zlim, mstarlim)))
+        ax1.set_ylim(mstarlim)
+        ax1.set_xlim(zlim)
+        ax1.set_xlabel('Redshift')
+        ax1.set_ylabel(r'$\log_{10}\ (M/M_{\odot})$')
+        ax1.xaxis.set_major_locator(ticker.MultipleLocator(0.2))        
+
+        if bins:
+            dx, dy = bins['ZOBJMAX'][0]-bins['ZOBJMIN'][0], bins['MSTARMAX'][0]-bins['MSTARMIN'][0]
+            [ax1.add_patch(Rectangle((xx, yy), dx, dy, facecolor='none', edgecolor='k'))
+             for xx, yy in zip(bins['ZOBJMIN'], bins['MSTARMIN'])]
+
+        ax2.hexbin(phot['Z'], phot['ABSMAG01_SDSS_G']-phot['ABSMAG01_SDSS_R'], 
+                   mincnt=mincnt, bins='log', cmap=cmap,
+                   #C=cat['weight'], reduce_C_function=np.sum,
+                   extent=np.hstack((zlim, grlim)))
+        ax2.set_xlim(zlim)
+        ax2.set_ylim(grlim)
+        ax2.set_xlabel('Redshift')
+        ax2.set_ylabel(r'$^{0.0}(g - r)$', labelpad=-10)
+        ax2.xaxis.set_major_locator(ticker.MultipleLocator(0.2))        
+        ax2.yaxis.set_major_locator(ticker.MultipleLocator(0.5))        
+
+        if bins:
+            dx, dy = bins['ZOBJMAX'][0]-bins['ZOBJMIN'][0], bins['COLORMAX'][0]-bins['COLORMIN'][0]
+            [ax2.add_patch(Rectangle((xx, yy), dx, dy, facecolor='none', edgecolor='k'))
+             for xx, yy in zip(bins['ZOBJMIN'], bins['COLORMIN'])]
+
+        hb = ax3.hexbin(phot['LOGMSTAR'], phot['ABSMAG01_SDSS_G']-phot['ABSMAG01_SDSS_R'], 
+                        mincnt=mincnt, bins='log', cmap=cmap,
+                        #C=cat['weight'], reduce_C_function=np.sum,
+                        extent=np.hstack((mstarlim, grlim)))
+        ax3.set_xlabel(r'$\log_{10}\ (M/M_{\odot})$')
+        ax3.set_ylabel(r'$^{0.0}(g - r)$', labelpad=-10)
+        ax3.set_xlim(mstarlim)
+        ax3.set_ylim(grlim)
+        ax3.yaxis.set_major_locator(ticker.MultipleLocator(0.5))        
+
+        if bins:
+            dx, dy = bins['MSTARMAX'][0]-bins['MSTARMIN'][0], bins['COLORMAX'][0]-bins['COLORMIN'][0]
+            [ax3.add_patch(Rectangle((xx, yy), dx, dy, facecolor='none', edgecolor='k'))
+             for xx, yy in zip(bins['MSTARMIN'], bins['COLORMIN'])]
+            
+        ax4.axis('off')
+
+        cax = fig.add_axes([0.49, 0.12, 0.02, 0.36])
+        #cax = fig.add_axes([0.54, 0.4, 0.35, 0.03])
+        formatter = ticker.LogFormatter(10, labelOnlyBase=False)
+        fig.colorbar(hb, format=formatter, label='Number of Galaxies',
+                     cax=cax)#, orientation='horizontal')
+
+        for aa in (ax1, ax2, ax3):
+            aa.grid(True)
+
+        plt.subplots_adjust(left=0.1, top=0.95, wspace=0.3, hspace=0.3, right=0.88, bottom=0.13)
+
+        if png:
+            pngfile = os.path.join(qadir, png)
+            log.info(f'Writing {pngfile}')
+            fig.savefig(pngfile)
+            plt.close()
+
+    def lrg_obs(phot, png=None):
+        zobslim = (16, 22)
+        W1obslim = (16, 21)
+        grobslim = (0.0, 4)
+        rzobslim = (0.0, 3)
+        rW1obslim = (0.7, 4.5)
+        zW1obslim = (0, 2.7)
+
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
+
+        ax1.hexbin(phot['RMAG']-phot['W1MAG'], phot['GMAG']-phot['RMAG'], 
+                   mincnt=mincnt, bins='log', cmap=cmap,
+                   #C=cat['weight'], reduce_C_function=np.sum,
+                   #norm=LogNorm(vmin=1, vmax=100),
+                   extent=np.hstack((rW1obslim, grobslim)))
+        ax1.set_xlabel(r'$(r - W1)_{\rm obs}$')
+        ax1.set_ylabel(r'$(g - r)_{\rm obs}$')
+        ax1.set_xlim(rW1obslim)
+        ax1.set_ylim(grobslim)
+
+        ax2.hexbin(phot['ZMAG']-phot['W1MAG'], phot['RMAG']-phot['ZMAG'], 
+                   mincnt=mincnt, bins='log', cmap=cmap,
+                   #C=cat['weight'], reduce_C_function=np.sum,
+                   extent=np.hstack((zW1obslim, rzobslim)))
+
+        ax2.set_ylabel(r'$(r - z)_{\rm obs}$')
+        ax2.set_xlabel(r'$(z - W1)_{\rm obs}$')
+        ax2.set_xlim(zW1obslim)
+        ax2.set_ylim(rzobslim)
+        ax2.xaxis.set_major_locator(ticker.MultipleLocator(1))
+        ax2.yaxis.set_major_locator(ticker.MultipleLocator(1))
+        
+        ax3.hexbin(phot['ZMAG'], phot['RMAG']-phot['ZMAG'], 
+                   mincnt=mincnt, bins='log', cmap=cmap,
+                   #C=cat['weight'], reduce_C_function=np.sum,
+                   extent=np.hstack((zobslim, rzobslim)))
+        ax3.set_ylabel(r'$(r - z)_{\rm obs}$')
+        ax3.set_xlabel(r'$z_{\rm obs}$')
+        ax3.set_xlim(zobslim)
+        ax3.set_ylim(rzobslim)
+        ax3.yaxis.set_major_locator(ticker.MultipleLocator(1))
+
+        hb = ax4.hexbin(phot['W1MAG'], phot['ZMAG']-phot['W1MAG'], 
+                        mincnt=mincnt, bins='log', cmap=cmap,
+                        #C=cat['weight'], reduce_C_function=np.sum,
+                        extent=np.hstack((W1obslim, zW1obslim)))
+        ax4.set_ylabel(r'$(z - W1)_{\rm obs}$')
+        ax4.set_xlabel(r'$W1_{\rm obs}$')
+        ax4.set_xlim(W1obslim)
+        ax4.set_ylim(zW1obslim)
+        ax4.yaxis.set_major_locator(ticker.MultipleLocator(1))
+
+        cax = fig.add_axes([0.88, 0.12, 0.02, 0.83])
+        formatter = ticker.LogFormatter(10, labelOnlyBase=False) 
+        cb = fig.colorbar(hb, cax=cax, label='Number of Galaxies',
+                          format=formatter)#, ticks=[1, 10, 50])
+
+        for aa in (ax1, ax2, ax3, ax4):
+            aa.grid(True)
+
+        plt.subplots_adjust(left=0.1, top=0.95, wspace=0.25, hspace=0.32, right=0.85, bottom=0.13)
+
+        if png:
+            pngfile = os.path.join(qadir, png)
+            log.info(f'Writing {pngfile}')
+            fig.savefig(pngfile)
+            plt.close()
+
+    def lrg_rest(phot, bins=None, png=None):
+        zlim = (0.3, 1.2)
+        mstarlim = (10.2, 12.2)
+        rW1lim = (-1.4, 2.8)
+
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
+
+        ax1.hexbin(phot['Z'], phot['LOGMSTAR'], 
+                   mincnt=mincnt, bins='log', cmap=cmap,
+                   #C=cat['weight'], reduce_C_function=np.sum,
+                   extent=np.hstack((zlim, mstarlim)))
+        ax1.set_ylim(mstarlim)
+        ax1.set_xlim(zlim)
+        ax1.set_xlabel('Redshift')
+        ax1.set_ylabel(r'$\log_{10}\ (M/M_{\odot})$')
+
+        if bins:
+            dx, dy = bins['ZOBJMAX'][0]-bins['ZOBJMIN'][0], bins['MSTARMAX'][0]-bins['MSTARMIN'][0]
+            [ax1.add_patch(Rectangle((xx, yy), dx, dy, facecolor='none', edgecolor='k'))
+             for xx, yy in zip(bins['ZOBJMIN'], bins['MSTARMIN'])]
+
+        ax2.hexbin(phot['Z'], phot['ABSMAG01_SDSS_R']-phot['ABSMAG01_W1'], 
+                   mincnt=mincnt, bins='log', cmap=cmap,
+                   #C=cat['weight'], reduce_C_function=np.sum,
+                   extent=np.hstack((zlim, rW1lim)))
+        ax2.set_xlabel('Redshift')
+        ax2.set_ylabel(r'$^{0.1}(r - W1)$')
+        ax2.set_ylim(rW1lim)
+        ax2.set_xlim(zlim)
+
+        if bins:
+            dx, dy = bins['ZOBJMAX'][0]-bins['ZOBJMIN'][0], bins['COLORMAX'][0]-bins['COLORMIN'][0]
+            [ax2.add_patch(Rectangle((xx, yy), dx, dy, facecolor='none', edgecolor='k'))
+             for xx, yy in zip(bins['ZOBJMIN'], bins['COLORMIN'])]
+
+        hb = ax3.hexbin(phot['LOGMSTAR'], phot['ABSMAG01_SDSS_R']-phot['ABSMAG01_W1'],
+                        mincnt=mincnt, bins='log', cmap=cmap,
+                        #C=cat['weight'], reduce_C_function=np.sum,
+                        extent=np.hstack((mstarlim, rW1lim)))
+        ax3.set_xlabel(r'$\log_{10}\ (M/M_{\odot})$')
+        ax3.set_ylabel(r'$^{0.1}(r - W1)$')
+        ax3.set_xlim(mstarlim)
+        ax3.set_ylim(rW1lim)
+
+        if bins:
+            dx, dy = bins['MSTARMAX'][0]-bins['MSTARMIN'][0], bins['COLORMAX'][0]-bins['COLORMIN'][0]
+            [ax3.add_patch(Rectangle((xx, yy), dx, dy, facecolor='none', edgecolor='k'))
+             for xx, yy in zip(bins['MSTARMIN'], bins['COLORMIN'])]
+
+        ax4.axis('off')
+        
+        cax = fig.add_axes([0.49, 0.12, 0.02, 0.36])
+        formatter = ticker.LogFormatter(10, labelOnlyBase=False) 
+        fig.colorbar(hb, cax=cax, format=formatter, label='Number of Galaxies')
+
+        for aa in (ax1, ax2, ax3):
+            aa.grid(True)
+
+        plt.subplots_adjust(left=0.1, top=0.95, wspace=0.3, hspace=0.3, right=0.88, bottom=0.13)
+        
+        if png:
+            pngfile = os.path.join(qadir, png)
+            log.info(f'Writing {pngfile}')
+            fig.savefig(pngfile)
+            plt.close()
+            
+    # make the plots!
+    png_obs = f'{targetclass}-stacks-obs.png'
+    png_rest = f'{targetclass}-stacks-rest.png'
+    png_rest_bins = f'{targetclass}-stacks-rest-bins.png'
+    if targetclass == 'LRG':
+        #lrg_obs(fast, png=png_obs)
+        lrg_rest(fast, png=png_rest)    
+        lrg_rest(fast, bins=bins, png=png_rest_bins)
+    elif targetclass == 'ELG':
+        #elg_obs(fast, png=png_obs)            
+        elg_rest(fast, png=png_rest)    
+        elg_rest(fast, bins=bins, png=png_rest_bins)
+    elif targetclass == 'BGS_ANY':
+        #bgs_obs(fast, png=png_obs)
+        bgs_rest(fast, png=png_rest)
+        bgs_rest(fast, bins=bins, png=png_rest_bins)
+
+
+def stacks_in_bins(targtype='BGS_ANY', minperbin=3, specprod='iron',
+                   lss_specprod='fuji', minwave=None, maxwave=None, mp=1,
+                   normwave=None, verbose=False, stackfile=None):
+    """Select objects in bins of rest-frame properties.
+
+    fastphot_in_bins - also stack the fastphot continuum-fitting results
+    
+    """
+    #from fastspecfit.templates.sample import stacking_bins
+    #if fastspecfit_dir is None:
+    #    fastspecfit_dir = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit')
+    #fastspecdir = os.path.join(fastspecfit_dir, specprod, 'tiles')        
+    #
+    ## the spectral wavelength vector is identical, so just read one
+    #restfile = os.path.join(fastspecdir, 'deredshifted', '{}-{}-restflux.fits'.format(
+    #    targetclass.lower(), tilestable['TILEID'][0]))
+    #templatewave = fitsio.read(restfile, ext='WAVE')
+
+    # build the rest-frame wavelength vector
+    zmin, zmax = get_zlims(lss_specprod, targtype=targtype)
+    
+    pixkms = 20.0                            # pixel size [km/s]
+    dlogwave = pixkms / C_LIGHT / np.log(10) # pixel size [log-lambda]
+    obswave_min, obswave_max = 3600., 9800.
+    
+    restwave = 10**np.arange(np.log10(obswave_min / (1. + zmax)), np.log10(obswave_max), dlogwave)
+    restwave_min = np.min(restwave)
+    restwave_max = np.max(restwave)
+    npix = len(restwave)
+
+    bins = stacking_bins(targetclass, verbose=False)
+
+    if fastphot_in_bins:
+        from fastspecfit.continuum import ContinuumFit            
+        CFit = ContinuumFit(minwave=minwave, maxwave=maxwave)
+
+        continuumflux = []
+        continuumwave = CFit.sspwave
+        ncpix = len(continuumwave)
+    else:
+        continuumflux = None
+        continuumwave = None
+        
+    sample, templateflux, templateivar = [], [], []
+    
+    # The initial version of this code looped over tiles and then properties but
+    # that runs into memory issues and won't scale as the number of tiles
+    # increases.
+
+
+    # So, now we do it in two steps. First, we multiprocess over tiles and then
+    # properties to just get the indices of the objects we care about. And then
+    # we loop serially over properties and multiprocess over tiles to read and
+    # stack the actual spectra. Unfortunately, this does mean that we hit the
+    # disk more, but the algorithm should scale OK.
+    
+    print('HACK the number of tiles!')
+    tilestable = tilestable[[1,3]]
+
+    t0 = time.time()
+    log.info('Building the index lists.')
+    mpargs = [(fastspecdir, targetclass, tile, bins, minperbin) for tile in tilestable['TILEID']]
+    if mp > 1:
+        with multiprocessing.Pool(mp) as P:
+            tileI = P.map(_spectra_allbins_onetile, mpargs)
+    else:
+        tileI = [spectra_allbins_onetile(*_mpargs) for _mpargs in mpargs]
+    log.info('Getting all the indices took: {:.2f} min'.format((time.time()-t0) / 60))        
+
+    nbins = len(bins)
+    for ibin, sample1 in enumerate(bins[342:344]):
+        log.info('Working on bin {}/{}'.format(ibin+1, nbins))
+
+        mpargs = [(fastspecdir, targetclass, tile, sample1, minperbin, CFit, continuumwave,
+                   tileI[itile][str(ibin)], False) for itile, tile in enumerate(tilestable['TILEID'])]
+        if mp > 1:
+            with multiprocessing.Pool(mp) as P:
+                results = P.map(_spectra_onebin_onetile, mpargs)
+        else:
+            results = [spectra_onebin_onetile(*_mpargs) for _mpargs in mpargs]
+
+        # unpack the results and make the stack(s)!            
+        results = list(zip(*results))
+
+        stackbins = Table(np.hstack(results[0]))
+        idata = np.where(stackbins['NOBJ'] >= minperbin)[0]
+        if len(idata) > 0:
+            flux2d = np.vstack(np.array(results[1], dtype=object)[idata]).astype('f4')
+            ivar2d = np.vstack(np.array(results[2], dtype=object)[idata]).astype('f4')
+
+            if continuumwave is not None:
+                cflux2d = np.vstack(np.array(results[3], dtype=object)[idata]).astype('f4')
+            else:
+                cflux2d = None
+
+            # Here we could optionally subsample and make many spectra within a
+            # given bin, assuming we have enough statistics.
+            meta = Table(np.hstack(np.array(results[4], dtype=object)[idata]))
+            phot = Table(np.hstack(np.array(results[5], dtype=object)[idata]))
+            spec = Table(np.hstack(np.array(results[6], dtype=object)[idata]))
+            del results
+
+            # make the stack!
+            stackflux, stackivar, stackpix, cstackflux, cstackpix = stack_onebin(
+                flux2d, ivar2d, templatewave, normwave, cflux2d, continuumwave)
+            del flux2d, ivar2d, cflux2d
+            
+            sample1['NOBJ'] = np.sum(stackbins['NOBJ'][idata])
+            sample1['SNR'] = np.median(stackflux*np.sqrt(stackivar))
+
+            if sample1['SNR'] < 0:
+                pdb.set_trace()
+
+            # pack it all up
+            templateflux1 = np.zeros(npix, dtype='f4')
+            templateivar1 = np.zeros(npix, dtype='f4')
+            templateflux1[stackpix] = stackflux
+            templateivar1[stackpix] = stackivar
+
+            sample.append(sample1)
+            templateflux.append(templateflux1)
+            templateivar.append(templateivar1)
+            
+            if continuumwave is not None:
+                continuumflux1 = np.zeros(ncpix, dtype='f4')
+                continuumflux1[cstackpix] = cstackflux
+                continuumflux.append(continuumflux1)
+
+    sample = Table(np.hstack(sample))
+    templateflux = np.vstack(templateflux)
+    templateivar = np.vstack(templateivar)
+    if continuumwave is not None:
+        continuumflux = np.vstack(continuumflux)
+    else:
+        continuumflux = None
+
+    # write out
+    if stackfile:
+        write_binned_stacks(stackfile, templatewave, templateflux, templateivar,
+                            metadata=sample, cwave=continuumwave, cflux=continuumflux)
+
+
+
+def main():
+    """Main wrapper."""
+
+    import argparse
+
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--build-stacks', action='store_true', help='Build the stacks.')
+    parser.add_argument('--qa-stacks', action='store_true', help='Stack qa.')
+    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
+    parser.add_argument('--specprod', default='iron', help='Spectroscopic production.')
+    parser.add_argument('--lss-specprod', default='fuji', help='Spectroscopic production used for the LSS catalogs.')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')    
+    args = parser.parse_args()
+
+    # https://docs.nersc.gov/development/languages/python/parallel-python/#use-the-spawn-start-method
+    if args.mp > 1 and 'NERSC_HOST' in os.environ:
+        import multiprocessing
+        multiprocessing.set_start_method('spawn')
+
+    # build the stacks in bins of properties
+    if args.build_stacks:
+        for targtype in ['BGS_ANY', 'LRG', 'ELG']:
+            stacks_in_bins(targtype, specprod=args.specprod, lss_specprod=args.lss_specprod)
+
+    if args.qa_stacks:
+        #for targtype in ['BGS_ANY', 'LRG', 'ELG']:
+        for targtype in ['BGS_ANY']:
+            stacks_qa(targtype, specprod=args.specprod, lss_specprod=args.lss_specprod)
