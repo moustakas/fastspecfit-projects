@@ -2,6 +2,10 @@
 
 """Generate templates from stacks.
 
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-parent
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-stacks
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-stacks
+
 """
 import os, pdb
 import numpy as np
@@ -10,6 +14,8 @@ from glob import glob
 from astropy.table import Table, Column, hstack, vstack, join
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+
+from fastspecfit.util import C_LIGHT, trapz_rebin
 
 from desiutil.log import get_logger
 log = get_logger()
@@ -20,20 +26,22 @@ sns.set(context='talk', style='ticks', font_scale=0.9, palette='Set2')
 colors = sns.color_palette()
 
 desi_root = os.getenv('DESI_ROOT')
-projectdir = os.path.join(desi_root, 'users', 'ioannis', 'fastspecfit', 'redrock-templates')
-fastdir = os.path.join(projectdir, 'fastspec')
-datadir = os.path.join(projectdir, 'data')
-qadir = os.path.join(projectdir, 'qa')
+specprod_root = os.path.join(os.getenv('DESI_ROOT_READONLY'), 'spectro', 'redux')
 
-def get_zlims(lss_specprod, targtype=None):
+projectdir = os.path.join(desi_root, 'users', 'ioannis', 'fastspecfit', 'redrock-templates')
+datadir = os.path.join(projectdir, 'data')
+stacksdir = os.path.join(projectdir, 'stacks')
+qadir = os.path.join(stacksdir, 'qa')
+
+def get_zlims(lss_specprod, targetclass=None):
     if lss_specprod == 'fuji':
-        zlims = {'BGS_ANY': [0.01, 0.6], 'LRG': [0.4, 1.1], 'ELG': [0.6, 1.6]}
+        zlims = {'BGS': [0.01, 0.6], 'LRG': [0.4, 1.1], 'ELG': [0.6, 1.6]}
     elif lss_specprod == 'iron':
-        zlims = {'BGS_ANY': [0.01, 0.5], 'LRG': [0.4, 1.1], 'ELG_LOPnotqso': [0.8, 1.6]}
+        zlims = {'BGS': [0.01, 0.5], 'LRG': [0.4, 1.1], 'ELG_LOPnotqso': [0.8, 1.6]}
     else:
         raise NotImplemented
-    if targtype:
-        zlims = zlims[targtype]
+    if targetclass:
+        zlims = zlims[targetclass]
     return zlims
 
 
@@ -43,16 +51,16 @@ def stacking_bins(targetclass='LRG', verbose=False):
 
     if targetclass == 'LRG':
         zlim, nz = [0.4, 1.1], 7
-        mstarlim, nmstar = [10.5, 12.], 5 # Mstar
-        colorlim, ncolor = [-0.2, 1.8], 5   # r-W1
+        mstarlim, nmstar = [10.5, 12.], 6 # Mstar
+        colorlim, ncolor = [-0.2, 1.8], 5 # r-W1
     elif targetclass == 'ELG':
         zlim, nz = [0.7, 1.5], 8
-        mstarlim, nmstar = [8., 11.5], 7 # Mstar
-        colorlim, ncolor = [-0.1, 0.7], 4   # g-r
-    elif targetclass == 'BGS_ANY':
+        mstarlim, nmstar = [8., 11.5], 8  # Mstar
+        colorlim, ncolor = [-0.1, 0.7], 4 # g-r
+    elif targetclass == 'BGS':
         zlim, nz = [0.05, 0.55], 10
-        mstarlim, nmstar = [8., 12.], 7 # Mstar
-        colorlim, ncolor = [0.0, 1.2], 6       # g-r
+        mstarlim, nmstar = [8., 12.], 6  # Mstar
+        colorlim, ncolor = [0.0, 1.2], 6 # g-r
     else:
         raise NotImplemented
         
@@ -100,31 +108,101 @@ def stacking_bins(targetclass='LRG', verbose=False):
     return bins
 
 
+def build_parent_sample(targetclass, specprod='iron', lss_specprod='fuji', 
+                        zobj_minmax=None, mstar_minmax=None, color_minmax=None,
+                        return_indices=False, outfile=None):
+    """Read the output of redrock-templates --match-lss to build the sample.
+
+    """
+    from fastspecfit.io import read_fastspecfit, write_fastspecfit
+    
+    lsstype = 'clustering'
+
+    outfile = os.path.join(stacksdir, f'parent-{targetclass}.fits')
+    if targetclass == 'BGS':
+        _targetclass = 'BGS_ANY'
+    else:
+        _targetclass = targetclass
+    
+    fastfile = os.path.join(datadir, f'fastspec-{specprod}-{lsstype}-{_targetclass}.fits')
+    if not os.path.isfile(fastfile):
+        log.info(f'{fastfile} not found.')
+    else:
+        fast, meta, _, _ = read_fastspecfit(fastfile)
+
+    zmin, zmax = get_zlims(lss_specprod, targetclass=targetclass)
+
+    iparent = (
+        (meta['Z'] > zmin) * 
+        (meta['Z'] < zmax) *
+        (meta['SPECTYPE'] == 'GALAXY') *
+        #(meta['DELTACHI2'] > deltachi2_cut) * 
+        (fast['LOGMSTAR'] > 0) * 
+        (meta['FLUX_G'] > 0) * 
+        (meta['FLUX_R'] > 0) * 
+        (meta['FLUX_Z'] > 0) * 
+        (meta['FLUX_W1'] > 0) #*
+        #(spec['CONTINUUM_CHI2'] < fastspec_chi2cut) *
+        #(phot['CONTINUUM_CHI2'] < fastphot_chi2cut) 
+        #(np.abs(spec['CONTINUUM_SMOOTHCORR_B']) < smoothcorr_cut) *
+        #(np.abs(spec['CONTINUUM_SMOOTHCORR_R']) < smoothcorr_cut) *
+        #(np.abs(spec['CONTINUUM_SMOOTHCORR_Z']) < smoothcorr_cut)
+    )
+    iselect = iparent
+
+    #if zobj_minmax is not None and absmag_minmax is not None and color_minmax is not None:
+    #
+    #    props = SAMPLE_PROPERTIES[targetclass]
+    #    absmagcol = 'ABSMAG_{}'.format(props['absmag_band'])
+    #    color = phot['ABSMAG_{}'.format(props['color_band1'])] - phot['ABSMAG_{}'.format(props['color_band2'])]
+    #    
+    #    iselect = iparent * (
+    #        (meta['Z'] > zobj_minmax[0]) * (meta['Z'] < zobj_minmax[1]) *
+    #        (phot[absmagcol] > absmag_minmax[0]) * (phot[absmagcol] < absmag_minmax[1]) *
+    #        (color > color_minmax[0]) * (color < color_minmax[1]) )
+    #else:
+    #    iselect = iparent
+
+    log.info(f'Selecting a parent sample of {np.sum(iselect):,d}/{len(meta):,d} {targetclass.upper()}s.')
+
+    # write out
+    write_fastspecfit(fast[iselect], meta[iselect], outfile=outfile, verbose=True)
+
+
 def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
     """QA of the observed- and rest-frame photometry.
 
     """
+    from fastspecfit.io import read_fastspecfit    
     from matplotlib.patches import Rectangle    
     from matplotlib.colors import LogNorm
 
-    cmap = plt.cm.get_cmap('RdYlBu')
+    cmap = plt.cm.get_cmap('twilight')
+    #cmap = plt.cm.get_cmap('RdYlBu')
     mincnt = 1
 
-    data = read_clustering(targetclass=targetclass, specprod=specprod,
-                           lss_specprod=lss_specprod,
-                           read_lss=False, trim_broad=False)
-    fast, meta, = data[targetclass]['fast'], data[targetclass]['meta']
+    #data = read_clustering(targetclass=targetclass, specprod=specprod,
+    #                       lss_specprod=lss_specprod,
+    #                       read_lss=False, trim_broad=False)
+    #fast, meta, = data[targetclass]['fast'], data[targetclass]['meta']
+
+    fastfile = os.path.join(stacksdir, f'parent-{targetclass}.fits')    
+    fast, meta, _, _ = read_fastspecfit(fastfile)
 
     bins  = stacking_bins(targetclass, verbose=True)
     
-    def bgs_obs(phot, png=None):
-        robslim = (15, 21.0)
-        grobslim = (-0.2, 2.5)
+    def bgs_obs(meta, png=None):
+        robslim = (14, 21.0)
+        grobslim = (-0.3, 2.5)
         rzobslim = (-0.5, 1.5)
+
+        gmag = 22.5 - 2.5 * np.log10(meta['FLUX_G'])
+        rmag = 22.5 - 2.5 * np.log10(meta['FLUX_R'])
+        zmag = 22.5 - 2.5 * np.log10(meta['FLUX_Z'])
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
 
-        ax1.hexbin(phot['RMAG']-phot['ZMAG'], phot['GMAG']-phot['RMAG'],
+        ax1.hexbin(rmag-zmag, gmag-rmag,
                    mincnt=mincnt, bins='log', cmap=cmap,
                    #C=cat['weight'], reduce_C_function=np.sum
                    extent=np.hstack((rzobslim, grobslim)))
@@ -133,7 +211,7 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
         ax1.set_xlim(rzobslim)
         ax1.set_ylim(grobslim)
 
-        hb = ax2.hexbin(phot['RMAG'], phot['GMAG']-phot['RMAG'],
+        hb = ax2.hexbin(rmag, gmag-rmag, 
                         mincnt=mincnt, bins='log', cmap=cmap,
                         #C=cat['weight'], reduce_C_function=np.sum,
                         extent=np.hstack((robslim, grobslim)))
@@ -170,7 +248,7 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
         ax1.set_ylim(mstarlim)
         ax1.set_xlim(zlim)
         ax1.set_xlabel('Redshift')
-        ax1.set_ylabel(r'$\log_{10}\ (M/M_{\odot})$')
+        ax1.set_ylabel(r'$\log_{10}\,(M/M_{\odot})$')
         #ax1.set_ylabel(r'$M_{0.1r}$')
         #ax1.xaxis.set_major_locator(ticker.MultipleLocator(0.2))        
 
@@ -199,7 +277,7 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
                         mincnt=mincnt, bins='log', cmap=cmap,
                         #C=cat['weight'], reduce_C_function=np.sum,
                         extent=np.hstack((mstarlim, grlim)))
-        ax3.set_xlabel(r'$\log_{10}\ (M/M_{\odot})$')
+        ax3.set_xlabel(r'$\log_{10}\,(M/M_{\odot})$')
         ax3.set_ylabel(r'$^{0.1}(g - r)$')#, labelpad=-10)
         ax3.set_xlim(mstarlim)
         ax3.set_ylim(grlim)
@@ -229,14 +307,18 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
             fig.savefig(pngfile)
             plt.close()
 
-    def elg_obs(phot, png=None):
-        gobslim = (19.5, 24.5)
-        grobslim = (-1.2, 1.2)
-        rzobslim = (-1.5, 2.2)
+    def elg_obs(meta, png=None):
+        gobslim = (20., 24.)
+        grobslim = (-1.2, 0.8)
+        rzobslim = (-0.3, 2.3)
+
+        gmag = 22.5 - 2.5 * np.log10(meta['FLUX_G'])
+        rmag = 22.5 - 2.5 * np.log10(meta['FLUX_R'])
+        zmag = 22.5 - 2.5 * np.log10(meta['FLUX_Z'])
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
 
-        ax1.hexbin(phot['RMAG']-phot['ZMAG'], phot['GMAG']-phot['RMAG'], 
+        ax1.hexbin(rmag-zmag, gmag-rmag, 
                    mincnt=mincnt, bins='log', cmap=cmap,
                    #C=cat['weight'], reduce_C_function=np.sum,
                    extent=np.hstack((rzobslim, grobslim)))
@@ -245,14 +327,15 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
         ax1.set_xlim(rzobslim)
         ax1.set_ylim(grobslim)
 
-        hb = ax2.hexbin(phot['GMAG'], phot['GMAG']-phot['RMAG'], 
+        hb = ax2.hexbin(gmag, gmag-rmag,
                         mincnt=mincnt, bins='log', cmap=cmap,
                         #C=cat['weight'], reduce_C_function=np.sum,
                         extent=np.hstack((gobslim, grobslim)))
         ax2.set_xlabel(r'$g_{\rm obs}$')
         ax2.set_ylim(grobslim)
         ax2.set_xlim(gobslim)
-
+        ax1.yaxis.set_major_locator(ticker.MultipleLocator(0.5))
+        
         cax = fig.add_axes([0.88, 0.12, 0.02, 0.83])
         formatter = ticker.LogFormatter(10, labelOnlyBase=False)
         fig.colorbar(hb, cax=cax, format=formatter, label='Number of Galaxies')
@@ -270,8 +353,8 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
             
     def elg_rest(phot, bins=None, png=None):
         zlim = (0.5, 1.7)
-        mstarlim = (6., 13.)
-        grlim = (-0.5, 1.0)
+        mstarlim = (7., 12.5)
+        grlim = (-0.3, 0.8)
 
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
 
@@ -282,7 +365,7 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
         ax1.set_ylim(mstarlim)
         ax1.set_xlim(zlim)
         ax1.set_xlabel('Redshift')
-        ax1.set_ylabel(r'$\log_{10}\ (M/M_{\odot})$')
+        ax1.set_ylabel(r'$\log_{10}\,(M/M_{\odot})$')
         ax1.xaxis.set_major_locator(ticker.MultipleLocator(0.2))        
 
         if bins:
@@ -297,9 +380,9 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
         ax2.set_xlim(zlim)
         ax2.set_ylim(grlim)
         ax2.set_xlabel('Redshift')
-        ax2.set_ylabel(r'$^{0.0}(g - r)$', labelpad=-10)
+        ax2.set_ylabel(r'$^{0.1}(g - r)$', labelpad=-10)
         ax2.xaxis.set_major_locator(ticker.MultipleLocator(0.2))        
-        ax2.yaxis.set_major_locator(ticker.MultipleLocator(0.5))        
+        ax2.yaxis.set_major_locator(ticker.MultipleLocator(0.2))
 
         if bins:
             dx, dy = bins['ZOBJMAX'][0]-bins['ZOBJMIN'][0], bins['COLORMAX'][0]-bins['COLORMIN'][0]
@@ -310,11 +393,11 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
                         mincnt=mincnt, bins='log', cmap=cmap,
                         #C=cat['weight'], reduce_C_function=np.sum,
                         extent=np.hstack((mstarlim, grlim)))
-        ax3.set_xlabel(r'$\log_{10}\ (M/M_{\odot})$')
-        ax3.set_ylabel(r'$^{0.0}(g - r)$', labelpad=-10)
+        ax3.set_xlabel(r'$\log_{10}\,(M/M_{\odot})$')
+        ax3.set_ylabel(r'$^{0.1}(g - r)$', labelpad=-10)
         ax3.set_xlim(mstarlim)
         ax3.set_ylim(grlim)
-        ax3.yaxis.set_major_locator(ticker.MultipleLocator(0.5))        
+        ax3.yaxis.set_major_locator(ticker.MultipleLocator(0.2))
 
         if bins:
             dx, dy = bins['MSTARMAX'][0]-bins['MSTARMIN'][0], bins['COLORMAX'][0]-bins['COLORMIN'][0]
@@ -340,17 +423,22 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
             fig.savefig(pngfile)
             plt.close()
 
-    def lrg_obs(phot, png=None):
+    def lrg_obs(meta, png=None):
         zobslim = (16, 22)
-        W1obslim = (16, 21)
+        W1obslim = (16, 20.5)
         grobslim = (0.0, 4)
         rzobslim = (0.0, 3)
         rW1obslim = (0.7, 4.5)
         zW1obslim = (0, 2.7)
 
+        gmag = 22.5 - 2.5 * np.log10(meta['FLUX_G'])
+        rmag = 22.5 - 2.5 * np.log10(meta['FLUX_R'])
+        zmag = 22.5 - 2.5 * np.log10(meta['FLUX_Z'])
+        W1mag = 22.5 - 2.5 * np.log10(meta['FLUX_W1'])
+
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
 
-        ax1.hexbin(phot['RMAG']-phot['W1MAG'], phot['GMAG']-phot['RMAG'], 
+        ax1.hexbin(rmag-W1mag, gmag-rmag, 
                    mincnt=mincnt, bins='log', cmap=cmap,
                    #C=cat['weight'], reduce_C_function=np.sum,
                    #norm=LogNorm(vmin=1, vmax=100),
@@ -360,7 +448,7 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
         ax1.set_xlim(rW1obslim)
         ax1.set_ylim(grobslim)
 
-        ax2.hexbin(phot['ZMAG']-phot['W1MAG'], phot['RMAG']-phot['ZMAG'], 
+        ax2.hexbin(zmag-W1mag, rmag-zmag, 
                    mincnt=mincnt, bins='log', cmap=cmap,
                    #C=cat['weight'], reduce_C_function=np.sum,
                    extent=np.hstack((zW1obslim, rzobslim)))
@@ -372,7 +460,7 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
         ax2.xaxis.set_major_locator(ticker.MultipleLocator(1))
         ax2.yaxis.set_major_locator(ticker.MultipleLocator(1))
         
-        ax3.hexbin(phot['ZMAG'], phot['RMAG']-phot['ZMAG'], 
+        ax3.hexbin(zmag, rmag-zmag, 
                    mincnt=mincnt, bins='log', cmap=cmap,
                    #C=cat['weight'], reduce_C_function=np.sum,
                    extent=np.hstack((zobslim, rzobslim)))
@@ -382,7 +470,7 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
         ax3.set_ylim(rzobslim)
         ax3.yaxis.set_major_locator(ticker.MultipleLocator(1))
 
-        hb = ax4.hexbin(phot['W1MAG'], phot['ZMAG']-phot['W1MAG'], 
+        hb = ax4.hexbin(W1mag, zmag-W1mag,
                         mincnt=mincnt, bins='log', cmap=cmap,
                         #C=cat['weight'], reduce_C_function=np.sum,
                         extent=np.hstack((W1obslim, zW1obslim)))
@@ -410,8 +498,8 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
 
     def lrg_rest(phot, bins=None, png=None):
         zlim = (0.3, 1.2)
-        mstarlim = (10.2, 12.2)
-        rW1lim = (-1.4, 2.8)
+        mstarlim = (10.25, 12.25)
+        rW1lim = (-1., 2.8)
 
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
 
@@ -422,8 +510,9 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
         ax1.set_ylim(mstarlim)
         ax1.set_xlim(zlim)
         ax1.set_xlabel('Redshift')
-        ax1.set_ylabel(r'$\log_{10}\ (M/M_{\odot})$')
-
+        ax1.set_ylabel(r'$\log_{10}\,(M/M_{\odot})$')
+        ax1.yaxis.set_major_locator(ticker.MultipleLocator(0.5))
+        
         if bins:
             dx, dy = bins['ZOBJMAX'][0]-bins['ZOBJMIN'][0], bins['MSTARMAX'][0]-bins['MSTARMIN'][0]
             [ax1.add_patch(Rectangle((xx, yy), dx, dy, facecolor='none', edgecolor='k'))
@@ -447,7 +536,7 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
                         mincnt=mincnt, bins='log', cmap=cmap,
                         #C=cat['weight'], reduce_C_function=np.sum,
                         extent=np.hstack((mstarlim, rW1lim)))
-        ax3.set_xlabel(r'$\log_{10}\ (M/M_{\odot})$')
+        ax3.set_xlabel(r'$\log_{10}\,(M/M_{\odot})$')
         ax3.set_ylabel(r'$^{0.1}(r - W1)$')
         ax3.set_xlim(mstarlim)
         ax3.set_ylim(rW1lim)
@@ -479,39 +568,34 @@ def stacks_qa(targetclass, specprod='iron', lss_specprod='fuji'):
     png_rest = f'{targetclass}-stacks-rest.png'
     png_rest_bins = f'{targetclass}-stacks-rest-bins.png'
     if targetclass == 'LRG':
-        #lrg_obs(fast, png=png_obs)
+        lrg_obs(meta, png=png_obs)
         lrg_rest(fast, png=png_rest)    
         lrg_rest(fast, bins=bins, png=png_rest_bins)
     elif targetclass == 'ELG':
-        #elg_obs(fast, png=png_obs)            
+        elg_obs(meta, png=png_obs)            
         elg_rest(fast, png=png_rest)    
         elg_rest(fast, bins=bins, png=png_rest_bins)
-    elif targetclass == 'BGS_ANY':
-        #bgs_obs(fast, png=png_obs)
+    elif targetclass == 'BGS':
+        bgs_obs(meta, png=png_obs)
         bgs_rest(fast, png=png_rest)
         bgs_rest(fast, bins=bins, png=png_rest_bins)
 
 
-def stacks_in_bins(targtype='BGS_ANY', minperbin=3, specprod='iron',
+def stacks_in_bins(targetclass='BGS', minperbin=3, specprod='iron',
                    lss_specprod='fuji', minwave=None, maxwave=None, mp=1,
-                   normwave=None, verbose=False, stackfile=None):
+                   normwave=None, verbose=False, overwrite=False):
     """Select objects in bins of rest-frame properties.
 
     fastphot_in_bins - also stack the fastphot continuum-fitting results
     
     """
-    #from fastspecfit.templates.sample import stacking_bins
-    #if fastspecfit_dir is None:
-    #    fastspecfit_dir = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit')
-    #fastspecdir = os.path.join(fastspecfit_dir, specprod, 'tiles')        
-    #
-    ## the spectral wavelength vector is identical, so just read one
-    #restfile = os.path.join(fastspecdir, 'deredshifted', '{}-{}-restflux.fits'.format(
-    #    targetclass.lower(), tilestable['TILEID'][0]))
-    #templatewave = fitsio.read(restfile, ext='WAVE')
+    from desispec.spectra import stack as stack_Spectra
+    from desispec.io.spectra import read_spectra
+    from desigal import specutils
+    from fastspecfit.io import read_fastspecfit
 
     # build the rest-frame wavelength vector
-    zmin, zmax = get_zlims(lss_specprod, targtype=targtype)
+    zmin, zmax = get_zlims(lss_specprod, targetclass=targetclass)
     
     pixkms = 20.0                            # pixel size [km/s]
     dlogwave = pixkms / C_LIGHT / np.log(10) # pixel size [log-lambda]
@@ -524,33 +608,91 @@ def stacks_in_bins(targtype='BGS_ANY', minperbin=3, specprod='iron',
 
     bins = stacking_bins(targetclass, verbose=False)
 
-    if fastphot_in_bins:
-        from fastspecfit.continuum import ContinuumFit            
-        CFit = ContinuumFit(minwave=minwave, maxwave=maxwave)
+    fastfile = os.path.join(stacksdir, f'parent-{targetclass}.fits')
+    fast, meta, _, _ = read_fastspecfit(fastfile)
 
-        continuumflux = []
-        continuumwave = CFit.sspwave
-        ncpix = len(continuumwave)
-    else:
-        continuumflux = None
-        continuumwave = None
+    stackfile = os.path.join(stacksdir, f'stacks-{targetclass}.fits')
+    if os.path.isfile(fastfile) and not overwrite:
+        log.info(f'Output file {stackfile} exists and --overwrite not set.')
+        return
+
+    allmeta = []
+    for bin in bins:
+        if targetclass == 'BGS':
+            I = np.where((fast['Z'] > bin['ZOBJMIN']) * (fast['Z'] < bin['ZOBJMAX']) *
+                         (fast['LOGMSTAR'] > bin['MSTARMIN']) * (fast['LOGMSTAR'] < bin['MSTARMAX']) *
+                         ((fast['ABSMAG01_SDSS_G']-fast['ABSMAG01_SDSS_R']) > bin['COLORMIN']) *
+                         ((fast['ABSMAG01_SDSS_G']-fast['ABSMAG01_SDSS_R']) < bin['COLORMAX']))[0]
+        elif targetclass == 'LRG':
+            I = np.where((fast['Z'] > bin['ZOBJMIN']) * (fast['Z'] < bin['ZOBJMAX']) *
+                         (fast['LOGMSTAR'] > bin['MSTARMIN']) * (fast['LOGMSTAR'] < bin['MSTARMAX']) *
+                         ((fast['ABSMAG01_SDSS_R']-fast['ABSMAG01_W1']) > bin['COLORMIN']) *
+                         ((fast['ABSMAG01_SDSS_R']-fast['ABSMAG01_W1']) < bin['COLORMAX']))[0]
+        elif targetclass == 'ELG':
+            I = np.where((fast['Z'] > bin['ZOBJMIN']) * (fast['Z'] < bin['ZOBJMAX']) *
+                         (fast['LOGMSTAR'] > bin['MSTARMIN']) * (fast['LOGMSTAR'] < bin['MSTARMAX']) *
+                         ((fast['ABSMAG01_SDSS_G']-fast['ABSMAG01_SDSS_R']) > bin['COLORMIN']) *
+                         ((fast['ABSMAG01_SDSS_G']-fast['ABSMAG01_SDSS_R']) < bin['COLORMAX']))[0]
+        else:
+            pdb.set_trace()
+
+        if len(I) > minperbin:
+            specfiles = []
+            for mm in meta[I]:
+                survey, program, healpix = mm['SURVEY'], mm['PROGRAM'], mm['HEALPIX']
+                specfiles.append(os.path.join(specprod_root, specprod, 'healpix', survey, program, str(healpix//100),
+                                              str(healpix), f'coadd-{survey}-{program}-{healpix}.fits'))
+            specfiles = np.array(specfiles)
+            uspecfiles = np.unique(specfiles)
+            if len(uspecfiles) > 2:
+                print('Hack!')
+                uspecfiles = uspecfiles[:2]
+
+            # read and then combine all the spectra
+            allSpectra = []
+            redshifts = []
+            for uspecfile in uspecfiles:
+                J = np.where(uspecfile == specfiles)[0]
+                redshifts.append(meta['Z'][I][J].data)
+                targetids = meta['TARGETID'][I][J]
+                allSpectra.append(read_spectra(uspecfile, targetids=targetids, skip_hdus=['SCORES', 'EXTRA_CATALOG']))
+
+            redshifts = np.hstack(redshifts)
+            allSpectra = stack_Spectra(allSpectra)
+
+            (stackflux, stackivar), _ = specutils.stack.stack_spectra(spectra=allSpectra,
+                                                      redshift=redshifts,
+                                                      stack_redshift=0.,
+                                                      norm_flux_window=[5475., 5525.],
+                                                      norm_method="median", #"mean", "median", "flux-window"
+                                                      resample_method="linear",
+                                                      stack_method="ivar-weighted-mean", #median , mean
+                                                      output_wave_grid=restwave,
+                                                      #bootstrap=True, bootstrap_samples=50)#,
+                                                      multiplication_factor=np.expand_dims(multiplication_factor, axis=-1)
+                                                   
+
+            pdb.set_trace()
+
+    #if fastphot_in_bins:
+    #    from fastspecfit.continuum import ContinuumFit            
+    #    CFit = ContinuumFit(minwave=minwave, maxwave=maxwave)
+    #
+    #    continuumflux = []
+    #    continuumwave = CFit.sspwave
+    #    ncpix = len(continuumwave)
+    #else:
+    #    continuumflux = None
+    #    continuumwave = None
         
-    sample, templateflux, templateivar = [], [], []
+    #sample, templateflux, templateivar = [], [], []
     
-    # The initial version of this code looped over tiles and then properties but
-    # that runs into memory issues and won't scale as the number of tiles
-    # increases.
-
-
     # So, now we do it in two steps. First, we multiprocess over tiles and then
     # properties to just get the indices of the objects we care about. And then
     # we loop serially over properties and multiprocess over tiles to read and
     # stack the actual spectra. Unfortunately, this does mean that we hit the
     # disk more, but the algorithm should scale OK.
     
-    print('HACK the number of tiles!')
-    tilestable = tilestable[[1,3]]
-
     t0 = time.time()
     log.info('Building the index lists.')
     mpargs = [(fastspecdir, targetclass, tile, bins, minperbin) for tile in tilestable['TILEID']]
@@ -641,6 +783,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--build-parent', action='store_true', help='Build the parent sample.')
     parser.add_argument('--build-stacks', action='store_true', help='Build the stacks.')
     parser.add_argument('--qa-stacks', action='store_true', help='Stack qa.')
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
@@ -654,12 +797,21 @@ def main():
         import multiprocessing
         multiprocessing.set_start_method('spawn')
 
-    # build the stacks in bins of properties
-    if args.build_stacks:
-        for targtype in ['BGS_ANY', 'LRG', 'ELG']:
-            stacks_in_bins(targtype, specprod=args.specprod, lss_specprod=args.lss_specprod)
+    # build the parent sample
+    if args.build_parent:
+        for targetclass in ['BGS', 'LRG', 'ELG']:
+            build_parent_sample(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod)
 
     if args.qa_stacks:
-        #for targtype in ['BGS_ANY', 'LRG', 'ELG']:
-        for targtype in ['BGS_ANY']:
-            stacks_qa(targtype, specprod=args.specprod, lss_specprod=args.lss_specprod)
+        for targetclass in ['BGS', 'LRG', 'ELG']:
+        #for targetclass in ['ELG']:
+            stacks_qa(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod)
+
+    # build the stacks in bins of properties
+    if args.build_stacks:
+        for targetclass in ['BGS', 'LRG', 'ELG']:
+            stacks_in_bins(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod)
+
+if __name__ == '__main__':
+    main()
+    
