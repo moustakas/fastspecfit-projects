@@ -1742,6 +1742,7 @@ def qa_zvz(specprod='iron'):
         I = zcat_new[targclass]
         _plot_allrows(zcat_old[I], zcat_new[I], targtype=targtype, zscan=zscan, targclass=targclass)
 
+
 def build_redrock_templates(specprod='iron', niter=10, ncomp=10, minwave=400., dwave=0.2, nmf=False):
     """Build new templates."""
 
