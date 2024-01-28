@@ -1430,6 +1430,7 @@ def qa_zcompleteness(specprod='iron'):
         old = zcat_old[zcat_old[targclass] * (zcat_old['ZWARN'] == 0) * (zcat_old['COADD_FIBERSTATUS'] == 0)]
         new = zcat_new[zcat_new[targclass] * (zcat_new['ZWARN'] == 0) * (zcat_new['COADD_FIBERSTATUS'] == 0)]
         _makeplot(old, new, targtype, targclass)
+
         
 def qa_zvz(specprod='iron'):
     """Redshift vs redshift fitting results.
