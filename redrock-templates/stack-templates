@@ -2,29 +2,37 @@
 
 """Generate templates from stacks.
 
-1.
-  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-parent
+1. Build the parent sample by cross-matching the FastSpecFit/Iron and LSS/Fuji SV3 VACs.
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-parent
 
-2.
-  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-parent
+2. Generate QA plots of the parent samples.
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-parent
 
-3.
-  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-stacks
+3. Build the stacked spectra in bins of properties.
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-stacks
 
-4.
-  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --fastspec-stacks
+4. Model the resulting stacks using FastSpecFit.
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --fastspec-stacks
 
 5. Build empca and nmf templates.
-  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --empca-templates
-  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --nmf-templates
+salloc -N 1 -C gpu -A desi -t 01:00:00 --qos interactive
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --empca-templates
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --nmf-templates
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-templates
 
 6. Gather the {specprod} (iron) Redrock results.
-  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --gather-specprod-results
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --gather-specprod-results
 
 7. Run Redrock with a few different priors:
-  salloc -N 1 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
-  time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --run-redrock
+salloc -N 1 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --run-redrock
 
+8. Build zvz QA:
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --redshift-qa --rrmethod=PCA
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --redshift-qa --rrmethod=NMF
+
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --outliers-qa --rrmethod=PCA --overwrite
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --outliers-qa --rrmethod=NMF --overwrite
 
 """
 import os, time, pdb
@@ -50,7 +58,7 @@ desi_root = os.getenv('DESI_ROOT')
 specprod_root = os.path.join(os.getenv('DESI_ROOT_READONLY'), 'spectro', 'redux')
 
 projectdir = os.path.join(desi_root, 'users', 'ioannis', 'fastspecfit', 'redrock-templates')
-datadir = os.path.join(projectdir, 'data')
+#datadir = os.path.join(projectdir, 'data')
 stacksdir = os.path.join(projectdir, 'stacks')
 qadir = os.path.join(stacksdir, 'qa')
 templatedir = os.path.join(stacksdir, 'rrtemplates')
@@ -64,7 +72,7 @@ zscan_priors = {
 qazlims = {
     'BGS-zscan01':    [-0.15, 2.],
     'LRG-zscan01':    [-0.15, 2.],
-    'ELG-zscan01':    [-0.15, 2.],#5.],
+    'ELG-zscan01':    [-0.15, 5.],
     'QSO-zscan01':    [-0.15, 5.],
     'desihiz-zscan01': [-0.15, 5.],
     'BGS-zscan02':    [-0.15, 4.],
@@ -197,7 +205,7 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='PCA', rrver
     from desispec.validredshifts import validate
 
     orig_templatedir = os.getenv('RR_TEMPLATE_DIR')
-    os.environ['RR_TEMPLATE_DIR'] = os.path.join(templatedir, rrversion)
+    os.environ['RR_TEMPLATE_DIR'] = os.path.join(templatedir, f'{rrmethod}-{rrversion}')
 
     # set the redshift scan prior
     zscan_galaxy = zscan_priors[zscan_prior]
@@ -261,7 +269,7 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='PCA', rrver
 
     os.environ['RR_TEMPLATE_DIR'] = orig_templatedir
 
-    # gather and write out the results
+    # gather and write out the results (always overwrite)
     out_zcatfile = os.path.join(stacksdir, f'zcat-vitiles-templates-{rrmethod}-{rrversion}-zscan{zscan_prior}.fits')
     zcatfiles = glob(os.path.join(outdir, f'zcat-[0-9]-?????.fits'))
     zcat = vstack([Table(fitsio.read(zcatfile)) for zcatfile in zcatfiles])
@@ -329,7 +337,7 @@ def stacking_bins(targetclass='LRG', verbose=False):
                 ibin += 1
 
     if verbose:
-        log.info(f'Number of {targetclass} bins = {bins}')
+        log.info(f'Number of {targetclass} bins = {len(bins)}')
 
     return bins
 
@@ -395,7 +403,122 @@ def build_parent_sample(targetclass, specprod='iron', lss_specprod='fuji',
     write_fastspecfit(fast[iselect], meta[iselect], outfile=outfile, verbose=True)
 
 
-def qa_parent(targetclass, specprod='iron', lss_specprod='fuji'):
+def qa_parent_distributions(specprod='iron',  lss_specprod='fuji'):
+    """Build some QA of the parent sample."""
+
+    import corner as cn
+    from matplotlib import colors
+    import matplotlib.patches as mpatches
+    from fastspecfit.io import read_fastspecfit
+
+    lsstype = 'clustering'
+
+    targetclasses = ['BGS', 'LRG', 'ELG']
+    lssclasses = ['BGS_ANY', 'LRG', 'ELG']
+
+    data = {}
+    for targetclass in targetclasses:
+        fastfile = os.path.join(stacksdir, f'parent-{targetclass}.fits')
+        fast, meta, _, _ = read_fastspecfit(fastfile)
+        data[targetclass] = {'fast': fast, 'meta': meta}
+
+    cols = [colors.to_hex(col) for col in ['darkgreen', 'darkred', 'darkblue']]
+    #cols = [colors.to_hex(col) for col in ['darkseagreen', 'orangered', 'dodgerblue']]
+
+    levels = [0.5, 0.75, 0.95, 0.99]
+    smooth = 1.5
+    mstarlim = [6.5, 12.5]
+    sfrlim = [-5, 4]
+    redshiftlim = [-0.05, 1.7]
+    vdisplim = [50., 475.]
+    linewidthlim = [0, 350]
+
+    hh = []
+    fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+    for targetclass, col, in zip(['BGS', 'LRG', 'ELG'][::-1], cols[::-1]):
+        fast = data[targetclass]['fast']
+        meta = data[targetclass]['meta']
+
+        cn.hist2d(meta['Z'], fast['LOGMSTAR'], fill_contours=False,
+                  range=[redshiftlim, mstarlim],
+                  bins=50, color=col, smooth=smooth, levels=levels,
+                  contour_kwargs={'colors': col, 'alpha': 0.8, 'linewidths': 1},
+                  label=targetclass, 
+                  data_kwargs={'color': col, 'alpha': 0.5, 'ms': 2}, ax=ax[0])
+        hh.append(mpatches.Patch(color=col, label=targetclass, alpha=0.5))
+    ax[0].set_xlabel('Redshift')
+    ax[0].set_ylabel(r'$\log_{10}\ (M/M_{\odot})$')
+    #ax[0].legend(handles=hh, fontsize=11)
+
+    for targetclass, col, in zip(['ELG', 'BGS', 'LRG'], [cols[2], cols[0], cols[1]]):
+        fast = data[targetclass]['fast']
+        meta = data[targetclass]['meta']
+        I = fast['SFR'] > 0
+        print(targetclass, np.sum(I))
+
+        cn.hist2d(fast['LOGMSTAR'][I], np.log10(fast['SFR'][I]), fill_contours=False,
+                  range=[mstarlim, sfrlim],
+                  bins=50, color=col, smooth=smooth, levels=levels,
+                  contour_kwargs={'colors': col, 'alpha': 0.8, 'linewidths': 1},
+                  label=targetclass, 
+                  data_kwargs={'color': col, 'alpha': 0.5, 'ms': 2}, ax=ax[1])
+    ax[1].set_xlabel(r'$\log_{10}(M\ /\ M_{\odot})$')
+    ax[1].set_ylabel(r'$\log_{10}(\mathrm{SFR}\ /\ M_{\odot}\ \mathrm{yr}^{-1})$')
+    ax[1].legend(handles=hh, fontsize=11, loc='upper left')
+    fig.tight_layout()
+    pngfile = os.path.join(qadir, 'qa-parent-logmstar.png')
+    fig.savefig(pngfile)
+    print(f'Wrote {pngfile}')
+
+    fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+    for targetclass, col, in zip(['BGS', 'LRG'], cols[:3]):
+        fast = data[targetclass]['fast']
+        meta = data[targetclass]['meta']
+        I = fast['VDISP_IVAR'] > 0
+        ax[0].hist(fast['VDISP'][I], bins=30, color=col, range=vdisplim, alpha=0.5)#,
+                   #edgecolor='k')#, histtype='stepfilled')
+    ax[0].set_xlabel(r'$\sigma_{star}$ (km/s)')
+    ax[0].set_ylabel('Number')
+
+    for targetclass, col, in zip(['ELG', 'BGS', 'LRG'], [cols[2], cols[0], cols[1]]):
+        fast = data[targetclass]['fast']
+        meta = data[targetclass]['meta']
+        I = fast['NARROW_SIGMA'] > 0
+        ax[1].hist(fast['NARROW_SIGMA'][I], bins=30, color=col, range=linewidthlim, alpha=0.5,
+                   label=targetclass)#, edgecolor=col)
+    ax[1].set_xlabel(r'$\sigma_{line}$ (km/s)')
+    ax[1].set_ylabel('Number')
+    ax[1].legend(loc='upper right', fontsize=11)
+    fig.tight_layout()
+    pngfile = os.path.join(qadir, 'qa-parent-velwidth.png')
+    fig.savefig(pngfile)
+    print(f'Wrote {pngfile}')
+
+    #fig, ax = plt.subplots(1, 3, figsize=(12, 3))
+    #for targetclass, xx, col in zip(['BGS', 'LRG', 'ELG'], ax.flat, cols):
+    
+    fig, xx = plt.subplots(figsize=(8, 6))
+    for targetclass, col in zip(['BGS', 'LRG', 'ELG'][::-1], cols[::-1]):
+        fast = data[targetclass]['fast']
+        meta = data[targetclass]['meta']
+        zlim = (0, 1.6) # (np.min(fast['Z']), np.max(fast['Z']))
+        #print(zlim)
+        xx.hist(fast['Z'], bins=30, color=col, range=zlim, alpha=0.5,
+                label=f'{targetclass} (N={len(fast):,d})')
+        #xx.hist(fast['Z'][B], bins=100, color='k', fill=True, range=zlim)
+        #xx.set_yscale('log')
+    xx.legend(loc='upper right', fontsize=11)
+    xx.set_xlabel('Redshift')
+    xx.set_ylabel('Number')
+    #ax.flat[-1].axis('off')
+    #ax[0].set_ylabel('Number')
+    fig.tight_layout()
+    pngfile = os.path.join(qadir, 'qa-parent-zhist.png')
+    fig.savefig(pngfile)
+    print(f'Wrote {pngfile}')
+
+    
+def qa_parent_bins(targetclass, specprod='iron', lss_specprod='fuji'):
     """QA of the observed- and rest-frame photometry.
 
     """
@@ -807,8 +930,7 @@ def qa_parent(targetclass, specprod='iron', lss_specprod='fuji'):
         bgs_rest(fast, bins=bins, png=png_rest_bins)
 
 
-def fastspec_stacks(targetclass='BGS', mp=1, select_broad=False, minwave=400.,
-                    maxwave=1e4, dwave=0.4):
+def fastspec_stacks(targetclass='BGS', mp=1, select_broad=False, minwave=400., maxwave=1e4, dwave=0.4):
     """Run fastspec on the stacks and also rebuild (and write out) the resulting
     spectrophotometric models.
 
@@ -833,8 +955,7 @@ def fastspec_stacks(targetclass='BGS', mp=1, select_broad=False, minwave=400.,
         outfile = os.path.join(stacksdir, f'modelflux-stacks-{targetclass}.fits')
     
     cmdargs = f'{stackfile} -o {fastfile} --mp {mp}'
-    if False:
-        stackfit(args=cmdargs.split())
+    stackfit(args=cmdargs.split())
 
     # next, rebuild and write out the final models, sampled to a uniform
     # wavelength grid
@@ -853,7 +974,6 @@ def fastspec_stacks(targetclass='BGS', mp=1, select_broad=False, minwave=400.,
     allfast = Table(fitsio.read(fastfile, 'FASTSPEC'))
     nobj = len(allfast)
 
-    stackfile = os.path.join(stacksdir, f'stacks-{targetclass}.fits')
     allwave = fitsio.read(stackfile, 'WAVE')
     allflux = fitsio.read(stackfile, 'FLUX')
 
@@ -898,10 +1018,13 @@ def stacks_in_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     
     """
     import warnings
-    from desispec.spectra import stack as stack_Spectra
-    from desispec.io.spectra import read_spectra
+    from desispec.io.spectra import read_spectra_parallel
+    #from desispec.spectra import stack as stack_Spectra
+    #from desispec.io.spectra import read_spectra
     from desigal import specutils
     from fastspecfit.io import read_fastspecfit
+
+    specprod_dir = os.path.join(specprod_root, specprod)
 
     rand = np.random.default_rng(seed=seed)
 
@@ -951,7 +1074,7 @@ def stacks_in_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     stackivar = np.zeros((nbins, npix))
 
     for ibin, bin in enumerate(bins):
-        log.info(f'Working on bin {ibin+1}/{nbins}')
+        #log.info(f'Working on bin {ibin+1}/{nbins}')
         if targetclass == 'BGS' or targetclass == 'ELG':
             I = ((fast['Z'] > bin['ZOBJMIN']) * (fast['Z'] < bin['ZOBJMAX']) *
                  (fast['LOGMSTAR'] > bin['MSTARMIN']) * (fast['LOGMSTAR'] < bin['MSTARMAX']) *
@@ -986,10 +1109,14 @@ def stacks_in_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
 
         t0 = time.time()
         #log.info(f'Gathering ({len(I):,d}/{outmeta["NALLOBJ"][ibin]:,d} spectra.)')
+        
         os.environ['DESI_LOGLEVEL'] = 'warning'
-        spectra = specutils.get_spectra(targetids, release='iron', survey=survey,
-                                        program=program, n_workers=mp, use_db=False,
-                                        zcat_table=None)
+        spectra = read_spectra_parallel(fast[I], prefix='coadd', specprod_dir=specprod_dir, nproc=mp,
+                                        rdspec_kwargs={'skip_hdus': ['EXP_FIBERMAP', 'SCORES', 'EXTRA_CATALOG', 'RESOLUTION']})
+        spectra = spectra[geomask.match_to(spectra.target_ids(), targetids)]
+        #spectra = specutils.get_spectra(targetids, release='iron', survey=survey,
+        #                                program=program, n_workers=mp, use_db=False,
+        #                                zcat_table=None)
         assert(np.all(spectra.target_ids() == targetids))
         os.environ['DESI_LOGLEVEL'] = 'info'
         log.info(f'Gathering {len(I):,d}/{outmeta["NALLOBJ"][ibin]:,d} spectra took {(time.time()-t0)/1.:.2f} sec.')
@@ -1002,7 +1129,7 @@ def stacks_in_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
                                                             stack_redshift=0.,
                                                             norm_flux_window=norm_flux_window,
                                                             norm_method="flux-window", #"mean", "median", "flux-window"
-                                                            resample_method="flux-cons",
+                                                            resample_method="linear", # "flux-cons",
                                                             stack_method="ivar-weighted-mean", #median , mean
                                                             output_wave_grid=restwave,
                                                             n_workers=mp,
@@ -1049,27 +1176,62 @@ def build_redrock_templates(niter=10, ncomp=10, nmf=False, rrversion='0.1'):
     dwave = wave[1]-wave[0] # uniform pixel scale
             
     flux = np.vstack(flux) # [ngal, nwave]
-    ngal, npix = flux.shape
+    nobj, nwave = flux.shape
 
     # normalize
     norm = np.median(flux, axis=1)
     flux /= norm[:, np.newaxis]
 
     if nmf:
+        import cupy as cp
         from nearly_nmf.nmf import fit_NMF
         rrmethod = 'NMF'
-        pdb.set_trace()
-        H, W = fit_NMF(X=flux, V=np.ones_like(flux), n_templates=ncomp)
+        X = cp.array(flux)#[:20, :])
+        V = cp.ones_like(X)
+        # H: [ncomp, nwave]
+        # W: [nobj, ncomp]
+        H, W, chi2 = fit_NMF(X=X, V=V, n_templates=ncomp, algorithm='nearly',
+                             return_chi_2=True, verbose=True, n_iter=10000,
+                             use_gpu=True)
+        H = H.get()
+        W = W.get()
+
+        #H_shape = (args.n_templates, X.shape[1])
+        #W_shape = (X.shape[0], args.n_templates)
+        #
+        ## Sequential start so we can use a smooth flat W start
+        ## for every template
+        #H_start = rng.uniform(0, 1, H_shape) + 1
+        #W_start = np.ones(W_shape)
+        #
+        #H_nearly = cp.array(H_start, copy=True, dtype=args.dtype)
+        #W_nearly = cp.array(W_start, copy=True, dtype=args.dtype)
+        #
+        #print("Starting iteration")
+        #n_iter = 50
+        #for i in range(args.n_templates):
+        #    H_itr, W_itr = nmf.nearly_NMF(X, V, H_nearly[:(i + 1), :], W_nearly[:, :(i + 1)], n_iter=n_iter)
+        #
+        #    # Place the template we train into the array for the next iteration
+        #    H_nearly[:(i + 1), :] = H_itr
+        #    W_nearly[:, :(i + 1)] = W_itr
+        #
+        ## Refining the templates
+        #H_nearly, W_nearly = nmf.nearly_NMF(X, V, H_nearly, W_nearly, n_iter=1000)
+        
     else:
         from empca import empca
         rrmethod = 'PCA'
         model = empca(flux, niter=niter, nvec=ncomp)
         
-        empca_eigenvec = model.eigvec  # [ncomp, npix]
-        empca_eigencoeff = model.coeff # [ngal, ncomp]
-        empca_model = empca_eigencoeff.dot(empca_eigenvec)
-    
-    rrtemplatedir = os.path.join(templatedir, rrversion)
+        H = model.eigvec  # [ncomp, nwave]
+        W = model.coeff   # [nobj, ncomp]
+        #empca_eigenvec = model.eigvec  # [ncomp, nwave]
+        #empca_eigencoeff = model.coeff # [nobj, ncomp]
+        
+    modelflux = W.dot(H) # reconstructed spectra [nobj, nwave]
+
+    rrtemplatedir = os.path.join(templatedir, f'{rrmethod}-{rrversion}')
     if not os.path.isdir(rrtemplatedir):
         os.makedirs(rrtemplatedir)
     rrtemplatefile = os.path.join(rrtemplatedir, f'rrtemplate-galaxy-{rrmethod}-{rrversion}.fits')
@@ -1085,14 +1247,221 @@ def build_redrock_templates(niter=10, ncomp=10, nmf=False, rrversion='0.1'):
     header['CRVAL1'] = (minwave, 'restframe starting wavelength [Angstroms]')
     header['CDELT1'] = dwave
     header['LOGLAM'] = 0
-    #header['INSPEC'] = os.environ['DESI_BASIS_TEMPLATES']
-    #header['SEED'] = opts.seed
     
     hdus = fits.HDUList()
-    hdus.append(fits.PrimaryHDU(empca_eigenvec, header=header))
-    #hdus.append(fits.ImageHDU(empca_eigencoeff, name='ARCHETYPE_COEFF'))
+    hdus.append(fits.PrimaryHDU(H, header=header))
+    hdus.append(fits.ImageHDU(W, name='COEFF'))
     hdus.writeto(rrtemplatefile, overwrite=True)
     log.info(f'Wrote {rrtemplatefile}')
+
+
+def qa_redrock_templates(rrmethod='PCA', rrversion='0.1', nplot=25):
+    """QA of the new redrock templates.
+
+    """
+    from matplotlib.backends.backend_pdf import PdfPages
+    
+    rrtemplatedir = os.path.join(templatedir, f'{rrmethod}-{rrversion}')
+    rrtemplatefile = os.path.join(rrtemplatedir, f'rrtemplate-galaxy-{rrmethod}-{rrversion}.fits')
+
+    hdr = fitsio.read_header(rrtemplatefile, ext='BASIS_VECTORS')
+    nwave = hdr['NAXIS1']
+    ncomp = hdr['NAXIS2']
+
+    modelwave = np.arange(nwave) * hdr['CDELT1'] + hdr['CRVAL1']
+
+    H = fitsio.read(rrtemplatefile, ext='BASIS_VECTORS') # H matrix - [ncomp, npix]
+    W = fitsio.read(rrtemplatefile, ext='COEFF')         # W matrix - [ngal, ncomp]
+    modelflux = W.dot(H)                                 # reconstructed spectra [nobj, nwave]    
+
+    pngfile = os.path.join(qadir, f'qa-templates-{rrmethod}-{rrversion}.png')
+    #from speclite import filters
+    #filt = filters.load_filters('decam2014-g', 'decam2014-r')
+    #padflux, padwave = filt.pad_spectrum(nmf_eigenvec, wave, axis=0, method='edge')
+    #mags = filt.get_ab_magnitudes(padflux, padwave) # speclite.filters wants an [nmodel,npix] array
+    #gr = mags['decam2014-g'] - mags['decam2014-r']
+    #srt = np.argsort(gr)
+
+    ylim = np.percentile(H, [0.1, 99.9])
+
+    fig, ax = plt.subplots()#figsize=(8, 5))
+    I = np.arange(nwave)
+    #I = np.where((wave > 3727-20) * (wave < 3727+20))[0]
+    #I = np.where(wave < 900.)[0]
+
+    current_palette = sns.color_palette()
+    sns.set_palette('Set1', H.shape[0])
+    colors = iter(sns.color_palette())
+
+    # plot in reverse order, so the most important templates are on top
+    for ic in range(ncomp-1, -1, -1):
+    #for ic in range(ncomp):
+        yplot = H[ic, I] / np.std(H[ic, I])
+        ax.plot(modelwave[I], yplot, alpha=0.9, color=next(colors), lw=1)
+    #for ii, ic in enumerate(srt):
+        #I = np.where(H[ic, :] > 0)[0]
+        #ax.plot(modelwave[I]/1e4, H[ic, I] + ii)
+    #ax.set_ylim(ylim) # -0.01, 0.01)
+    ax.set_ylim(-5, 10)#7.5, 7.5)
+    #ax.set_xlim(3727-20, 3727+20)
+    #ax.set_yticklabels([])
+    ax.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
+    ax.set_ylabel(r'$F\ /\ \sigma_{F}$')
+    #ax.set_ylabel(r'Normalized Flux (+offsets)')
+    ax.margins(x=0)
+    #ax.set_xscale('log')
+    #ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: '{:g}'.format(y)))
+    ax.set_title(f'{rrmethod}-{rrversion}')
+    fig.tight_layout()
+    fig.savefig(pngfile)
+    plt.close()
+    log.info(f'Wrote {pngfile}')
+    sns.set_palette(current_palette)
+
+    # plot the first few reconstructed spectra
+    flux = []
+    meta = []
+    for targetclass in ['BGS', 'BGS-broad', 'LRG', 'ELG']:
+        modelfile = os.path.join(stacksdir, f'modelflux-stacks-{targetclass}.fits')
+        log.info(f'Reading {modelfile}')
+        flux.append(fitsio.read(modelfile, 'FLUX'))#, rows=np.arange(10)))
+        _meta = Table(fitsio.read(modelfile.replace('modelflux-', 'fastspec-'), 'METADATA'))
+        _meta['TARGETCLASS'] = targetclass
+        meta.append(_meta)
+        # wavelength vector is identical
+        if targetclass == 'BGS':
+            wave = fitsio.read(modelfile, 'WAVE')
+    flux = np.vstack(flux) # [ngal, nwave]
+    meta = vstack(meta)
+
+    # normalize
+    norm = np.median(flux, axis=1)
+    flux /= norm[:, np.newaxis]
+    
+    pdffile = os.path.join(qadir, f'qa-templates-recon-{rrmethod}-{rrversion}.pdf')
+    pdf = PdfPages(pdffile)
+    for iobj in range(nplot):
+        fig, ax = plt.subplots(figsize=(7, 5))
+        F = np.where((wave > 1500.) * (flux[iobj, :] != 0.))[0]
+        M = np.where((modelwave > 1500.) * (modelflux[iobj, :] != 0.))[0]
+        ax.plot(wave[F], flux[iobj, F], color='skyblue', label='Data')
+        ax.plot(modelwave[M], modelflux[iobj, M], color='k', alpha=0.75, lw=1, label=f'{rrmethod}-{rrversion} Recon')
+        ax.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
+        ax.set_ylabel(r'$F_{\lambda}$ (arbitrary normalization)')
+        ax.set_yscale('log')
+        ax.set_title(f'{meta["TARGETCLASS"][iobj]}/StackID:{meta["STACKID"][iobj]:03}')
+        ax.legend(loc='best', fontsize=10)
+        fig.tight_layout()
+        pdf.savefig(fig)
+        plt.close()
+    pdf.close()        
+    log.info(f'Wrote {pdffile}')
+
+    
+def qa_stacks(targetclass, select_broad=False, nsmooth=3):
+    """Full-spectrum QA of the stacked spectra + model fits.
+    
+    """
+    from scipy.ndimage import gaussian_filter
+
+    if select_broad:
+        stackfile = os.path.join(stacksdir, f'stacks-{targetclass}-broad.fits')
+        fastfile = os.path.join(stacksdir, f'fastspec-stacks-{targetclass}-broad.fits')
+        modelfile = os.path.join(stacksdir, f'modelflux-stacks-{targetclass}-broad.fits')
+        pdffile = os.path.join(qadir, f'qa-stacks-{targetclass}-broad.pdf')        
+    else:
+        stackfile = os.path.join(stacksdir, f'stacks-{targetclass}.fits')
+        fastfile = os.path.join(stacksdir, f'fastspec-stacks-{targetclass}.fits')
+        modelfile = os.path.join(stacksdir, f'modelflux-stacks-{targetclass}.fits')
+        pdffile = os.path.join(qadir, f'qa-stacks-{targetclass}.pdf')
+
+    log.info(f'Reading {stackfile}')
+    wave = fitsio.read(stackfile, 'WAVE')
+    flux = fitsio.read(stackfile, 'FLUX')
+    info = Table(fitsio.read(stackfile, 'STACKINFO'))
+    nobj = len(info)
+    
+    log.info(f'Reading {modelfile}')
+    modelwave = fitsio.read(modelfile, 'WAVE')
+    modelflux = fitsio.read(modelfile, 'FLUX')
+
+    bins  = stacking_bins(targetclass, verbose=True)
+    bins = bins[np.isin(bins['IBIN'], info['IBIN'])] # bins with spectra
+
+    if targetclass == 'LRG':
+        colorlabel = '^{0.1}(r - W1)'
+    else:
+        colorlabel = '^{0.1}(g - r)'
+
+    zobj = np.unique(bins['ZOBJ'])
+    npage = len(zobj)
+
+    inches_wide_perpanel = 4.0
+    inches_tall_perpanel = 3.0
+    ncol = 3
+    nrow = 5
+
+    if pdffile:
+        from matplotlib.backends.backend_pdf import PdfPages
+        pdf = PdfPages(pdffile)
+
+    for ipage in np.arange(npage):
+        log.info(f'Building page {ipage+1}/{npage}')
+        pageindx = np.where(zobj[ipage] == bins['ZOBJ'])[0]
+
+        mstar = sorted(set(bins['MSTAR'][pageindx])) # subpage
+        nsubpage = len(mstar)
+
+        for isubpage in np.arange(nsubpage):
+            subpageindx = np.where((mstar[isubpage] == bins['MSTAR'][pageindx]))[0]
+
+            fig, allax = plt.subplots(nrow, ncol, figsize=(inches_wide_perpanel*ncol, inches_tall_perpanel*nrow),
+                                      sharex=True, sharey=False)#True)
+            for iplot, (indx, ax) in enumerate(zip(pageindx[subpageindx], allax.flatten())):
+                #log.info(ipage, isubpage, iplot, len(pageindx), len(subpageindx))
+
+                F = np.where(flux[indx, :] != 0)[0]
+                M = np.where(modelflux[indx, :] != 0)[0]
+                ax.plot(wave[F], gaussian_filter(flux[indx, F], nsmooth), color='skyblue')
+                ax.plot(modelwave[M], gaussian_filter(modelflux[indx, M], nsmooth), color='k', alpha=0.5)
+                
+                xmin, xmax = modelwave.min(), modelwave.max()
+                ymin = 0.9 * np.min((np.percentile(flux[indx, F], 1.), np.percentile(modelflux[indx, M], 1.)))
+                ymax = 1.1 * np.max((np.percentile(flux[indx, F], 99.), np.percentile(modelflux[indx, M], 99.)))
+                
+                ax.text(0.96, 0.06, r'${:.2f}<{}<{:.2f}$'.format(
+                    bins['COLORMIN'][indx], colorlabel, bins['COLORMAX'][indx]),
+                    ha='right', va='bottom', transform=ax.transAxes, fontsize=10,
+                    bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+                ax.text(0.04, 0.96, '\n'.join(( 'N={}/{}, S/N={:.1f}'.format(
+                    info['NOBJ'][indx], info['NALLOBJ'][indx], info['SNR'][indx]), )),
+                    ha='left', va='top', transform=ax.transAxes, fontsize=10,
+                    bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+
+                ax.set_xlim(xmin, xmax)
+                ax.set_ylim(ymin, ymax)
+                ax.set_xticklabels([])
+                ax.set_yticklabels([])
+
+                plt.subplots_adjust(wspace=0.05, hspace=0.05, left=0.07, right=0.95, top=0.95, bottom=0.1)
+
+                if iplot == ncol*nrow-1:
+                    break
+            
+            fig.text(0.52, 0.968, r'${:.2f}<z<{:.2f}\ \ \ {:.1f}<{}<{:.1f}$'.format(
+                bins['ZOBJMIN'][indx], bins['ZOBJMAX'][indx],
+                bins['MSTARMIN'][indx], '\log_{10}(M/M_{\odot})',
+                bins['MSTARMAX'][indx]), ha='center', va='center', fontsize=18)
+
+            for rem in np.arange(ncol*nrow-iplot-1)+iplot+1:
+                allax.flatten()[rem].axis('off')
+                
+            pdf.savefig(fig)
+            plt.close()
+
+    if pdffile:
+        log.info(f'Writing {pdffile}')
+        pdf.close()
 
 
 def _zstats(z, ztrue, spectype=None, vcut=1e3):
@@ -1250,6 +1619,37 @@ def qa_zcompleteness(specprod='iron'):
         new = zcat_new[zcat_new[targclass] * (zcat_new['ZWARN'] == 0) * (zcat_new['COADD_FIBERSTATUS'] == 0)]
         _makeplot(old, new, targtype, targclass)
 
+
+def qa_vi_zhist():
+    """Redshift histogram.
+
+    """
+    from matplotlib import colors
+
+    vi = read_vi()
+
+    cols = np.array([colors.to_hex(col) for col in ['darkgreen', 'darkred', 'darkblue', 'black']])
+    
+    zlim = (0., 2.)
+    srt = [0, 2, 1, 3]
+    
+    fig, xx = plt.subplots(figsize=(8, 6))
+    for targtype, col in zip(np.array(['BGS', 'LRG', 'ELG', 'QSO'])[srt], cols[:5][srt]):
+    #for targtype, col in zip(['BGS', 'LRG', 'ELG', 'QSO'], cols[:5]):
+        I = np.where(vi['SUFFIX'] == targtype)[0]
+        xx.hist(vi['VI_Z'][I], bins=50, color=col, range=zlim, alpha=0.5,
+                label=f'{targtype} (N={len(I):,d})')
+    #hh, ll = xx.get_legend_handles_labels()
+    #xx.legend([hh[ii] for ii in srt+[4,]], [ll[ii] for ii in srt+[4,]], loc='upper right', fontsize=11)
+
+    xx.legend(loc='upper right', fontsize=11)
+    xx.set_xlabel('VI Redshift (Q>=2.5)')
+    xx.set_ylabel('Number')
+    fig.tight_layout()
+    pngfile = os.path.join(qadir, 'qa-vi-zhist.png')
+    fig.savefig(pngfile)
+    print(f'Wrote {pngfile}')
+
         
 def qa_zvz(specprod='iron', rrmethod='PCA', rrversion='0.1'):
     """Redshift vs redshift fitting results.
@@ -1279,7 +1679,7 @@ def qa_zvz(specprod='iron', rrmethod='PCA', rrversion='0.1'):
         goodcat = cat[J]
         cat = cat[I]
 
-        bbox = dict(boxstyle='round', facecolor='lightgray', alpha=0.8)
+        bbox = dict(boxstyle='round', facecolor='lightgray', alpha=0.5)
         
         if desihiz:
             vi_spectypes = np.array(['LBG', 'LAE', 'QSO', 'Interloper'])
@@ -1380,7 +1780,7 @@ def qa_zvz(specprod='iron', rrmethod='PCA', rrversion='0.1'):
         if ylabel:
             rowaxes[0].set_ylabel(ylabel)
 
-    def _plot_allrows(old, new, targtype, zscan, targclass=None, desihiz=False, pngfile=None):
+    def _plot_allrows(old, new, targtype, zscan, targclass=None, ylabel=None, desihiz=False, pngfile=None):
         fig, axes = plt.subplots(2, 5, figsize=(14, 6))#, sharex=True, sharey=True)
 
         if desihiz:
@@ -1430,14 +1830,15 @@ def qa_zvz(specprod='iron', rrmethod='PCA', rrversion='0.1'):
         fig.savefig(pngfile)
         log.info(f'Wrote {pngfile}')
 
-    def _plot_all_targetclass(cats, targtypes, targclasses, zscan, pngfile, desihiz=False):
+    def _plot_all_targetclass(cats, targtypes, targclasses, zscan, pngfile, ylabel=None, desihiz=False):
 
         ncat = len(cats)
 
         if desihiz:
             ylabel = 'RR Redshift'
         else:
-            ylabel = 'Redshift [Iron]'
+            if ylabel is None:
+                ylabel = 'Redshift [Iron]'
 
         fig, axes = plt.subplots(len(cats), 5, figsize=(14, len(cats)*3))
 
@@ -1476,29 +1877,35 @@ def qa_zvz(specprod='iron', rrmethod='PCA', rrversion='0.1'):
     targclasses = ['BGS_BRIGHT', 'BGS_FAINT', 'LRG', 'ELG', 'QSO']
     zcat_iron = Table(fitsio.read(os.path.join(stacksdir, f'zcat-vitiles-templates-{specprod}.fits')))
 
-    #print('Hack!')
-    #vi = read_vi(vi_spectype='GALAXY')
-    #zcat_iron = zcat_iron[geomask.match_to(zcat_iron['TARGETID'], vi['TARGETID'])]
-    
+    if rrmethod == 'NMF' and rrversion == '0.1b':
+        log.info('Subselecting just VI-galaxies and removing QSO targets.')
+        vi = read_vi(vi_spectype='GALAXY')
+        zcat_iron = zcat_iron[geomask.match_to(zcat_iron['TARGETID'], vi['TARGETID'])]
+
+        targtypes = ['BGS', 'BGS', 'LRG', 'ELG']
+        targclasses = ['BGS_BRIGHT', 'BGS_FAINT', 'LRG', 'ELG']
+        
     for zscan in ['zscan01']:
         zcat = Table(fitsio.read(os.path.join(stacksdir, f'zcat-vitiles-templates-{rrmethod}-{rrversion}-{zscan}.fits')))
+        if rrmethod == 'NMF' and rrversion == '0.1b':
+            zcat = zcat[geomask.match_to(zcat['TARGETID'], vi['TARGETID'])]
+            assert(np.all(zcat['TARGETID'] == zcat_iron['TARGETID']))
 
         # one pngfile per target class
         for targtype, targclass in zip(targtypes, targclasses):
             I = zcat[targclass]
             pngfile = os.path.join(qadir, f'zvz-vitiles-{rrmethod}-{rrversion}-{zscan}-{targclass}.png')
-            pdb.set_trace()
             _plot_allrows(zcat_iron[I], zcat[I], targtype=targtype, zscan=zscan, targclass=targclass, pngfile=pngfile)
 
         # iron templates - all targets
         pngfile = os.path.join(qadir, f'zvz-vitiles-{specprod}.png')
         cats = [zcat_iron[zcat_iron[targclass]] for targclass in targclasses]
-        _plot_all_targetclass(cats, targtypes, targclasses, zscan=zscan, pngfile=pngfile) 
+        _plot_all_targetclass(cats, targtypes, targclasses, zscan=zscan, pngfile=pngfile, ylabel=f'Redshift [{specprod}]') 
 
         # new templates - all targets
         pngfile = os.path.join(qadir, f'zvz-vitiles-{rrmethod}-{rrversion}-{zscan}.png')
         cats = [zcat[zcat[targclass]] for targclass in targclasses]
-        _plot_all_targetclass(cats, targtypes, targclasses, zscan=zscan, pngfile=pngfile) 
+        _plot_all_targetclass(cats, targtypes, targclasses, zscan=zscan, pngfile=pngfile, ylabel=f'Redshift [{rrmethod}-{rrversion}]') 
 
 
 def read_zscan(filename, select_targetids=None):
@@ -1569,7 +1976,7 @@ def read_zscan(filename, select_targetids=None):
 
 
 def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01',
-                nsmooth=2, overwrite=False):
+                nsmooth=2, nplot=25, overwrite=False):
     """Outliers QA.
 
     """
@@ -1645,11 +2052,11 @@ def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01
         else:
             return f'{nmin}th min'
 
-    bbox = dict(boxstyle='round', facecolor='lightgray', alpha=0.75)
+    bbox = dict(boxstyle='round', facecolor='lightgray', alpha=0.5)
 
     # cache the RR templates
     orig_templatedir = os.getenv('RR_TEMPLATE_DIR')
-    os.environ['RR_TEMPLATE_DIR'] = os.path.join(templatedir, rrversion)
+    os.environ['RR_TEMPLATE_DIR'] = os.path.join(templatedir, f'{rrmethod}-{rrversion}')
 
     os.environ['DESI_LOGLEVEL'] = 'warning'
     templates = dict()
@@ -1662,8 +2069,8 @@ def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01
 
     pdffile = os.path.join(qadir, f'outliers-vitiles-{rrmethod}-{rrversion}-{zscan}.pdf')
     pdf = PdfPages(pdffile)
-            
-    for ipage, out1 in enumerate(out[:10]):
+
+    for ipage, out1 in enumerate(out[:nplot]):
         log.info(f'Building page {ipage+1}/{len(out1)}')
 
         targetid = out1['TARGETID']
@@ -1760,6 +2167,7 @@ def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01
 
         fig.tight_layout()
         pdf.savefig(fig)
+        plt.close()
         
     pdf.close()
     log.info(f'Wrote {pdffile}')
@@ -1780,16 +2188,20 @@ def main():
 
     parser.add_argument('--build-stacks', action='store_true', help='Build the stacks.')
     parser.add_argument('--fastspec-stacks', action='store_true', help='Run fastspec on the stacks.')
+    parser.add_argument('--qa-stacks', action='store_true', help='Build QA of the stacks and model fits.')
 
     parser.add_argument('--empca-templates', action='store_true', help='Run empca on the output of --parent-templates.')
     parser.add_argument('--nmf-templates', action='store_true', help='Run NMF on the output of --parent-templates.')
+    parser.add_argument('--qa-templates', action='store_true', help='Redrock template QA.')
 
     parser.add_argument('--gather-specprod-results', action='store_true', help='Gather the specprod Redrock results for the VI tiles/healpixels.')
     parser.add_argument('--run-redrock', action='store_true', help='Run Redrock on the VI tiles/healpixels.')
     parser.add_argument('--redshift-qa', action='store_true', help='Redshift QA.')
     parser.add_argument('--outliers-qa', action='store_true', help='QA of redshift-fitting outliers.')
     
-    parser.add_argument('--rrversion', type=str, default='0.1', help='Template version.')
+    parser.add_argument('--targetclass', type=str, default=None, help='Target class to process')
+    parser.add_argument('--rrmethod', type=str, default='NMF', help='Redrock fitting method.')
+    parser.add_argument('--rrversion', type=str, default='0.1', help='Redrock template version.')
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')    
     args = parser.parse_args()
@@ -1799,31 +2211,44 @@ def main():
         import multiprocessing
         multiprocessing.set_start_method('spawn')
 
-    # build the parent sample
+    # Build the parent sample.
     if args.build_parent:
         for targetclass in ['BGS', 'LRG', 'ELG']:
             build_parent_sample(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod)
 
+    # Generate QA plots of the parent samples.
     if args.qa_parent:
+        qa_parent_distributions(specprod=args.specprod, lss_specprod=args.lss_specprod)
         for targetclass in ['BGS', 'LRG', 'ELG']:
         #for targetclass in ['ELG']:
-            qa_parent(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod)
+            qa_parent_bins(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod)
 
-    # build the stacks in bins of properties
+    # Build the stacked spectra in bins of properties.
     if args.build_stacks:
-        #for targetclass in ['LRG']:
-        #for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG', 'ELG'], [True, False, False, False]):
-        #for targetclass, select_broad in zip(['LRG', 'ELG'], [False, False]):
-        for targetclass, select_broad in zip(['ELG'], [False]):
-            stacks_in_bins(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
-                           maxperbin=10, select_broad=select_broad, overwrite=args.overwrite)
+        if args.targetclass:
+            stacks_in_bins(args.targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
+                           minperbin=3, maxperbin=100, select_broad=select_broad, overwrite=args.overwrite)
+        else:
+            #for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG', 'ELG'], [True, False, False, False]):
+            #for targetclass, select_broad in zip(['LRG', 'ELG'], [False, False]):
+            for targetclass, select_broad in zip(['ELG'], [False]):
+            #for targetclass, select_broad in zip(['BGS'], [True]):
+                stacks_in_bins(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
+                               minperbin=3, maxperbin=100, select_broad=select_broad, overwrite=args.overwrite)
 
-    # run fastspec on the stacks
+    # Run fastspec on the stacks.
     if args.fastspec_stacks:
-        #for targetclass, select_broad in zip(['ELG'], [False]):
+        for targetclass, select_broad in zip(['ELG'], [False]):
         #for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG'], [True, False, False]):
-        for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG', 'ELG'], [True, False, False, False]):
+        #for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG', 'ELG'], [True, False, False, False]):
+        #for targetclass, select_broad in zip(['BGS', 'BGS'], [True, False]):
             fastspec_stacks(targetclass, select_broad=select_broad, mp=args.mp)
+
+    # Build QA of the stacks + model fits.
+    if args.qa_stacks:
+        for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG', 'ELG'], [True, False, False, False]):
+        #for targetclass, select_broad in zip(['BGS'], [False]):
+            qa_stacks(targetclass, select_broad=select_broad)
 
     # build the new PCA Redrock templates
     if args.empca_templates:
@@ -1833,25 +2258,35 @@ def main():
     if args.nmf_templates:
         build_redrock_templates(rrversion=args.rrversion, nmf=True)
 
+    if args.qa_templates:
+        qa_redrock_templates(rrversion=args.rrversion, rrmethod='PCA')
+        qa_redrock_templates(rrversion=args.rrversion, rrmethod='NMF')
+
     # gather the {specprod} (iron) Redrock results.
     if args.gather_specprod_results:
         gather_specprod_results(specprod=args.specprod, overwrite=args.overwrite)
 
     if args.run_redrock:
         # Run Redrock on the VI tiles with a redshift scan to z=1.7 and to z=4.
-        run_redrock_vitiles(zscan_prior='01', rrversion=args.rrversion, rrmethod='PCA',
+        run_redrock_vitiles(zscan_prior='01', rrversion=args.rrversion, rrmethod=args.rrmethod,
                             specprod=args.specprod, overwrite=args.overwrite)
 
     if args.redshift_qa:
         # QA - redshift vs redshift results
-        qa_zvz(specprod=args.specprod, rrversion=args.rrversion, rrmethod='PCA')
+        qa_zvz(specprod=args.specprod, rrversion=args.rrversion, rrmethod=args.rrmethod)
+        #qa_zvz(specprod=args.specprod, rrversion=args.rrversion, rrmethod='PCA')
 
         ## QA - redshift completeness results
         #qa_zcompleteness(specprod=args.specprod)
 
+        #qa_vi_zhist()
+        #return
+
     if args.outliers_qa:
-        qa_outliers(specprod=args.specprod, rrversion=args.rrversion, rrmethod='PCA',
+        qa_outliers(specprod=args.specprod, rrversion=args.rrversion, rrmethod=args.rrmethod,
                     zscan='zscan01', overwrite=args.overwrite)
+        #qa_outliers(specprod=args.specprod, rrversion=args.rrversion, rrmethod='PCA',
+        #            zscan='zscan01', overwrite=args.overwrite)
 
         
 if __name__ == '__main__':
