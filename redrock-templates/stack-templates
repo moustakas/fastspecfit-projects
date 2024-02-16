@@ -24,7 +24,7 @@ time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates -
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --gather-specprod-results
 
 7. Run Redrock with a few different priors:
-salloc -N 1 -C gpu --gpus-per-node=4 -A desi -t 04:00:00 --qos interactive
+salloc -N 1 -C gpu -A desi -t 04:00:00 --qos interactive
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --run-redrock
 
 8. Build zvz QA:
@@ -195,7 +195,7 @@ def gather_specprod_results(specprod='iron', overwrite=False):
 
 def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='PCA', rrversion='0.1',
                         afterburners=True, rrdetails=True, overwrite=False,
-                        write_slurm=True, nodes=1, max_gpuprocs=4):
+                        write_slurm=False, nodes=16, max_gpuprocs=4):
     """Wrapper to run Redrock on the VI tiles.
 
     """
@@ -230,7 +230,7 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='PCA', rrver
             S.write('#SBATCH --mail-user=jmoustakas@siena.edu\n')
             S.write('#SBATCH --mail-type=ALL\n')
             S.write(f'#SBATCH --nodes={nodes}\n')
-            S.write('#SBATCH --time=01:00:00\n')
+            S.write('#SBATCH --time=04:00:00\n')
             S.write('#SBATCH --output=batch-run-redrock-nmf-0.3-%j.log\n')
             S.write('\n')
             S.write('source /global/common/software/desi/desi_environment.sh main\n')
@@ -261,16 +261,18 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='PCA', rrver
             if not os.path.isfile(redrockfile) or overwrite:
                 #cmd = f'-i {coaddfile} -o {redrockfile} -d {rrdetailsfile} --mp 24'
                 #cmd = f'-i {coaddfile} -o {redrockfile} --mp 24'
-                cmd = f'-i {coaddfile} -o {redrockfile} --gpu '
+                cmd = f'-i {coaddfile} -o {redrockfile} '
                 if rrdetails:
                     cmd += f' -d {rrdetailsfile}'
                 if zscan_galaxy is not None:
                     cmd += f' --zscan-galaxy={zscan_galaxy}'
                 if write_slurm:
                     with open(slurmfile, 'a') as S:
-                        S.write(f'srun -n {ntasks} -c {cpus_per_task} rrdesi_mpi --max-gpuprocs={max_gpuprocs} {cmd}\n')
+                        S.write(f'cmd="srun -n {ntasks} -c {cpus_per_task} rrdesi_mpi --gpu --max-gpuprocs={max_gpuprocs} {cmd}"\n')
+                        S.write('echo $cmd\n')
+                        S.write('$cmd\n')
                 else:
-                    log.info(f'rrdesi {cmd}')
+                    log.info(f'rrdesi {cmd} --gpu')
                     rrdesi(cmd.split())
             else:
                 log.info(f'Skipping existing file {redrockfile}')
@@ -284,7 +286,9 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='PCA', rrver
                             cmd += ' --target_selection all --save_target all'
                         if write_slurm:
                             with open(slurmfile, 'a') as S:
-                                S.write(f'{cmd}\n')
+                                S.write(f'cmd="{cmd}"\n')
+                                S.write('echo $cmd\n')
+                                S.write('$cmd\n')
                         else:
                             log.info(f'{runcmd} {cmd}')
                             runcmd(maincmd, args=cmd.split()[1:], inputs=[coaddfile, redrockfile], outputs=[outfile])
@@ -2056,9 +2060,14 @@ def qa_summarize(specprod='iron', zscan='zscan01', overwrite=False):
         allout.append(out)
 
         # new templates
-        for rrversion in ['0.1', '0.2']:
+        for rrversion in ['0.1', '0.2', '0.3']:
             for rrmethod in ['PCA', 'NMF']:
-                zcat = Table(fitsio.read(os.path.join(stacksdir, f'zcat-vitiles-templates-{rrmethod}-{rrversion}-{zscan}.fits')))
+                zcatfile = os.path.join(stacksdir, f'zcat-vitiles-templates-{rrmethod}-{rrversion}-{zscan}.fits')
+                if not os.path.isfile(zcatfile):
+                    continue
+                    
+                zcat = Table(fitsio.read(zcatfile))
+                
 
                 out = Table()
                 out['METHOD-VERSION'] = [f'{rrmethod}-{rrversion}']                
