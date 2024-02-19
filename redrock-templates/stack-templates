@@ -2,23 +2,52 @@
 
 """Generate templates from stacks.
 
+###########
+Template versions:
+
+Training sample: FastSpecFit models of {BGS,BGS_broad,LRG,ELG}
+spectrophotometric stacks (N=694) derived from a parent sample of ~0.6M Iron
+spectra:
+  PCA-0.1 - ncomp=10
+  NMF-0.1 - ncomp=10; nearly_NMF likely did not converge.
+
+Training sample: Same 40 theoretical SPS templates used by FastSpecFit spanning
+a range of age and dust attenuation (all solar metallicity and including galaxy
+line-emission).
+  PCA-0.2 - ncomp=10
+  NMF-0.2 - ncomp=40; No nearly_NMF dimensional reduction, but Redrock was still
+            called in NMF “mode”.
+  NMF-0.3 - ncomp=1; Redrock called in "fake archetype mode", with one SPS
+            model/subtype per rrgalaxy template.
+
+###########
+
 1. Build the parent sample by cross-matching the FastSpecFit/Iron and LSS/Fuji SV3 VACs.
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-parent
+  --> parent-{BGS,LRG,ELG}.fits
 
 2. Generate QA plots of the parent samples.
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-parent
+  --> qa-parent-logmstar.png
+      qa-parent-velwidth.png
+      qa-parent-zhist.png
+      {BGS,LRG,ELG}-{obs,rest,rest-bins}.png
 
 3. Build the stacked spectra in bins of properties.
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-stacks
+  --> stacks-{BGS,BGS_broad,LRG,ELG}.fits
 
 4. Model the resulting stacks using FastSpecFit.
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --fastspec-stacks
+  --> fastspec-stacks-{BGS,BGS_broad,LRG,ELG}.fits
+      modelflux-stacks-{BGS,BGS_broad,LRG,ELG}.fits
 
 5. Build empca and nmf templates.
 salloc -N 1 -C gpu -A desi -t 01:00:00 --qos interactive
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --empca-templates
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --nmf-templates
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-templates
+  --> 
 
 6. Gather the {specprod} (iron) Redrock results.
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --gather-specprod-results
@@ -321,31 +350,39 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='PCA', rrver
     
 def stacking_bins(targetclass='LRG', verbose=False):
 
-    # define the stacking limits and the number of bin *centers*
+    # define the stacking limits (left-most and right-most bin edges)
 
     if targetclass == 'LRG':
-        zlim, nz = [0.4, 1.1], 7
-        mstarlim, nmstar = [10.5, 12.], 6 # Mstar
-        colorlim, ncolor = [-0.2, 1.8], 5 # r-W1
+        zlim, dz = [0.4, 1.1], 0.05
+        mstarlim, dmstar = [10.6, 11.8], 0.2 # Mstar
+        colorlim, dcolor = [-0.2, 1.8], 0.2 # r-W1
     elif targetclass == 'ELG':
-        zlim, nz = [0.7, 1.5], 8
-        mstarlim, nmstar = [8., 11.5], 8  # Mstar
-        colorlim, ncolor = [-0.1, 0.7], 4 # g-r
+        zlim, dz = [0.7, 1.5], 0.1
+        mstarlim, dmstar = [8., 11.5], 0.25  # Mstar
+        colorlim, dcolor = [-0.2, 0.7], 0.1 # g-r
     elif targetclass == 'BGS':
-        zlim, nz = [0.05, 0.55], 10
-        mstarlim, nmstar = [8., 12.], 6  # Mstar
-        colorlim, ncolor = [0.0, 1.2], 6 # g-r
+        zlim, dz = [0.0, 0.6], 0.05
+        mstarlim, dmstar = [8., 12.], 0.2  # Mstar
+        colorlim, dcolor = [0.0, 1.2], 0.1 # g-r
+        #zlim, nz = [0.05, 0.55], 10
+        #mstarlim, nmstar = [8., 12.], 6  # Mstar
+        #colorlim, ncolor = [0.0, 1.2], 6 # g-r
     else:
         raise NotImplemented
         
-    dz = (zlim[1] - zlim[0]) / nz
-    dmstar = (mstarlim[1] - mstarlim[0]) / nmstar
-    dcolor = (colorlim[1] - colorlim[0]) / ncolor
+    #nz = (zlim[1] - zlim[0]) / dz
+    #nmstar = (mstarlim[1] - mstarlim[0]) / dmstar
+    #ncolor = (colorlim[1] - colorlim[0]) / dcolor
+    
+    #dz = (zlim[1] - zlim[0]) / nz
+    #dmstar = (mstarlim[1] - mstarlim[0]) / nmstar
+    #dcolor = (colorlim[1] - colorlim[0]) / ncolor
 
     # build the array of (left) bin *edges*
     zgrid = np.arange(zlim[0], zlim[1], dz)
     mstargrid = np.arange(mstarlim[0], mstarlim[1], dmstar)
     colorgrid = np.arange(colorlim[0], colorlim[1], dcolor)
+    log.info(f'{targetclass}: nz={len(zgrid)} nmstar={len(mstargrid)} ncolor={len(colorgrid)}')
 
     nbins = len(zgrid) * len(mstargrid) * len(colorgrid)
 
@@ -354,11 +391,11 @@ def stacking_bins(targetclass='LRG', verbose=False):
     #bins.add_column(Column(name='TARGETCLASS', dtype='U3', length=nbins))
     bins.add_column(Column(name='IBIN', dtype=np.int32, length=nbins))
     #bins.add_column(Column(name='ISUBBIN', dtype=np.int16, length=nbins))
-    bins.add_column(Column(name='NALLOBJ', dtype=np.int32, length=nbins))
+    bins.add_column(Column(name='NPARENT', dtype=np.int32, length=nbins))
     bins.add_column(Column(name='NOBJ', dtype=np.int32, length=nbins))
-    bins.add_column(Column(name='SNR', dtype='f4', length=nbins))
+    #bins.add_column(Column(name='SNR', dtype='f4', length=nbins))
     for col in ('ZOBJ', 'MSTAR', 'COLOR'):
-        bins.add_column(Column(name=col, dtype='f4', length=nbins)) # mean bin center
+        bins.add_column(Column(name=f'{col}BIN', dtype='f4', length=nbins)) # mean bin center
         bins.add_column(Column(name=f'{col}MIN', dtype='f4', length=nbins))
         bins.add_column(Column(name=f'{col}MAX', dtype='f4', length=nbins))
         
@@ -372,13 +409,14 @@ def stacking_bins(targetclass='LRG', verbose=False):
                 for col, mmin, delt in zip(('ZOBJ', 'MSTAR', 'COLOR'),
                                            (zmin, mstarmin, colormin),
                                            (dz, dmstar, dcolor)):
-                    bins[col][ibin] = mmin + delt / 2             # bin center
+                    bins[f'{col}BIN'][ibin] = mmin + delt / 2             # bin center
                     bins[f'{col}MIN'][ibin] = mmin        # left edge
                     bins[f'{col}MAX'][ibin] = mmin + delt # right edge
                 ibin += 1
 
     if verbose:
         log.info(f'Number of {targetclass} bins = {len(bins)}')
+        #print(bins)
 
     return bins
 
@@ -580,7 +618,7 @@ def qa_parent_bins(targetclass, specprod='iron', lss_specprod='fuji'):
     fast, meta, _, _ = read_fastspecfit(fastfile)
 
     bins  = stacking_bins(targetclass, verbose=True)
-    
+
     def bgs_obs(meta, png=None):
         robslim = (14, 21.0)
         grobslim = (-0.3, 2.5)
@@ -954,9 +992,9 @@ def qa_parent_bins(targetclass, specprod='iron', lss_specprod='fuji'):
             plt.close()
             
     # make the plots!
-    png_obs = f'{targetclass}-stacks-obs.png'
-    png_rest = f'{targetclass}-stacks-rest.png'
-    png_rest_bins = f'{targetclass}-stacks-rest-bins.png'
+    png_obs = f'{targetclass}-obs.png'
+    png_rest = f'{targetclass}-rest.png'
+    png_rest_bins = f'{targetclass}-rest-bins.png'
     if targetclass == 'LRG':
         lrg_obs(meta, png=png_obs)
         lrg_rest(fast, png=png_rest)    
@@ -971,12 +1009,331 @@ def qa_parent_bins(targetclass, specprod='iron', lss_specprod='fuji'):
         bgs_rest(fast, bins=bins, png=png_rest_bins)
 
 
+def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
+                         minwave=400., maxwave=1e4, dwave=0.4, specprod='iron',
+                         lss_specprod='fuji', mp=1, normwave=None, verbose=False,
+                         overwrite=False):
+    """Select fastspec models in physical bins of properties.
+
+    """
+    from desispec.resolution import Resolution    
+    from fastspecfit.io import read_fastspecfit, cache_templates, get_templates_filename
+    from fastspecfit.emlines import EMFitTools
+    from fastspecfit.continuum import ContinuumTools    
+
+    rand = np.random.default_rng(seed=seed)
+
+    # build the rest-frame wavelength vector
+    normwaves = {'BGS': [5475., 5525.], 'LRG': [4475., 4525.], 'ELG': [3475., 3525.]}
+    norm_flux_window = normwaves[targetclass]
+    
+    outwave = np.arange(minwave, maxwave, dwave)
+    nwave = len(outwave)
+
+    templatesfile = get_templates_filename()
+    templatecache = cache_templates(templatesfile, log=log, 
+                                    maxtemplatewave=maxwave*1.1)
+    templatewave = templatecache['templatewave']
+
+    EMFit = EMFitTools()
+    CTools = ContinuumTools(ignore_photometry=True)
+    
+    #zmin, zmax = get_zlims(lss_specprod, targetclass=targetclass)
+    #
+    ## rest wavelength vector
+    #dwave = 0.4
+    #obswave_min, obswave_max = 3600., 9800.
+    #restwave = np.arange(obswave_min / (1. + zmax), obswave_max / (1. + zmin), dwave)
+    #npix = len(restwave)
+
+    bins = stacking_bins(targetclass, verbose=False)
+    nbins = len(bins)
+
+    fastfile = os.path.join(stacksdir, f'parent-{targetclass}.fits')
+    modelfluxfile = os.path.join(stacksdir, f'modelflux-bins-{targetclass}.fits')
+        
+    allfast, allmeta, _, _ = read_fastspecfit(fastfile)
+    #meta = Table(fitsio.read(fastfile, 'METADATA', columns=['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'Z'))
+    #allfast = Table(fitsio.read(fastfile, 'FASTSPEC', columns=['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'Z',
+    #                                                           'LOGMSTAR', 'ABSMAG01_SDSS_G', 'ABSMAG01_SDSS_R',
+    #                                                           'ABSMAG01_W1', 'BROAD_SIGMA', 'APERCORR']))
+    #allfast = Table(fitsio.read(fastfile, 'FASTSPEC'))
+
+    if os.path.isfile(modelfluxfile) and not overwrite:
+        log.info(f'Output file {modelfluxfile} exists and --overwrite not set.')
+        return
+
+    # initialize the output 'bins' table
+    outbins = bins.copy()
+    #outbins = bins['IBIN', 'NPARENT', 'NOBJ']
+    #outbins['NOBJ'] = np.zeros(len(bins), int) 
+    #outbins['STACKID'] = outbins['IBIN']           # needed by FastSpecFit
+    #outbins['Z'] = np.zeros(len(bins), 'f8')        # needed by FastSpecFit (should be all zeros)
+    outbins['ZMED'] = np.zeros(len(bins), 'f4')     # median redshift
+    outbins['MSTARMED'] = np.zeros(len(bins), 'f4') # median stellar mass
+    outbins['COLORMED'] = np.zeros(len(bins), 'f4') # median color
+    #outbins['SNR'] = np.zeros(len(bins), 'f4')      # median S/N
+    outbins['INDEX'] = np.zeros((1, maxperbin), np.int32)-1       # index into outflux giving the spectra in this bin
+    outbins['PARENTINDEX'] = np.zeros((1, maxperbin), np.int32)-1 # index into parent-{BGS,LRG,ELG} giving the spectra in this bin
+
+    #stackflux = np.zeros((nbins, npix))
+    #stackivar = np.zeros((nbins, npix))
+    #outflux = np.zeros((nbins, nwave))
+
+    # No way to know how many spectra we'll end up with.
+    index = 0 # index into outflux
+    outflux = []
+    outfast = []
+    outmeta = []
+    
+    for ibin, bin in enumerate(bins):
+        #log.info(f'Working on bin {ibin+1}/{nbins}')
+        if targetclass == 'BGS' or targetclass == 'ELG':
+            I = ((allfast['Z'] > bin['ZOBJMIN']) * (allfast['Z'] < bin['ZOBJMAX']) *
+                 (allfast['LOGMSTAR'] > bin['MSTARMIN']) * (allfast['LOGMSTAR'] < bin['MSTARMAX']) *
+                 ((allfast['ABSMAG01_SDSS_G']-allfast['ABSMAG01_SDSS_R']) > bin['COLORMIN']) *
+                 ((allfast['ABSMAG01_SDSS_G']-allfast['ABSMAG01_SDSS_R']) < bin['COLORMAX']))
+        elif targetclass == 'LRG':
+            I = ((allfast['Z'] > bin['ZOBJMIN']) * (allfast['Z'] < bin['ZOBJMAX']) *
+                 (allfast['LOGMSTAR'] > bin['MSTARMIN']) * (allfast['LOGMSTAR'] < bin['MSTARMAX']) *
+                 ((allfast['ABSMAG01_SDSS_R']-allfast['ABSMAG01_W1']) > bin['COLORMIN']) *
+                 ((allfast['ABSMAG01_SDSS_R']-allfast['ABSMAG01_W1']) < bin['COLORMAX']))
+        I = np.where(I)[0]
+
+        outbins['NPARENT'][ibin] = len(I)
+        if len(I) < minperbin:
+            log.info(f'Bin {ibin:04d}/{nbins:04d}: skipping (N={len(I):,d})')
+            continue
+        
+        if maxperbin is not None and len(I) > maxperbin:
+            # choose based on diversity, not randomly
+            I = rand.choice(I, size=maxperbin, replace=False)
+
+        Igood = [] # subset of I that have a well-defined normalization factor
+
+        # rebuild each model
+        t0 = time.time()
+        os.environ['DESI_LOGLEVEL'] = 'critical'
+        plt.clf()
+        for iobj, fast in enumerate(allfast[I]):
+            continuum, _ = CTools.templates2data(templatecache['templateflux_nolines'],
+                                                 templatewave, redshift=0., synthphot=False,
+                                                 vdisp=fast['VDISP'], coeff=fast['COEFF'])
+    
+            R = Resolution(np.ones((1, len(templatewave)))) # Hack!
+            emspectrum = EMFit.emlinemodel_bestfit([templatewave], [R], fast)[0]
+
+            # this is where we would add other missing emission lines like Lya!!
+    
+            modelflux = continuum + emspectrum
+
+            # normalize
+            W = (templatewave > norm_flux_window[0]) * (templatewave < norm_flux_window[1])
+            norm = np.median(modelflux[W])
+            if norm <= 0.:
+                log.warning(f'Bin {ibin:04d}/{nbins:04d}: ill-defined normalization factor for object {iobj}; skipping')
+            else:
+                Igood.append(iobj)
+
+                modelflux /= norm
+            
+                outflux1 = np.interp(outwave, templatewave, modelflux)
+                outflux.append(outflux1)
+
+                outbins['PARENTINDEX'][ibin][iobj] = I[iobj]
+                outbins['INDEX'][ibin][iobj] = index
+                index += 1 # advance
+                
+                plt.plot(templatewave, modelflux, color='gray', alpha=0.7)
+                plt.plot(outwave, outflux1, color='red', alpha=0.7)
+        #plt.xlim(4800, 5100)
+        plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp/junk2.png')
+        os.environ['DESI_LOGLEVEL'] = 'info'
+
+        Igood = np.array(Igood)
+        outmeta.append(allmeta[I[Igood]])
+        outfast.append(allfast[I[Igood]])
+
+        outbins['NOBJ'][ibin] = len(Igood)
+        outbins['ZMED'][ibin] = np.median(allfast['Z'][I[Igood]])
+        outbins['MSTARMED'][ibin] = np.median(allfast['LOGMSTAR'][I[Igood]])
+        if targetclass == 'BGS' or targetclass == 'ELG':
+            outbins['COLORMED'][ibin] = np.median(allfast['ABSMAG01_SDSS_G'][I[Igood]]-allfast['ABSMAG01_SDSS_R'][I[Igood]])
+        else:
+            outbins['COLORMED'][ibin] = np.median(allfast['ABSMAG01_SDSS_R'][I[Igood]]-allfast['ABSMAG01_W1'][I[Igood]])
+        
+        log.info(f'Bin {ibin:04d}/{nbins:04d}: building {len(Igood):05d}/{outbins["NPARENT"][ibin]:05d} models (t={(time.time()-t0)/1.:.1f} s)')
+        #log.info(f'Building {len(Igood):,d}/{outbins["NPARENT"][ibin]:,d} models took {(time.time()-t0)/1.:.2f} sec.')
+        
+    # trim to just the populated bins
+    I = np.where(outbins['NOBJ'] > 0)[0]
+    outbins = outbins[I]
+    outmeta = vstack(outmeta)
+    outfast = vstack(outfast)
+    outflux = np.vstack(outflux)
+
+    log.info(f'Writing {len(outbins):,d} spectra to {modelfluxfile}')
+    fitsio.write(modelfluxfile, outflux.astype('f8'), clobber=True, extname='FLUX')
+    fitsio.write(modelfluxfile, outwave, extname='WAVE')
+    fitsio.write(modelfluxfile, outbins.as_array(), extname='BINS')
+    fitsio.write(modelfluxfile, outmeta.as_array(), extname='METADATA')
+    fitsio.write(modelfluxfile, outfast.as_array(), extname='FASTSPEC')
+
+
+def build_stacks(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
+                 specprod='iron', lss_specprod='fuji', mp=1, select_broad=False,
+                 normwave=None, verbose=False, overwrite=False):
+    """Select objects in bins of rest-frame properties.
+
+    fastphot_in_bins - also stack the fastphot continuum-fitting results
+    
+    """
+    import warnings
+    from desispec.io.spectra import read_spectra_parallel
+    #from desispec.io.spectra import read_spectra
+    #from desigal.specutils.spectra_io import get_spectra
+    from desigal.specutils.stack import stack_spectra, write_binned_stacks
+    from fastspecfit.io import read_fastspecfit
+
+    #specprod_dir = os.path.join(specprod_root, specprod)
+
+    rand = np.random.default_rng(seed=seed)
+
+    # build the rest-frame wavelength vector
+    zmin, zmax = get_zlims(lss_specprod, targetclass=targetclass)
+
+    normwaves = {'BGS': [5475., 5525.], 'LRG': [4475., 4525.], 'ELG': [3475., 3525.]}
+    norm_flux_window = normwaves[targetclass]
+
+    # rest wavelength vector
+    dwave = 0.4
+    obswave_min, obswave_max = 3600., 9800.
+    restwave = np.arange(obswave_min / (1. + zmax), obswave_max / (1. + zmin), dwave)
+    npix = len(restwave)
+
+    bins = stacking_bins(targetclass, verbose=False)
+    nbins = len(bins)
+
+    fastfile = os.path.join(stacksdir, f'parent-{targetclass}.fits')
+    #fast, meta, _, _ = read_fastspecfit(fastfile)
+    #meta = Table(fitsio.read(fastfile, 'METADATA', columns=['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'Z'))
+    fast = Table(fitsio.read(fastfile, 'FASTSPEC', columns=['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'Z',
+                                                            'LOGMSTAR', 'ABSMAG01_SDSS_G', 'ABSMAG01_SDSS_R',
+                                                            'ABSMAG01_W1', 'BROAD_SIGMA', 'APERCORR']))
+
+    survey, program = fast['SURVEY'][0], fast['PROGRAM'][0] # should be all the same
+
+    if select_broad:
+        stackfile = os.path.join(stacksdir, f'stacks-{targetclass}-broad.fits')
+    else:
+        stackfile = os.path.join(stacksdir, f'stacks-{targetclass}.fits')
+        
+    if os.path.isfile(stackfile) and not overwrite:
+        log.info(f'Output file {stackfile} exists and --overwrite not set.')
+        return
+
+    # initialize the output metadata table
+    outmeta = bins['IBIN', 'NALLOBJ', 'NOBJ']
+    #outmeta['NOBJ'] = np.zeros(len(bins), int) 
+    outmeta['STACKID'] = outmeta['IBIN']            # needed by FastSpecFit
+    outmeta['Z'] = np.zeros(len(bins), 'f8')        # needed by FastSpecFit (should be all zeros)
+    outmeta['ZMED'] = np.zeros(len(bins), 'f4')     # median redshift
+    outmeta['LOGMSTAR'] = np.zeros(len(bins), 'f4') # median stellar mass
+    outmeta['SNR'] = np.zeros(len(bins), 'f4')      # median S/N
+
+    stackflux = np.zeros((nbins, npix))
+    stackivar = np.zeros((nbins, npix))
+
+    for ibin, bin in enumerate(bins):
+        #log.info(f'Working on bin {ibin+1}/{nbins}')
+        if targetclass == 'BGS' or targetclass == 'ELG':
+            I = ((fast['Z'] > bin['ZOBJMIN']) * (fast['Z'] < bin['ZOBJMAX']) *
+                 (fast['LOGMSTAR'] > bin['MSTARMIN']) * (fast['LOGMSTAR'] < bin['MSTARMAX']) *
+                 ((fast['ABSMAG01_SDSS_G']-fast['ABSMAG01_SDSS_R']) > bin['COLORMIN']) *
+                 ((fast['ABSMAG01_SDSS_G']-fast['ABSMAG01_SDSS_R']) < bin['COLORMAX']))
+        elif targetclass == 'LRG':
+            I = ((fast['Z'] > bin['ZOBJMIN']) * (fast['Z'] < bin['ZOBJMAX']) *
+                 (fast['LOGMSTAR'] > bin['MSTARMIN']) * (fast['LOGMSTAR'] < bin['MSTARMAX']) *
+                 ((fast['ABSMAG01_SDSS_R']-fast['ABSMAG01_W1']) > bin['COLORMIN']) *
+                 ((fast['ABSMAG01_SDSS_R']-fast['ABSMAG01_W1']) < bin['COLORMAX']))
+
+        if select_broad:
+            I *= (fast['BROAD_SIGMA'] > 0.)
+        else:
+            I *= (fast['BROAD_SIGMA'] == 0.)
+    
+        I = np.where(I)[0]
+
+        outmeta['NALLOBJ'][ibin] = len(I)
+        if len(I) < minperbin:
+            log.info(f'Bin {ibin} has just {len(I)} object(s); skipping.')
+            continue
+        
+        if maxperbin is not None and len(I) > maxperbin:
+            I = rand.choice(I, size=maxperbin, replace=False)
+
+        outmeta['NOBJ'][ibin] = len(I)
+
+        targetids = fast['TARGETID'][I].data
+        redshifts = fast['Z'][I].data
+        apercorr = fast['APERCORR'][I].data
+
+        t0 = time.time()
+        #log.info(f'Gathering ({len(I):,d}/{outmeta["NALLOBJ"][ibin]:,d} spectra.)')
+        
+        os.environ['DESI_LOGLEVEL'] = 'WARNING'
+        spectra = read_spectra_parallel(fast[I], prefix='coadd', specprod=specprod, nproc=mp,
+                                        rdspec_kwargs={'skip_hdus': ['EXP_FIBERMAP', 'SCORES', 'EXTRA_CATALOG', 'RESOLUTION']})
+        #spectra = spectra[geomask.match_to(spectra.target_ids(), targetids)]
+        #spectra = get_spectra(targetids, release='iron', survey=survey, program=program, n_workers=mp, use_db=False,
+        #                                zcat_table=None)
+        assert(np.all(spectra.target_ids() == targetids))
+
+        os.environ['DESI_LOGLEVEL'] = 'INFO'
+        log.info(f'Gathering {len(I):,d}/{outmeta["NALLOBJ"][ibin]:,d} spectra took {(time.time()-t0)/1.:.2f} sec.')
+
+        t0 = time.time()
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore')
+            (flux, ivar), _ = stack_spectra(spectra=spectra,
+                                            redshift=redshifts,
+                                            stack_redshift=0.,
+                                            norm_flux_window=norm_flux_window,
+                                            norm_method="flux-window", #"mean", "median", "flux-window"
+                                            resample_method="linear", # "flux-cons",
+                                            stack_method="ivar-weighted-mean", #median , mean
+                                            output_wave_grid=restwave,
+                                            n_workers=mp,
+                                            #bootstrap=True, bootstrap_samples=50)#,
+                                            multiplication_factor=np.expand_dims(apercorr, axis=-1))
+        log.info(f'Stacking {len(redshifts):,d} spectra took {(time.time()-t0)/1.:.2f} sec.')
+
+        igood = np.where(np.isfinite(flux) * np.isfinite(ivar))[0]
+        stackflux[ibin, igood] = flux[igood]
+        stackivar[ibin, igood] = ivar[igood]
+
+        outmeta['ZMED'][ibin] = np.median(fast['Z'][I])
+        outmeta['LOGMSTAR'][ibin] = np.median(fast['LOGMSTAR'][I])
+        outmeta['SNR'][ibin] = np.median(flux[igood] * np.sqrt(ivar[igood]))
+
+    # trim to just the populated bins
+    I = np.where(outmeta['NOBJ'] > 0)[0]
+    stackflux = stackflux[I, :]
+    stackivar = stackivar[I, :]
+    outmeta = outmeta[I]
+
+    log.info(f'Writing {len(outmeta):,d} stacked spectra to {stackfile}')
+    write_binned_stacks(stackfile, restwave, stackflux, stackivar,
+                        resolution=None, stackinfo=outmeta)
+
+
 def fastspec_stacks(targetclass='BGS', mp=1, select_broad=False, minwave=400., maxwave=1e4, dwave=0.4):
     """Run fastspec on the stacks and also rebuild (and write out) the resulting
     spectrophotometric models.
 
     fastqa /global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/stacks/fastspec-stacks-LRG.fits \
-      --redrockfiles /global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/stacks/stacks-LRG.fits --ntargets 1 --firsttarget 30 -o ioannis/tmp --stackfit
+      --redrockfiles /global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/stacks/stacks-LRG.fits \
+      --ntargets 1 --firsttarget 30 -o ioannis/tmp --stackfit
 
     """
     from desispec.resolution import Resolution    
@@ -1049,156 +1406,6 @@ def fastspec_stacks(targetclass='BGS', mp=1, select_broad=False, minwave=400., m
     log.info(f'Wrote {nobj} models to {outfile}')
 
     
-def stacks_in_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
-                   specprod='iron', lss_specprod='fuji', mp=1, select_broad=False,
-                   normwave=None, verbose=False, overwrite=False):
-    """Select objects in bins of rest-frame properties.
-
-    fastphot_in_bins - also stack the fastphot continuum-fitting results
-    
-    """
-    import warnings
-    from desispec.io.spectra import read_spectra_parallel
-    #from desispec.io.spectra import read_spectra
-    #from desigal.specutils.spectra_io import get_spectra
-    from desigal.specutils.stack import stack_spectra, write_binned_stacks
-    from fastspecfit.io import read_fastspecfit
-
-    #specprod_dir = os.path.join(specprod_root, specprod)
-
-    rand = np.random.default_rng(seed=seed)
-
-    # build the rest-frame wavelength vector
-    zmin, zmax = get_zlims(lss_specprod, targetclass=targetclass)
-
-    normwaves = {'BGS': [5475., 5525.], 'LRG': [4475., 4525.], 'ELG': [3475., 3525.]}
-    norm_flux_window = normwaves[targetclass]
-
-    # rest wavelength vector
-    dwave = 0.4
-    obswave_min, obswave_max = 3600., 9800.
-    restwave = np.arange(obswave_min / (1. + zmax), obswave_max / (1. + zmin), dwave)
-    npix = len(restwave)
-
-    bins = stacking_bins(targetclass, verbose=False)
-    nbins = len(bins)
-
-    fastfile = os.path.join(stacksdir, f'parent-{targetclass}.fits')
-    #fast, meta, _, _ = read_fastspecfit(fastfile)
-    #meta = Table(fitsio.read(fastfile, 'METADATA', columns=['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'Z'))
-    fast = Table(fitsio.read(fastfile, 'FASTSPEC', columns=['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'Z',
-                                                            'LOGMSTAR', 'ABSMAG01_SDSS_G', 'ABSMAG01_SDSS_R',
-                                                            'ABSMAG01_W1', 'BROAD_SIGMA', 'APERCORR']))
-
-    survey, program = fast['SURVEY'][0], fast['PROGRAM'][0] # should be all the same
-
-    if select_broad:
-        stackfile = os.path.join(stacksdir, f'stacks-{targetclass}-broad.fits')
-    else:
-        stackfile = os.path.join(stacksdir, f'stacks-{targetclass}.fits')
-        
-    if os.path.isfile(fastfile) and not overwrite:
-        log.info(f'Output file {stackfile} exists and --overwrite not set.')
-        return
-
-    # initialize the output metadata table
-    outmeta = bins['IBIN', 'NALLOBJ', 'NOBJ']
-    #outmeta['NOBJ'] = np.zeros(len(bins), int) 
-    outmeta['STACKID'] = outmeta['IBIN']            # needed by FastSpecFit
-    outmeta['Z'] = np.zeros(len(bins), 'f8')        # needed by FastSpecFit (should be all zeros)
-    outmeta['ZMED'] = np.zeros(len(bins), 'f4')     # median redshift
-    outmeta['LOGMSTAR'] = np.zeros(len(bins), 'f4') # median stellar mass
-    outmeta['SNR'] = np.zeros(len(bins), 'f4')      # median S/N
-
-    stackflux = np.zeros((nbins, npix))
-    stackivar = np.zeros((nbins, npix))
-
-    for ibin, bin in enumerate(bins):
-        #log.info(f'Working on bin {ibin+1}/{nbins}')
-        if targetclass == 'BGS' or targetclass == 'ELG':
-            I = ((fast['Z'] > bin['ZOBJMIN']) * (fast['Z'] < bin['ZOBJMAX']) *
-                 (fast['LOGMSTAR'] > bin['MSTARMIN']) * (fast['LOGMSTAR'] < bin['MSTARMAX']) *
-                 ((fast['ABSMAG01_SDSS_G']-fast['ABSMAG01_SDSS_R']) > bin['COLORMIN']) *
-                 ((fast['ABSMAG01_SDSS_G']-fast['ABSMAG01_SDSS_R']) < bin['COLORMAX']))
-        elif targetclass == 'LRG':
-            I = ((fast['Z'] > bin['ZOBJMIN']) * (fast['Z'] < bin['ZOBJMAX']) *
-                 (fast['LOGMSTAR'] > bin['MSTARMIN']) * (fast['LOGMSTAR'] < bin['MSTARMAX']) *
-                 ((fast['ABSMAG01_SDSS_R']-fast['ABSMAG01_W1']) > bin['COLORMIN']) *
-                 ((fast['ABSMAG01_SDSS_R']-fast['ABSMAG01_W1']) < bin['COLORMAX']))
-
-        if select_broad:
-            I *= (fast['BROAD_SIGMA'] > 0.)
-        else:
-            I *= (fast['BROAD_SIGMA'] == 0.)
-    
-        I = np.where(I)[0]
-
-        outmeta['NALLOBJ'][ibin] = len(I)
-        if len(I) < minperbin:
-            log.info(f'Bin {ibin} has just {len(I)} object(s); skipping.')
-            continue
-        
-        if maxperbin is not None and len(I) > maxperbin:
-            I = rand.choice(I, size=maxperbin, replace=False)
-
-        outmeta['NOBJ'][ibin] = len(I)
-
-        targetids = fast['TARGETID'][I].data
-        redshifts = fast['Z'][I].data
-        apercorr = fast['APERCORR'][I].data
-
-        t0 = time.time()
-        #log.info(f'Gathering ({len(I):,d}/{outmeta["NALLOBJ"][ibin]:,d} spectra.)')
-        
-        os.environ['DESI_LOGLEVEL'] = 'WARNING'
-        spectra = read_spectra_parallel(fast[I], prefix='coadd', specprod=specprod, nproc=mp,
-                                        rdspec_kwargs={'skip_hdus': ['EXP_FIBERMAP', 'SCORES', 'EXTRA_CATALOG', 'RESOLUTION']})
-        #spectra = spectra[geomask.match_to(spectra.target_ids(), targetids)]
-        #spectra = get_spectra(targetids, release='iron', survey=survey, program=program, n_workers=mp, use_db=False,
-        #                                zcat_table=None)
-        try:
-            assert(np.all(spectra.target_ids() == targetids))
-        except:
-            pdb.set_trace()
-
-        os.environ['DESI_LOGLEVEL'] = 'INFO'
-        log.info(f'Gathering {len(I):,d}/{outmeta["NALLOBJ"][ibin]:,d} spectra took {(time.time()-t0)/1.:.2f} sec.')
-
-        t0 = time.time()
-        with warnings.catch_warnings():
-            warnings.filterwarnings('ignore')
-            (flux, ivar), _ = stack_spectra(spectra=spectra,
-                                            redshift=redshifts,
-                                            stack_redshift=0.,
-                                            norm_flux_window=norm_flux_window,
-                                            norm_method="flux-window", #"mean", "median", "flux-window"
-                                            resample_method="linear", # "flux-cons",
-                                            stack_method="ivar-weighted-mean", #median , mean
-                                            output_wave_grid=restwave,
-                                            n_workers=mp,
-                                            #bootstrap=True, bootstrap_samples=50)#,
-                                            multiplication_factor=np.expand_dims(apercorr, axis=-1))
-        log.info(f'Stacking {len(redshifts):,d} spectra took {(time.time()-t0)/1.:.2f} sec.')
-
-        igood = np.where(np.isfinite(flux) * np.isfinite(ivar))[0]
-        stackflux[ibin, igood] = flux[igood]
-        stackivar[ibin, igood] = ivar[igood]
-
-        outmeta['ZMED'][ibin] = np.median(fast['Z'][I])
-        outmeta['LOGMSTAR'][ibin] = np.median(fast['LOGMSTAR'][I])
-        outmeta['SNR'][ibin] = np.median(flux[igood] * np.sqrt(ivar[igood]))
-
-    # trim to just the populated bins
-    I = np.where(outmeta['NOBJ'] > 0)[0]
-    stackflux = stackflux[I, :]
-    stackivar = stackivar[I, :]
-    outmeta = outmeta[I]
-
-    log.info(f'Writing {len(outmeta):,d} stacked spectra to {stackfile}')
-    #write_binned_stacks(stackfile, restwave, stackflux, stackivar,
-    #                    resolution=None, stackinfo=outmeta)
-
-
 def _write_redrock_templates(rrmethod, rrversion, wave, H, W, subtype=None):
     """Write out Redrock-compatible templates.
 
@@ -2469,6 +2676,11 @@ def main():
     parser.add_argument('--build-parent', action='store_true', help='Build the parent sample.')
     parser.add_argument('--qa-parent', action='store_true', help='QA of the parent sample.')
 
+    # favored
+    parser.add_argument('--build-modelflux-bins', action='store_true', help='Select fastspec models in physical bins.')
+    parser.add_argument('--qa-modelflux-bins', action='store_true', help='Build QA of the models in bins.')
+
+    # deprecated
     parser.add_argument('--build-stacks', action='store_true', help='Build the stacks.')
     parser.add_argument('--fastspec-stacks', action='store_true', help='Run fastspec on the stacks.')
     parser.add_argument('--qa-stacks', action='store_true', help='Build QA of the stacks and model fits.')
@@ -2503,37 +2715,38 @@ def main():
 
     # Generate QA plots of the parent samples.
     if args.qa_parent:
-        qa_parent_distributions(specprod=args.specprod, lss_specprod=args.lss_specprod)
         for targetclass in ['BGS', 'LRG', 'ELG']:
         #for targetclass in ['ELG']:
             qa_parent_bins(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod)
+        qa_parent_distributions(specprod=args.specprod, lss_specprod=args.lss_specprod)
+
+    # Select fastspec models in physical bins of properties.
+    if args.build_modelflux_bins:
+        #for targetclass in ['BGS', 'LRG', 'ELG']:
+        for targetclass in ['LRG']:
+            build_modelflux_bins(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
+                                 minperbin=4, maxperbin=5, overwrite=args.overwrite)
 
     # Build the stacked spectra in bins of properties.
-    if args.build_stacks:
-        if args.targetclass:
-            stacks_in_bins(args.targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
-                           minperbin=3, maxperbin=100, select_broad=True, overwrite=args.overwrite)
-        else:
+    if args.build_stacks or args.fastspec_stacks or args.qa_stacks:
+        if args.build_stacks:
+            log.warning('--build-stacks is deprecated; use --build-modelflux-bins')
+            return        
             #for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG', 'ELG'], [True, False, False, False]):
-            #for targetclass, select_broad in zip(['LRG', 'ELG'], [False, False]):
-            for targetclass, select_broad in zip(['ELG'], [False]):
-            #for targetclass, select_broad in zip(['BGS'], [True]):
-                stacks_in_bins(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
-                               minperbin=3, maxperbin=100, select_broad=select_broad, overwrite=args.overwrite)
-
-    # Run fastspec on the stacks.
-    if args.fastspec_stacks:
-        for targetclass, select_broad in zip(['ELG'], [False]):
-        #for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG'], [True, False, False]):
-        #for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG', 'ELG'], [True, False, False, False]):
-        #for targetclass, select_broad in zip(['BGS', 'BGS'], [True, False]):
-            fastspec_stacks(targetclass, select_broad=select_broad, mp=args.mp)
-
-    # Build QA of the stacks + model fits.
-    if args.qa_stacks:
-        for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG', 'ELG'], [True, False, False, False]):
-        #for targetclass, select_broad in zip(['BGS'], [False]):
-            qa_stacks(targetclass, select_broad=select_broad)
+            #    build_stacks(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
+            #                 minperbin=3, maxperbin=100, select_broad=select_broad, overwrite=args.overwrite)
+        # Run fastspec on the stacks.
+        if args.fastspec_stacks:
+            log.warning('--fastspec-stacks is deprecated; use --build-modelflux-bins')
+            return
+            #for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG', 'ELG'], [True, False, False, False]):
+            #    fastspec_stacks(targetclass, select_broad=select_broad, mp=args.mp)
+        # Build QA of the stacks + model fits.
+        if args.qa_stacks:
+            log.warning('--qa-stacks is deprecated; use --qa-modelflux-bins')
+            return
+            #for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG', 'ELG'], [True, False, False, False]):
+            #    qa_stacks(targetclass, select_broad=select_broad)
 
     # build the new PCA Redrock templates
     if args.empca_templates:
