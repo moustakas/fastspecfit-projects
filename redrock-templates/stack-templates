@@ -1010,7 +1010,7 @@ def qa_parent_bins(targetclass, specprod='iron', lss_specprod='fuji'):
 
 
 def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
-                         minwave=400., maxwave=1e4, dwave=0.4, specprod='iron',
+                         minwave=400., maxwave=1.01e4, dwave=0.4, specprod='iron',
                          lss_specprod='fuji', mp=1, normwave=None, verbose=False,
                          overwrite=False):
     """Select fastspec models in physical bins of properties.
@@ -1020,8 +1020,10 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     from fastspecfit.io import read_fastspecfit, cache_templates, get_templates_filename
     from fastspecfit.emlines import EMFitTools
     from fastspecfit.continuum import ContinuumTools    
+    from fastspecfit.util import TabulatedDESI, trapz_rebin
 
     rand = np.random.default_rng(seed=seed)
+    cosmo = TabulatedDESI()    
 
     # build the rest-frame wavelength vector
     normwaves = {'BGS': [5475., 5525.], 'LRG': [4475., 4525.], 'ELG': [3475., 3525.]}
@@ -1031,8 +1033,7 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     nwave = len(outwave)
 
     templatesfile = get_templates_filename()
-    templatecache = cache_templates(templatesfile, log=log, 
-                                    maxtemplatewave=maxwave*1.1)
+    templatecache = cache_templates(templatesfile, log=log)
     templatewave = templatecache['templatewave']
 
     EMFit = EMFitTools()
@@ -1087,7 +1088,6 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     outmeta = []
     
     for ibin, bin in enumerate(bins):
-        #log.info(f'Working on bin {ibin+1}/{nbins}')
         if targetclass == 'BGS' or targetclass == 'ELG':
             I = ((allfast['Z'] > bin['ZOBJMIN']) * (allfast['Z'] < bin['ZOBJMAX']) *
                  (allfast['LOGMSTAR'] > bin['MSTARMIN']) * (allfast['LOGMSTAR'] < bin['MSTARMAX']) *
@@ -1112,42 +1112,57 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
         Igood = [] # subset of I that have a well-defined normalization factor
 
         # rebuild each model
+        Wnorm = (outwave > norm_flux_window[0]) * (outwave < norm_flux_window[1])
+        
         t0 = time.time()
         os.environ['DESI_LOGLEVEL'] = 'critical'
-        plt.clf()
+        #plt.clf()
         for iobj, fast in enumerate(allfast[I]):
+            dlum = cosmo.luminosity_distance(fast['Z'])
             continuum, _ = CTools.templates2data(templatecache['templateflux_nolines'],
-                                                 templatewave, redshift=0., synthphot=False,
+                                                 templatewave, dluminosity=dlum, 
+                                                 redshift=fast['Z'], synthphot=False,
                                                  vdisp=fast['VDISP'], coeff=fast['COEFF'])
-    
-            R = Resolution(np.ones((1, len(templatewave)))) # Hack!
-            emspectrum = EMFit.emlinemodel_bestfit([templatewave], [R], fast)[0]
+
+            ztemplatewave = templatewave * (1. + fast['Z'])
+            W = np.where(ztemplatewave <= maxwave)[0]
+            R = Resolution(np.ones((1, len(W)))) # Hack!
+            emspectrum = EMFit.emlinemodel_bestfit([ztemplatewave[W]], [R], fast, snrcut=0.)[0]
 
             # this is where we would add other missing emission lines like Lya!!
-    
-            modelflux = continuum + emspectrum
+            modelflux = continuum
+            modelflux[W] += emspectrum
+
+            outflux1 = trapz_rebin(templatewave, modelflux, outwave)
 
             # normalize
-            W = (templatewave > norm_flux_window[0]) * (templatewave < norm_flux_window[1])
-            norm = np.median(modelflux[W])
+            norm = np.median(outflux1[Wnorm])
             if norm <= 0.:
                 log.warning(f'Bin {ibin:04d}/{nbins:04d}: ill-defined normalization factor for object {iobj}; skipping')
             else:
                 Igood.append(iobj)
 
-                modelflux /= norm
-            
-                outflux1 = np.interp(outwave, templatewave, modelflux)
+                outflux1 /= norm
                 outflux.append(outflux1)
 
                 outbins['PARENTINDEX'][ibin][iobj] = I[iobj]
                 outbins['INDEX'][ibin][iobj] = index
                 index += 1 # advance
                 
-                plt.plot(templatewave, modelflux, color='gray', alpha=0.7)
-                plt.plot(outwave, outflux1, color='red', alpha=0.7)
-        #plt.xlim(4800, 5100)
-        plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp/junk2.png')
+                #plt.plot(templatewave, continuum/norm, color='k', alpha=0.4)
+                #plt.plot(templatewave, modelflux/norm, color='gray', alpha=0.7)
+                #plt.plot(outwave, outflux1, color='red', alpha=0.3)
+                
+        #W = (outwave > 3000.) * (outwave < 4500.)
+        #ymin, ymax = np.min(outflux1[W]), np.max(outflux1[W])
+        #plt.ylim(-0.1, 20)
+        ##plt.ylim(ymin, ymax)
+        #plt.xlim(3670., 3770.)
+        ##plt.xscale('log')
+        ##plt.yscale('log')
+        #plt.axvline(x=norm_flux_window[0], color='k', ls='--')
+        #plt.axvline(x=norm_flux_window[1], color='k', ls='--')
+        #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp/junk2.png')
         os.environ['DESI_LOGLEVEL'] = 'info'
 
         Igood = np.array(Igood)
@@ -1173,11 +1188,109 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     outflux = np.vstack(outflux)
 
     log.info(f'Writing {len(outbins):,d} spectra to {modelfluxfile}')
-    fitsio.write(modelfluxfile, outflux.astype('f8'), clobber=True, extname='FLUX')
+    fitsio.write(modelfluxfile, outflux.astype('f4'), clobber=True, extname='FLUX')
     fitsio.write(modelfluxfile, outwave, extname='WAVE')
     fitsio.write(modelfluxfile, outbins.as_array(), extname='BINS')
     fitsio.write(modelfluxfile, outmeta.as_array(), extname='METADATA')
     fitsio.write(modelfluxfile, outfast.as_array(), extname='FASTSPEC')
+
+
+def qa_modelflux_bins(targetclass, nsmooth=3):
+    """Full-spectrum QA of the model spectra in physical bins.
+    
+    """
+    from scipy.ndimage import gaussian_filter
+
+    modelfluxfile = os.path.join(stacksdir, f'modelflux-bins-{targetclass}.fits')
+    pdffile = os.path.join(qadir, f'qa-modelflux-bins-{targetclass}.pdf')
+
+    log.info(f'Reading {modelfluxfile}')
+    modelwave = fitsio.read(modelfluxfile, 'WAVE')
+    modelflux = fitsio.read(modelfluxfile, 'FLUX')
+    fast = Table(fitsio.read(modelfluxfile, 'FASTSPEC'))
+    #meta = Table(fitsio.read(modelfluxfile, 'METADATA'))
+    bins = Table(fitsio.read(modelfluxfile, 'BINS'))
+    nobj = len(bins)
+
+    if targetclass == 'LRG':
+        colorlabel = '^{0.1}(r - W1)'
+    else:
+        colorlabel = '^{0.1}(g - r)'
+
+    zobj = np.unique(bins['ZOBJBIN'])
+    npage = len(zobj)
+
+    inches_wide_perpanel = 4.0
+    inches_tall_perpanel = 3.0
+    ncol = 3
+    nrow = 5
+
+    if pdffile:
+        from matplotlib.backends.backend_pdf import PdfPages
+        pdf = PdfPages(pdffile)
+
+    for ipage in np.arange(npage):
+        log.info(f'Building page {ipage+1}/{npage}')
+        pageindx = np.where(zobj[ipage] == bins['ZOBJBIN'])[0]
+
+        mstar = sorted(set(bins['MSTARBIN'][pageindx])) # subpage
+        nsubpage = len(mstar)
+
+        for isubpage in np.arange(nsubpage):
+            subpageindx = np.where((mstar[isubpage] == bins['MSTARBIN'][pageindx]))[0]
+
+            fig, allax = plt.subplots(nrow, ncol, figsize=(inches_wide_perpanel*ncol, inches_tall_perpanel*nrow),
+                                      sharex=True, sharey=False)#True)
+            for iplot, (indx, ax) in enumerate(zip(pageindx[subpageindx], allax.flatten())):
+                #log.info(ipage, isubpage, iplot, len(pageindx), len(subpageindx))
+
+                specindx = bins[indx]['INDEX'][:bins[indx]['NOBJ']]
+                for S in specindx:
+                    ax.plot(modelwave, gaussian_filter(modelflux[S, :], nsmooth), color='skyblue', alpha=0.5)
+                ax.plot(modelwave, gaussian_filter(np.mean(modelflux[specindx, :], axis=0), nsmooth), color='k', alpha=0.7)
+                
+                xmin, xmax = modelwave.min(), modelwave.max()
+                M = np.where(modelwave > 1215.)[0]
+                ymin = 0.9 * np.percentile(modelflux[specindx, :][:, M], 1.)
+                ymax = 1.1 * np.percentile(modelflux[specindx, :][:, M], 99.)
+                
+                ax.text(0.96, 0.06, r'${:.2f}<{}<{:.2f}$'.format(
+                    bins['COLORMIN'][indx], colorlabel, bins['COLORMAX'][indx]),
+                    ha='right', va='bottom', transform=ax.transAxes, fontsize=10,
+                    bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+                ax.text(0.04, 0.96,
+                        #'N={}/{}'.format(bins['NOBJ'][indx], bins['NPARENT'][indx]),
+                        '\n'.join([f'Bin {bins["IBIN"][indx]}', f'N={bins["NOBJ"][indx]}/{bins["NPARENT"][indx]}']),
+                        #'\n'.join(( 'N={}/{}'.format(bins['NOBJ'][indx], bins['NPARENT'][indx]))),
+                        ha='left', va='top', transform=ax.transAxes, fontsize=10,
+                        bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+
+                ax.set_xlim(xmin, xmax)
+                ax.set_ylim(ymin, ymax)
+                ax.set_yscale('log')
+                #ax.set_xscale('log')
+                #ax.set_xticklabels([])
+                ax.set_yticklabels([])
+
+                plt.subplots_adjust(wspace=0.05, hspace=0.05, left=0.07, right=0.95, top=0.95, bottom=0.1)
+
+                if iplot == ncol*nrow-1:
+                    break
+            
+            fig.text(0.52, 0.968, r'${:.2f}<z<{:.2f}\ \ \ {:.2f}<{}<{:.2f}$'.format(
+                bins['ZOBJMIN'][indx], bins['ZOBJMAX'][indx],
+                bins['MSTARMIN'][indx], '\log_{10}(M/M_{\odot})',
+                bins['MSTARMAX'][indx]), ha='center', va='center', fontsize=18)
+
+            for rem in np.arange(ncol*nrow-iplot-1)+iplot+1:
+                allax.flatten()[rem].axis('off')
+                
+            pdf.savefig(fig)
+            plt.close()
+
+    if pdffile:
+        log.info(f'Writing {pdffile}')
+        pdf.close()
 
 
 def build_stacks(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
@@ -1379,12 +1492,13 @@ def fastspec_stacks(targetclass='BGS', mp=1, select_broad=False, minwave=400., m
 
     os.environ['DESI_LOGLEVEL'] = 'critical'
     for iobj, fast in enumerate(allfast):
+        raise ValueError('Need to figure out redshift here.')
         continuum, _ = CTools.templates2data(templatecache['templateflux_nolines'],
                                              templatewave, redshift=0., synthphot=False,
                                              vdisp=fast['VDISP'], coeff=fast['COEFF'])
 
         R = Resolution(np.ones((1, len(templatewave)))) # Hack!
-        emspectrum = EMFit.emlinemodel_bestfit([templatewave], [R], fast)[0]
+        emspectrum = EMFit.emlinemodel_bestfit([templatewave], [R], fast, redshift=0.)[0]
         # this is where we would add other missing emission lines like Lya!
 
         modelflux = continuum + emspectrum
@@ -1406,6 +1520,112 @@ def fastspec_stacks(targetclass='BGS', mp=1, select_broad=False, minwave=400., m
     log.info(f'Wrote {nobj} models to {outfile}')
 
     
+def qa_stacks(targetclass, select_broad=False, nsmooth=3):
+    """Full-spectrum QA of the stacked spectra + model fits.
+    
+    """
+    from scipy.ndimage import gaussian_filter
+
+    if select_broad:
+        stackfile = os.path.join(stacksdir, f'stacks-{targetclass}-broad.fits')
+        fastfile = os.path.join(stacksdir, f'fastspec-stacks-{targetclass}-broad.fits')
+        modelfile = os.path.join(stacksdir, f'modelflux-stacks-{targetclass}-broad.fits')
+        pdffile = os.path.join(qadir, f'qa-stacks-{targetclass}-broad.pdf')        
+    else:
+        stackfile = os.path.join(stacksdir, f'stacks-{targetclass}.fits')
+        fastfile = os.path.join(stacksdir, f'fastspec-stacks-{targetclass}.fits')
+        modelfile = os.path.join(stacksdir, f'modelflux-stacks-{targetclass}.fits')
+        pdffile = os.path.join(qadir, f'qa-stacks-{targetclass}.pdf')
+
+    log.info(f'Reading {stackfile}')
+    wave = fitsio.read(stackfile, 'WAVE')
+    flux = fitsio.read(stackfile, 'FLUX')
+    info = Table(fitsio.read(stackfile, 'STACKINFO'))
+    nobj = len(info)
+    
+    log.info(f'Reading {modelfile}')
+    modelwave = fitsio.read(modelfile, 'WAVE')
+    modelflux = fitsio.read(modelfile, 'FLUX')
+
+    bins  = stacking_bins(targetclass, verbose=True)
+    bins = bins[np.isin(bins['IBIN'], info['IBIN'])] # bins with spectra
+
+    if targetclass == 'LRG':
+        colorlabel = '^{0.1}(r - W1)'
+    else:
+        colorlabel = '^{0.1}(g - r)'
+
+    zobj = np.unique(bins['ZOBJ'])
+    npage = len(zobj)
+
+    inches_wide_perpanel = 4.0
+    inches_tall_perpanel = 3.0
+    ncol = 3
+    nrow = 5
+
+    if pdffile:
+        from matplotlib.backends.backend_pdf import PdfPages
+        pdf = PdfPages(pdffile)
+
+    for ipage in np.arange(npage):
+        log.info(f'Building page {ipage+1}/{npage}')
+        pageindx = np.where(zobj[ipage] == bins['ZOBJ'])[0]
+
+        mstar = sorted(set(bins['MSTAR'][pageindx])) # subpage
+        nsubpage = len(mstar)
+
+        for isubpage in np.arange(nsubpage):
+            subpageindx = np.where((mstar[isubpage] == bins['MSTAR'][pageindx]))[0]
+
+            fig, allax = plt.subplots(nrow, ncol, figsize=(inches_wide_perpanel*ncol, inches_tall_perpanel*nrow),
+                                      sharex=True, sharey=False)#True)
+            for iplot, (indx, ax) in enumerate(zip(pageindx[subpageindx], allax.flatten())):
+                #log.info(ipage, isubpage, iplot, len(pageindx), len(subpageindx))
+
+                F = np.where(flux[indx, :] != 0)[0]
+                M = np.where(modelflux[indx, :] != 0)[0]
+                ax.plot(wave[F], gaussian_filter(flux[indx, F], nsmooth), color='skyblue')
+                ax.plot(modelwave[M], gaussian_filter(modelflux[indx, M], nsmooth), color='k', alpha=0.5)
+                
+                xmin, xmax = modelwave.min(), modelwave.max()
+                ymin = 0.9 * np.min((np.percentile(flux[indx, F], 1.), np.percentile(modelflux[indx, M], 1.)))
+                ymax = 1.1 * np.max((np.percentile(flux[indx, F], 99.), np.percentile(modelflux[indx, M], 99.)))
+                
+                ax.text(0.96, 0.06, r'${:.2f}<{}<{:.2f}$'.format(
+                    bins['COLORMIN'][indx], colorlabel, bins['COLORMAX'][indx]),
+                    ha='right', va='bottom', transform=ax.transAxes, fontsize=10,
+                    bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+                ax.text(0.04, 0.96, '\n'.join(( 'N={}/{}, S/N={:.1f}'.format(
+                    info['NOBJ'][indx], info['NALLOBJ'][indx], info['SNR'][indx]), )),
+                    ha='left', va='top', transform=ax.transAxes, fontsize=10,
+                    bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+
+                ax.set_xlim(xmin, xmax)
+                ax.set_ylim(ymin, ymax)
+                ax.set_xticklabels([])
+                ax.set_yticklabels([])
+
+                plt.subplots_adjust(wspace=0.05, hspace=0.05, left=0.07, right=0.95, top=0.95, bottom=0.1)
+
+                if iplot == ncol*nrow-1:
+                    break
+            
+            fig.text(0.52, 0.968, r'${:.2f}<z<{:.2f}\ \ \ {:.1f}<{}<{:.1f}$'.format(
+                bins['ZOBJMIN'][indx], bins['ZOBJMAX'][indx],
+                bins['MSTARMIN'][indx], '\log_{10}(M/M_{\odot})',
+                bins['MSTARMAX'][indx]), ha='center', va='center', fontsize=18)
+
+            for rem in np.arange(ncol*nrow-iplot-1)+iplot+1:
+                allax.flatten()[rem].axis('off')
+                
+            pdf.savefig(fig)
+            plt.close()
+
+    if pdffile:
+        log.info(f'Writing {pdffile}')
+        pdf.close()
+
+
 def _write_redrock_templates(rrmethod, rrversion, wave, H, W, subtype=None):
     """Write out Redrock-compatible templates.
 
@@ -1671,112 +1891,6 @@ def qa_redrock_templates(rrmethod='PCA', rrversion='0.1', nplot=25):
     log.info(f'Wrote {pdffile}')
 
     
-def qa_stacks(targetclass, select_broad=False, nsmooth=3):
-    """Full-spectrum QA of the stacked spectra + model fits.
-    
-    """
-    from scipy.ndimage import gaussian_filter
-
-    if select_broad:
-        stackfile = os.path.join(stacksdir, f'stacks-{targetclass}-broad.fits')
-        fastfile = os.path.join(stacksdir, f'fastspec-stacks-{targetclass}-broad.fits')
-        modelfile = os.path.join(stacksdir, f'modelflux-stacks-{targetclass}-broad.fits')
-        pdffile = os.path.join(qadir, f'qa-stacks-{targetclass}-broad.pdf')        
-    else:
-        stackfile = os.path.join(stacksdir, f'stacks-{targetclass}.fits')
-        fastfile = os.path.join(stacksdir, f'fastspec-stacks-{targetclass}.fits')
-        modelfile = os.path.join(stacksdir, f'modelflux-stacks-{targetclass}.fits')
-        pdffile = os.path.join(qadir, f'qa-stacks-{targetclass}.pdf')
-
-    log.info(f'Reading {stackfile}')
-    wave = fitsio.read(stackfile, 'WAVE')
-    flux = fitsio.read(stackfile, 'FLUX')
-    info = Table(fitsio.read(stackfile, 'STACKINFO'))
-    nobj = len(info)
-    
-    log.info(f'Reading {modelfile}')
-    modelwave = fitsio.read(modelfile, 'WAVE')
-    modelflux = fitsio.read(modelfile, 'FLUX')
-
-    bins  = stacking_bins(targetclass, verbose=True)
-    bins = bins[np.isin(bins['IBIN'], info['IBIN'])] # bins with spectra
-
-    if targetclass == 'LRG':
-        colorlabel = '^{0.1}(r - W1)'
-    else:
-        colorlabel = '^{0.1}(g - r)'
-
-    zobj = np.unique(bins['ZOBJ'])
-    npage = len(zobj)
-
-    inches_wide_perpanel = 4.0
-    inches_tall_perpanel = 3.0
-    ncol = 3
-    nrow = 5
-
-    if pdffile:
-        from matplotlib.backends.backend_pdf import PdfPages
-        pdf = PdfPages(pdffile)
-
-    for ipage in np.arange(npage):
-        log.info(f'Building page {ipage+1}/{npage}')
-        pageindx = np.where(zobj[ipage] == bins['ZOBJ'])[0]
-
-        mstar = sorted(set(bins['MSTAR'][pageindx])) # subpage
-        nsubpage = len(mstar)
-
-        for isubpage in np.arange(nsubpage):
-            subpageindx = np.where((mstar[isubpage] == bins['MSTAR'][pageindx]))[0]
-
-            fig, allax = plt.subplots(nrow, ncol, figsize=(inches_wide_perpanel*ncol, inches_tall_perpanel*nrow),
-                                      sharex=True, sharey=False)#True)
-            for iplot, (indx, ax) in enumerate(zip(pageindx[subpageindx], allax.flatten())):
-                #log.info(ipage, isubpage, iplot, len(pageindx), len(subpageindx))
-
-                F = np.where(flux[indx, :] != 0)[0]
-                M = np.where(modelflux[indx, :] != 0)[0]
-                ax.plot(wave[F], gaussian_filter(flux[indx, F], nsmooth), color='skyblue')
-                ax.plot(modelwave[M], gaussian_filter(modelflux[indx, M], nsmooth), color='k', alpha=0.5)
-                
-                xmin, xmax = modelwave.min(), modelwave.max()
-                ymin = 0.9 * np.min((np.percentile(flux[indx, F], 1.), np.percentile(modelflux[indx, M], 1.)))
-                ymax = 1.1 * np.max((np.percentile(flux[indx, F], 99.), np.percentile(modelflux[indx, M], 99.)))
-                
-                ax.text(0.96, 0.06, r'${:.2f}<{}<{:.2f}$'.format(
-                    bins['COLORMIN'][indx], colorlabel, bins['COLORMAX'][indx]),
-                    ha='right', va='bottom', transform=ax.transAxes, fontsize=10,
-                    bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
-                ax.text(0.04, 0.96, '\n'.join(( 'N={}/{}, S/N={:.1f}'.format(
-                    info['NOBJ'][indx], info['NALLOBJ'][indx], info['SNR'][indx]), )),
-                    ha='left', va='top', transform=ax.transAxes, fontsize=10,
-                    bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
-
-                ax.set_xlim(xmin, xmax)
-                ax.set_ylim(ymin, ymax)
-                ax.set_xticklabels([])
-                ax.set_yticklabels([])
-
-                plt.subplots_adjust(wspace=0.05, hspace=0.05, left=0.07, right=0.95, top=0.95, bottom=0.1)
-
-                if iplot == ncol*nrow-1:
-                    break
-            
-            fig.text(0.52, 0.968, r'${:.2f}<z<{:.2f}\ \ \ {:.1f}<{}<{:.1f}$'.format(
-                bins['ZOBJMIN'][indx], bins['ZOBJMAX'][indx],
-                bins['MSTARMIN'][indx], '\log_{10}(M/M_{\odot})',
-                bins['MSTARMAX'][indx]), ha='center', va='center', fontsize=18)
-
-            for rem in np.arange(ncol*nrow-iplot-1)+iplot+1:
-                allax.flatten()[rem].axis('off')
-                
-            pdf.savefig(fig)
-            plt.close()
-
-    if pdffile:
-        log.info(f'Writing {pdffile}')
-        pdf.close()
-
-
 def _zstats(z, ztrue, spectype=None, vcut=1e3):
     N = len(z)
     if N == 0:
@@ -2722,10 +2836,18 @@ def main():
 
     # Select fastspec models in physical bins of properties.
     if args.build_modelflux_bins:
-        #for targetclass in ['BGS', 'LRG', 'ELG']:
-        for targetclass in ['LRG']:
+        for targetclass in ['BGS', 'LRG', 'ELG']:
+        #for targetclass in ['LRG']:
             build_modelflux_bins(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
-                                 minperbin=4, maxperbin=5, overwrite=args.overwrite)
+                                 minperbin=3, maxperbin=100,
+                                 #fracperbin=0.03,
+                                 overwrite=args.overwrite)
+
+    # QA of the model spectra in physical bins.
+    if args.qa_modelflux_bins:
+        for targetclass in ['BGS', 'LRG', 'ELG']:
+        #for targetclass in ['BGS']:
+            qa_modelflux_bins(targetclass)
 
     # Build the stacked spectra in bins of properties.
     if args.build_stacks or args.fastspec_stacks or args.qa_stacks:
