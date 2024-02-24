@@ -3,11 +3,11 @@
 Fit the DESI-II Tertiary tiles / observations--
   https://data.desi.lbl.gov/desi/users/raichoor/tertiary-status/tertiary-status.html
 
---Tertiary 15 - XMM - LAE/LBG
---Tertiary 18 - XMM-LSS - ODIN + WIRO LAE
+--Tertiary 1 - 
+--Tertiary 7 - 
+--Tertiary 8 - 
 --Tertiary 23 - COSMOS - 4+1
 --Tertiary 26 - COSMOS - LBG/LAE/ELG
---Tertiary 34,35 - NGC4993
 
 time $HOME/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 1
 time $HOME/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 1 --merge
