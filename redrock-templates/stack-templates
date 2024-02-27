@@ -43,7 +43,13 @@ time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates -
       modelflux-stacks-{BGS,BGS_broad,LRG,ELG}.fits
 
 5. Build empca and nmf templates.
-salloc -N 1 -C 'gpu' -A desi -t 01:00:00 --qos interactive
+salloc -N 1 -C 'gpu' -A desi -t 04:00:00 --qos interactive
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-galaxy-ncomp-grid
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-galaxy-ncomp-grid
+
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-star-ncomp-grid
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-star-ncomp-grid
+
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --empca-templates
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --nmf-templates
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-templates
@@ -51,8 +57,6 @@ time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates -
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --wd-templates
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --star-templates
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-star-templates
-
-  --> 
 
 6. Gather the {specprod} (iron) Redrock results.
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --gather-specprod-results
@@ -67,6 +71,9 @@ time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates -
 
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --outliers-qa --rrmethod=PCA --overwrite
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --outliers-qa --rrmethod=NMF --overwrite
+
+9. Summarize the results.
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --summarize --rrmethod=NMF
 
 """
 import os, time, pdb
@@ -236,9 +243,9 @@ def gather_specprod_results(specprod='iron', overwrite=False):
     #            log.info(f'Wrote {len(zcat)} objects to {zcatfile}')
 
 
-def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='PCA', rrversion='0.1',
+def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='NMF', rrversion='0.4',
                         afterburners=True, rrdetails=True, overwrite=False,
-                        write_slurm=False, nodes=16, max_gpuprocs=4):
+                        write_slurm=False, nodes=1, max_gpuprocs=4):
     """Wrapper to run Redrock on the VI tiles.
 
     """
@@ -274,13 +281,18 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='PCA', rrver
             S.write('#SBATCH --mail-type=ALL\n')
             S.write(f'#SBATCH --nodes={nodes}\n')
             S.write('#SBATCH --time=04:00:00\n')
-            S.write('#SBATCH --output=batch-run-redrock-nmf-0.3-%j.log\n')
+            S.write(f'#SBATCH --output=batch-run-redrock-{rrmethod}-{rrversion}-%j.log\n')
             S.write('\n')
             S.write('source /global/common/software/desi/desi_environment.sh main\n')
+            S.write('export PATH=${HOME}/code/desihub/redrock/bin:${PATH}\n')
+            S.write('export PYTHONPATH=${HOME}/code/desihub/redrock/py:${PYTHONPATH}\n')
             S.write('export RR_TEMPLATE_DIR='+os.path.join(templatedir, f'{rrmethod}-{rrversion}\n'))
             S.write('\n')
 
     vi = read_vi()#vi_spectype='GALAXY')
+    #for tileid in [80610, 80613, 80670]:
+    #for tileid in [80609]:
+    #for tileid in [80605, 80606, 80607, 80608]:
     for tileid in sorted(set(vi['TILEID'])):
         T = tileid == vi['TILEID']
         petals = vi['FIBER'][T] // 500
@@ -311,7 +323,7 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='PCA', rrver
                     cmd += f' --zscan-galaxy={zscan_galaxy}'
                 if write_slurm:
                     with open(slurmfile, 'a') as S:
-                        S.write(f'cmd="srun -n {ntasks} -c {cpus_per_task} rrdesi_mpi --gpu --max-gpuprocs={max_gpuprocs} {cmd}"\n')
+                        S.write(f'cmd="srun -n {ntasks} -c {cpus_per_task} rrdesi --negflux-nsig 5 --gpu --max-gpuprocs={max_gpuprocs} {cmd}"\n')
                         S.write('echo $cmd\n')
                         S.write('$cmd\n')
                 else:
@@ -1244,6 +1256,7 @@ def qa_modelflux_bins(targetclass, nsmooth=3):
         pdf = PdfPages(pdffile)
 
     for ipage in np.arange(npage):
+    #for ipage in [10]:#np.arange(npage):
         log.info(f'Building page {ipage+1}/{npage}')
         pageindx = np.where(zobj[ipage] == bins['ZOBJBIN'])[0]
 
@@ -1251,6 +1264,7 @@ def qa_modelflux_bins(targetclass, nsmooth=3):
         nsubpage = len(mstar)
 
         for isubpage in np.arange(nsubpage):
+        #for isubpage in [1]:#np.arange(nsubpage):
             subpageindx = np.where((mstar[isubpage] == bins['MSTARBIN'][pageindx]))[0]
 
             fig, allax = plt.subplots(nrow, ncol, figsize=(inches_wide_perpanel*ncol, inches_tall_perpanel*nrow),
@@ -1279,7 +1293,7 @@ def qa_modelflux_bins(targetclass, nsmooth=3):
                         ha='left', va='top', transform=ax.transAxes, fontsize=10,
                         bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
 
-                ax.set_xlim(xmin, xmax)
+                ax.set_xlim(1500, 2500) # xmin, xmax)
                 ax.set_ylim(ymin, ymax)
                 ax.set_yscale('log')
                 #ax.set_xscale('log')
@@ -1683,15 +1697,15 @@ def _write_redrock_templates(rrmethod, rrversion, wave, H, W, maintype='galaxy',
     log.info(f'Wrote {rrtemplatefile}')
 
     
-def build_nmf(flux, ncomp=5, niter=100, rand=None, seed=1, iterate=True, add_legendre=True):
+def build_nmf(flux, ncomp=5, niter=100, seed=1, iterate=True,
+              add_legendre=True, verbose=False):
     """Build the NMF templates.
 
     """
     import cupy as cp
     from nearly_nmf.nmf import nearly_NMF
 
-    if rand is None:
-        rand = np.random.default_rng(seed=seed)
+    rand = np.random.default_rng(seed=seed)
     
     nobj, nwave = flux.shape
 
@@ -1711,41 +1725,57 @@ def build_nmf(flux, ncomp=5, niter=100, rand=None, seed=1, iterate=True, add_leg
 
         for itemp in range(ncomp):
             log.info(f'Iteratively solving for template {itemp+1}/{ncomp}')
-            Hiter, Witer, chi2 = nearly_NMF(X=X, V=V, H_start=H[:(itemp + 1), :],
-                                            W_start=W_start[:, :(itemp + 1)],
-                                            n_iter=niter, return_chi_2=True, verbose=True)
+            if verbose:
+                Hiter, Witer, chi2 = nearly_NMF(X=X, V=V, H_start=H[:(itemp + 1), :],
+                                                W_start=W_start[:, :(itemp + 1)],
+                                                n_iter=niter, return_chi_2=True,
+                                                verbose=True)
+            else:
+                Hiter, Witer = nearly_NMF(X=X, V=V, H_start=H[:(itemp + 1), :],
+                                          W_start=W_start[:, :(itemp + 1)],
+                                          n_iter=niter)
 
             # Update the solution.
             H[:(itemp + 1), :] = Hiter
             W[:, :(itemp + 1)] = Witer
 
-        # Once last refinement.
-        H, W, chi2 = nearly_NMF(X=X, V=V, H_start=H, W_start=W, n_iter=niter,
-                                return_chi_2=True, verbose=True)
+        # One last refinement.
+        if verbose:
+            H, W, chi2 = nearly_NMF(X=X, V=V, H_start=H, W_start=W, n_iter=niter,
+                                    return_chi_2=True, verbose=True)
+        else:
+            H, W = nearly_NMF(X=X, V=V, H_start=H, W_start=W, n_iter=niter)
     else:
         H_start = cp.array(rand.uniform(low=0., high=2., size=H_shape))
         W_start = cp.array(rand.uniform(low=0., high=2., size=W_shape))
     
-        H, W, chi2 = nearly_NMF(X=X, V=V, H_start=H_start, W_start=W_start,
-                                n_iter=niter, update_H=True, update_W=True,
-                                return_chi_2=True, verbose=True)
+        if verbose:
+            H, W, chi2 = nearly_NMF(X=X, V=V, H_start=H_start, W_start=W_start,
+                                    n_iter=niter, update_H=True, update_W=True,
+                                    return_chi_2=True, verbose=True)
+        else:
+            H, W = nearly_NMF(X=X, V=V, H_start=H_start, W_start=W_start,
+                              n_iter=niter, update_H=True, update_W=True)
 
-    # optionally add Legendre polynomials
-    if add_legendre:
-        pdb.set_trace()
-        W_legendre = np.ones((3, W.shape[-1]))
-        new_wave = 10 ** np.asarray(lb + dl * np.arange(W.shape[-1]))
-
-        # Remaps the logarithmic grid so that our linear legendre terms
-        # are linear in wavelength space not pixel space
-        linear_remap = (new_wave - new_wave[0]) * (2 / (new_wave[-1] - new_wave[0])) - 1
-            # Linear
-        W_legendre[1, :] = linear_remap
-        W_legendre[2, :] = -W_legendre[1, :]
+    ## optionally add Legendre polynomials
+    #if add_legendre:
+    #    from scipy.special import legendre
+    #    
+    #    W_legendre = np.ones((3, W.shape[-1]))
+    #    new_wave = 10**np.asarray(lb + dl * np.arange(W.shape[-1]))
+    #
+    #    # Remaps the logarithmic grid so that our linear legendre terms
+    #    # are linear in wavelength space not pixel space
+    #    linear_remap = (new_wave - new_wave[0]) * (2 / (new_wave[-1] - new_wave[0])) - 1
+    #        # Linear
+    #    W_legendre[1, :] = linear_remap
+    #    W_legendre[2, :] = -W_legendre[1, :]
         
     H = H.get()
     W = W.get()
 
+    chi2 = np.sum((flux - W.dot(H))**2)
+    
     #W_legendre = np.ones((3, W.shape[-1]))
     #new_wave = 10 ** np.asarray(lb + dl * np.arange(W.shape[-1]))
     #
@@ -1756,15 +1786,14 @@ def build_nmf(flux, ncomp=5, niter=100, rand=None, seed=1, iterate=True, add_leg
     #W_legendre[1, :] = linear_remap
     #W_legendre[2, :] = -W_legendre[1, :]
     
-    return H, W
+    return H, W, chi2
 
 
-def build_redrock_templates(niter=10, ncomp=10, nmf=False, rrversion='0.1', seed=1):
+def build_redrock_templates(niter=100, ncomp=10, nmf=False, rrversion='0.4', seed=1,
+                            build_ncomp_grid=False, overwrite=False):
     """Build new templates using either PCA or NMF.
 
     """
-    rand = np.random.default_rng(seed=seed)
-    
     if rrversion == '0.1':
         # build the sample of spectra from the stacks
     
@@ -1781,6 +1810,12 @@ def build_redrock_templates(niter=10, ncomp=10, nmf=False, rrversion='0.1', seed
         dwave = wave[1]-wave[0] # uniform pixel scale
                 
         flux = np.vstack(flux) # [ngal, nwave]
+
+        nobj, nwave = flux.shape
+
+        # normalize
+        norm = np.median(flux, axis=1)
+        flux /= norm[:, np.newaxis]
 
     # versions 0.2,0.3 uses the fastspecfit templates as the parent sample
     elif rrversion == '0.2' or rrversion == '0.3':
@@ -1800,39 +1835,47 @@ def build_redrock_templates(niter=10, ncomp=10, nmf=False, rrversion='0.1', seed
         flux = np.zeros((ntemp, len(wave)))
         for iobj in range(ntemp):
             flux[iobj, :] = np.interp(wave, templatewave, templateflux[:, iobj]) # [nobj, nwave]
-    elif rrversion == '0.4':
-        # build the sample of spectra from the modeflux representative spectra
-        flux = []
-        for targetclass in ['BGS', 'LRG', 'ELG']:
-            modelfile = os.path.join(stacksdir, f'modelflux-bins-{targetclass}.fits')
-            log.info(f'Reading {modelfile}')
-            flux.append(fitsio.read(modelfile, 'FLUX'))#, rows=np.arange(10)))
-            # wavelength vector is identical
-            if targetclass == 'BGS':
-                wave = fitsio.read(modelfile, 'WAVE')
-        flux = np.vstack(flux) # [ngal, nwave]
 
-        I = rand.choice(flux.shape[0], size=75000, replace=False)
-        flux = flux[I, :]
+        nobj, nwave = flux.shape
+
+        # normalize
+        norm = np.median(flux, axis=1)
+        flux /= norm[:, np.newaxis]
+        
+    #elif rrversion == '0.4':
+        ## build the sample of spectra from the modeflux representative spectra
+        #flux = []
+        #for targetclass in ['BGS', 'LRG', 'ELG']:
+        #    modelfile = os.path.join(stacksdir, f'modelflux-bins-{targetclass}.fits')
+        #    log.info(f'Reading {modelfile}')
+        #    flux.append(fitsio.read(modelfile, 'FLUX'))#, rows=np.arange(10)))
+        #    # wavelength vector is identical
+        #    if targetclass == 'BGS':
+        #        wave = fitsio.read(modelfile, 'WAVE')
+        #flux = np.vstack(flux) # [ngal, nwave]
+        #
+        #I = rand.choice(flux.shape[0], size=75000, replace=False)
+        #flux = flux[I, :]
 
         #I = np.where(wave > 1000.)[0]
         #wave = wave[I]
         #flux = flux[:, I]
-        
-        minwave = np.min(wave)
-        dwave = wave[1]-wave[0] # uniform pixel scale
-
-    nobj, nwave = flux.shape
-
-    # normalize
-    norm = np.median(flux, axis=1)
-    flux /= norm[:, np.newaxis]
+        #
+        #minwave = np.min(wave)
+        #dwave = wave[1]-wave[0] # uniform pixel scale
+        #
+        #nobj, nwave = flux.shape
+        #
+        ## normalize
+        #norm = np.median(flux, axis=1)
+        #flux /= norm[:, np.newaxis]
 
     if nmf:
+        rrmethod = 'NMF'
+        import cupy as cp
+
         if rrversion == '0.1':
-            import cupy as cp
             from nearly_nmf.nmf import fit_NMF
-            rrmethod = 'NMF'
             X = cp.array(flux)#[:20, :]) # [nobj, nwave]
             V = cp.ones_like(X)          # [nobj, nwave]
             # H: [ncomp, nwave]
@@ -1842,16 +1885,22 @@ def build_redrock_templates(niter=10, ncomp=10, nmf=False, rrversion='0.1', seed
                                  use_gpu=True)
             H = H.get()
             W = W.get()
+
+            modelflux = W.dot(H) # reconstructed spectra [nobj, nwave]
+            _write_redrock_templates(rrmethod, rrversion, wave, H, W)
+            
         elif rrversion == '0.2':
             from copy import copy
             ncomp = nobj
             H = copy(flux)
             W = np.identity(n=ncomp)
-            rrmethod = 'NMF'            
+
+            modelflux = W.dot(H) # reconstructed spectra [nobj, nwave]
+            _write_redrock_templates(rrmethod, rrversion, wave, H, W)
+            
         elif rrversion == '0.3':
             # trick Redrock into fitting archetype mode by creating specific
             # subtypes for each template
-            rrmethod = 'NMF'            
             subtype = []
             for age, av in zip(templatecache['templateinfo']['age'].data/1e6, templatecache['templateinfo']['av'].data):
                 if age < 1e3:
@@ -1866,51 +1915,47 @@ def build_redrock_templates(niter=10, ncomp=10, nmf=False, rrversion='0.1', seed
                 H = flux[iobj, :].reshape(1, nwave) # [ncomp, nwave]
                 _write_redrock_templates(rrmethod, rrversion, wave, H=H, 
                                          W=W, subtype=subtype[iobj])
-            return
+
         elif rrversion == '0.4':
-            rrmethod = 'NMF'
-            import cupy as cp
             from nearly_nmf.nmf import nearly_NMF
-            X = cp.array(flux)#[:20, :]) # [nobj, nwave]
-            V = cp.ones_like(X)          # [nobj, nwave]
-            del flux
-            H_start = cp.asarray(rand.uniform(low=0., high=2., size=(ncomp, nwave)))
-            W_start = cp.asarray(rand.uniform(low=0., high=2., size=(nobj, ncomp)))
-            if False:
-                H, W, chi2 = nearly_NMF(X=X, V=V, H_start=H_start, W_start=W_start,
-                                        n_iter=1000, update_H=True, update_W=True,
-                                        return_chi_2=True, verbose=True)
-            else:
-                H, W = nearly_NMF(X=X, V=V, H_start=H_start, W_start=W_start,
-                                  n_iter=1000, update_H=True, update_W=True)
-            #H, W, chi2 = fit_NMF(X=X, V=V, n_templates=ncomp, algorithm='nearly',
-            #                     return_chi_2=True, verbose=True, n_iter=10000,
-            #                     use_gpu=True)
-            H = H.get() # [ncomp, nwave]
-            W = W.get() # [nobj, ncomp]
-    
-            #H_shape = (args.n_templates, X.shape[1])
-            #W_shape = (X.shape[0], args.n_templates)
-            #
-            ## Sequential start so we can use a smooth flat W start
-            ## for every template
-            #H_start = rng.uniform(0, 1, H_shape) + 1
-            #W_start = np.ones(W_shape)
-            #
-            #H_nearly = cp.array(H_start, copy=True, dtype=args.dtype)
-            #W_nearly = cp.array(W_start, copy=True, dtype=args.dtype)
-            #
-            #print("Starting iteration")
-            #n_iter = 50
-            #for i in range(args.n_templates):
-            #    H_itr, W_itr = nmf.nearly_NMF(X, V, H_nearly[:(i + 1), :], W_nearly[:, :(i + 1)], n_iter=n_iter)
-            #
-            #    # Place the template we train into the array for the next iteration
-            #    H_nearly[:(i + 1), :] = H_itr
-            #    W_nearly[:, :(i + 1)] = W_itr
-            #
-            ## Refining the templates
-            #H_nearly, W_nearly = nmf.nearly_NMF(X, V, H_nearly, W_nearly, n_iter=1000)
+
+            # one set of templates per type
+            for targetclass in ['LRG', 'ELG']:#, 'LRG', 'ELG']:
+            #for targetclass in ['BGS', 'LRG', 'ELG']:
+                modelfile = os.path.join(stacksdir, f'modelflux-bins-{targetclass}.fits')
+                flux = fitsio.read(modelfile, 'FLUX') # [ngal, nwave]
+                wave = fitsio.read(modelfile, 'WAVE')
+                meta = Table(fitsio.read(modelfile, ext='METADATA'))
+                log.info(f'Read {len(meta):,d} spectra from {modelfile}')
+
+                # normalize
+                norm = np.median(flux, axis=1)
+                flux /= norm[:, np.newaxis]
+                nobj, nwave = flux.shape
+
+                if build_ncomp_grid:
+                    ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion}-galaxy-{targetclass}.fits')
+                    if not os.path.isfile(ncompfile) or overwrite:
+                        data = Table()
+                        data.meta['NOBJ'] = nobj
+                        data.meta['NWAVE'] = nwave
+                        data.meta['SEED'] = seed
+                        data.meta['NITER'] = niter
+                        data['NCOMP'] = np.array([2, 5, 10, 15, 20]).astype(np.int16)
+                        data['CHI2'] = np.zeros(len(data), 'f4')
+                        for icomp, ncomp in enumerate(data['NCOMP']):
+                            _, _, chi2 = build_nmf(flux, ncomp=ncomp, niter=niter, seed=seed, iterate=True,
+                                                   add_legendre=True, verbose=True)
+                            data['CHI2'][icomp] = chi2
+                        log.info(f'Writing {ncompfile}')
+                        data.write(ncompfile, overwrite=True)
+                    else:
+                        log.info(f'Skipping existing {ncompfile}; regenerate using --overwrite.')
+                else:
+                    H, W, chi2 = build_nmf(flux, ncomp=ncomp, niter=niter, seed=seed,
+                                           iterate=True, add_legendre=True, verbose=True)
+                    _write_redrock_templates(rrmethod, rrversion, wave, H, W, maintype='galaxy',
+                                             subtype=targetclass)
     else:
         from empca import empca
         rrmethod = 'PCA'
@@ -1921,23 +1966,20 @@ def build_redrock_templates(niter=10, ncomp=10, nmf=False, rrversion='0.1', seed
         #empca_eigenvec = model.eigvec  # [ncomp, nwave]
         #empca_eigencoeff = model.coeff # [nobj, ncomp]
         
-    modelflux = W.dot(H) # reconstructed spectra [nobj, nwave]
+        modelflux = W.dot(H) # reconstructed spectra [nobj, nwave]
+        _write_redrock_templates(rrmethod, rrversion, wave, H, W)
 
-    _write_redrock_templates(rrmethod, rrversion, wave, H, W)
 
-
-def build_redrock_star_templates(niter=50, ncomp=5, rrversion='0.4', WD=False,
-                                 rrversion_star='0.1', seed=1, overwrite=False):
+def build_redrock_star_templates(rrmethod='NMF', niter=500, ncomp=10, rrversion='0.4',
+                                 rrversion_star='0.1', seed=1, WD=False, overwrite=False,
+                                 build_ncomp_grid=False):
     """Build new stellar NMF templates.
 
     """
     from desispec.interpolation import resample_flux
 
-    rrmethod = 'NMF'
     rrtemplatedir = os.path.join(templatedir, f'{rrmethod}-{rrversion}')
 
-    rand = np.random.default_rng(seed=seed)
-    
     if rrversion_star == '0.1':
         from desisim.io import read_basis_templates
 
@@ -2016,10 +2058,32 @@ def build_redrock_star_templates(niter=50, ncomp=5, rrversion='0.4', WD=False,
         # normalize
         norm = np.median(flux, axis=1)
         flux /= norm[:, np.newaxis]
-        
-        H, W = build_nmf(flux, ncomp=ncomp, niter=niter, rand=rand, iterate=True, add_legendre=True)
-        _write_redrock_templates(rrmethod, rrversion_star, wave, H, W, maintype='star',
-                                 subtype='WD', rrtemplatedir=rrtemplatedir)
+        nobj, nwave = flux.shape
+    
+        # figure out how many components we need or want
+        if build_ncomp_grid:
+            ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion_star}-star-WD.fits')
+            if not os.path.isfile(ncompfile) or overwrite:
+                data = Table()
+                data.meta['NOBJ'] = nobj
+                data.meta['NWAVE'] = nwave
+                data.meta['SEED'] = seed
+                data.meta['NITER'] = niter
+                data['NCOMP'] = np.array([2, 5, 10, 15, 20, 25]).astype(np.int16)
+                data['CHI2'] = np.zeros(len(data), 'f4')
+                for icomp, ncomp in enumerate(data['NCOMP']):
+                    _, _, chi2 = build_nmf(flux, ncomp=ncomp, niter=niter, seed=seed, iterate=True,
+                                           add_legendre=True, verbose=True)
+                    data['CHI2'][icomp] = chi2
+                log.info(f'Writing {ncompfile}')
+                data.write(ncompfile, overwrite=True)
+            else:
+                log.info(f'Skipping existing {ncompfile}; regenerate using --overwrite.')
+        else:
+            H, W, chi2 = build_nmf(flux, ncomp=ncomp, niter=niter, seed=seed, iterate=True,
+                                   add_legendre=True, verbose=True)
+            _write_redrock_templates(rrmethod, rrversion_star, wave, H, W, maintype='star',
+                                     subtype='WD', rrtemplatedir=rrtemplatedir)
     else:
         # stars, split by spectral type
         for subtype in subtypes.keys():
@@ -2032,11 +2096,93 @@ def build_redrock_star_templates(niter=50, ncomp=5, rrversion='0.4', WD=False,
 
             norm = np.median(flux, axis=1)
             flux /= norm[:, np.newaxis]
+            nobj, nwave = flux.shape
+        
+            if build_ncomp_grid:
+                ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion_star}-star-{subtype}.fits')
+                if not os.path.isfile(ncompfile) or overwrite:
+                    data = Table()
+                    data.meta['NOBJ'] = nobj
+                    data.meta['NWAVE'] = nwave
+                    data.meta['SEED'] = seed
+                    data.meta['NITER'] = niter
+                    data['NCOMP'] = np.array([2, 5, 10, 15, 20, 25]).astype(np.int16)
+                    data['CHI2'] = np.zeros(len(data), 'f4')
+                    for icomp, ncomp in enumerate(data['NCOMP']):
+                        _, _, chi2 = build_nmf(flux, ncomp=ncomp, niter=niter, seed=seed, iterate=True,
+                                               add_legendre=True, verbose=True)
+                        data['CHI2'][icomp] = chi2
+                    log.info(f'Writing {ncompfile}')
+                    data.write(ncompfile, overwrite=True)
+                else:
+                    log.info(f'Skipping existing {ncompfile}; regenerate using --overwrite.')
+            else:
+                H, W, chi2 = build_nmf(flux, ncomp=ncomp, niter=niter, seed=seed,
+                                       iterate=True, add_legendre=True, verbose=True)
+                _write_redrock_templates(rrmethod, rrversion_star, wave, H, W, maintype='star',
+                                         subtype=subtype, rrtemplatedir=rrtemplatedir)
 
-            H, W = build_nmf(flux, ncomp=ncomp, niter=niter, rand=rand, iterate=True, add_legendre=True)
-            _write_redrock_templates(rrmethod, rrversion_star, wave, H, W, maintype='star',
-                                     subtype=subtype, rrtemplatedir=rrtemplatedir)
 
+def qa_ncomp_grid(rrmethod='NMF', rrversion='0.4', rrversion_star='0.1', star=False):
+    """Build a plot of chi2 vs number of components."""
+
+    if star:
+        maintype = 'star'
+    else:
+        maintype = 'galaxy'
+       
+    pngfile = os.path.join(qadir, f'qa-ncomp-grid-{maintype}.png')
+
+    if star:
+        maxncomp = 25
+        markers = ['D', 'o', 'v', 'p', '*', '^', 's']
+        fig, ax = plt.subplots(figsize=(7, 5))
+        for itype, subtype in enumerate(['WD', ] + list(subtypes.keys())):
+            ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion_star}-star-{subtype}.fits')
+            if os.path.isfile(ncompfile):
+                data = Table.read(ncompfile)
+                ax.plot(data['NCOMP'], data['CHI2']/1e6, f'-{markers[itype]}', markeredgecolor='k', label=f'{subtype} (N={data.meta["NOBJ"]})')
+                #ax.plot(data['NCOMP'], data['CHI2'] / np.min(data['CHI2']), '-s', label=subtype)
+            else:
+                log.info(f'Missing {ncompfile}')
+        ax.set_xlabel('Number of Eigentemplates')
+        ax.set_ylabel(r'$\chi^{2}\ /\ 10^{6}$')
+        ax.set_title(f'npix={data.meta["NWAVE"]} niter={data.meta["NITER"]}')
+        #ax.set_ylabel(r'$\chi^{2}/\chi^{2}_{min}$')
+        ax.set_xlim(0, maxncomp+2)
+        ax.set_yscale('log')
+        ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
+        ax.legend(loc='upper right', fontsize=10, ncols=2)
+        fig.tight_layout()
+        fig.savefig(pngfile)
+        plt.close()
+        log.info(f'Writing {pngfile}')
+    else:
+        maxncomp = 20
+        markers = ['s', 'o', 'v']
+        fig, ax = plt.subplots(figsize=(7, 5))
+        for iclass, targetclass in enumerate(['BGS', 'LRG', 'ELG']):
+            ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion}-galaxy-{targetclass}.fits')
+            if os.path.isfile(ncompfile):
+                data = Table.read(ncompfile)
+                ax.plot(data['NCOMP'], data['CHI2']/1e7, f'-{markers[iclass]}', markeredgecolor='k',
+                        label=f'{targetclass} (N={data.meta["NOBJ"]:,d})')
+            else:
+                log.info(f'Missing {ncompfile}')
+        ax.set_xlabel('Number of Eigentemplates')
+        ax.set_ylabel(r'$\chi^{2}\ /\ 10^{7}$')
+        ax.set_title(f'npix={data.meta["NWAVE"]} niter={data.meta["NITER"]}')
+        #ax.set_ylabel(r'$\chi^{2}/\chi^{2}_{min}$')
+        ax.set_xlim(0, maxncomp+2)
+        ax.set_yscale('log')
+        ax.set_ylim(0.1, 100)
+        ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
+        ax.legend(loc='upper right', fontsize=10)
+        fig.tight_layout()
+        fig.savefig(pngfile)
+        plt.close()
+        log.info(f'Writing {pngfile}')
+    
 
 def _read_rrtemplate(rrtemplatefile):
     """Read a Redrock template."""
@@ -2181,7 +2327,7 @@ def qa_star_templates(rrmethod='NMF', rrversion='0.4', rrversion_star='0.1',
             if WD:
                 title = f'TemplateID: {meta["TEMPLATEID"][iobj]} (Teff={meta["TEFF"][iobj]:.0f} K logg={meta["LOGG"][iobj]:.1f})'
             else:
-                title = f'TemplateID: {meta["TEMPLATEID"][iobj]} (Teff={meta["TEFF"][iobj]:.0f} K [Fe/H]={meta["FEH"][iobj]:.0f} logg={meta["LOGG"][iobj]:.1f})'
+                title = f'TemplateID: {meta["TEMPLATEID"][iobj]} (Teff={meta["TEFF"][iobj]:.0f} K [Fe/H]={meta["FEH"][iobj]:.1f} logg={meta["LOGG"][iobj]:.1f})'
             fig, ax = plt.subplots(figsize=(7, 5))
             F = np.where((wave > 1500.) * (flux[iobj, :] != 0.))[0]
             M = np.where((modelwave > 1500.) * (modelflux[iobj, :] != 0.))[0]
@@ -2198,13 +2344,49 @@ def qa_star_templates(rrmethod='NMF', rrversion='0.4', rrversion_star='0.1',
         pdf.close()        
         log.info(f'Wrote {pdffile}')
 
+    def _plot_rrtemplates(modelwave, H, title, pngfile):
+
+        ncomp, nwave = H.shape
+        I = np.arange(nwave)
+
+        fig, ax = plt.subplots()#figsize=(8, 5))
+        
+        current_palette = sns.color_palette()
+        sns.set_palette('Set1', ncomp)
+        colors = iter(sns.color_palette())
+        
+        ymin, ymax = 1e6, 0.
+        # plot in reverse order, so the most important templates are on top
+        for ic in range(ncomp-1, -1, -1):
+            yplot = H[ic, I] / np.std(H[ic, I])
+            ax.plot(modelwave[I], yplot, alpha=0.9, color=next(colors), lw=1)
+            ylim = np.percentile(yplot, [15., 95.])
+            if ylim[0] < ymin and ylim[0] > 1e-10:
+                ymin = ylim[0]
+            if ylim[1] > ymax:
+                ymax = ylim[1]
+        ax.set_ylim((ymin, ymax))
+        ax.set_yscale('log')
+        ax.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
+        ax.set_ylabel(r'$F\ /\ \sigma_{F}$')
+        ax.margins(x=0)
+        ax.set_title(title)
+        fig.tight_layout()
+        fig.savefig(pngfile)
+        plt.close()
+        log.info(f'Wrote {pngfile}')
+        sns.set_palette(current_palette)
+
     rrtemplatedir = os.path.join(templatedir, f'{rrmethod}-{rrversion}')
     if WD:
         rrtemplatefile = os.path.join(rrtemplatedir, f'rrtemplate-star-WD-{rrmethod}-{rrversion_star}.fits')
         modelfile = os.path.join(stacksdir, f'modelflux-{rrversion_star}-star-WD.fits')
         pdffile = os.path.join(qadir, f'qa-templates-recon-{rrmethod}-{rrversion_star}-star-WD.pdf')
+        pngfile = os.path.join(qadir, f'qa-templates-{rrmethod}-{rrversion_star}-star-WD.pdf')
 
         modelwave, modelflux, H, W = _read_rrtemplate(rrtemplatefile)
+
+        _plot_rrtemplates(modelwave, H, f'{rrmethod}-{rrversion_star}-star-WD', pngfile)
         
         log.info(f'Reading {modelfile}')
         flux = fitsio.read(modelfile, 'FLUX')
@@ -2221,9 +2403,12 @@ def qa_star_templates(rrmethod='NMF', rrversion='0.4', rrversion_star='0.1',
             rrtemplatefile = os.path.join(rrtemplatedir, f'rrtemplate-star-{subtype}-{rrmethod}-{rrversion_star}.fits')
             modelfile = os.path.join(stacksdir, f'modelflux-{rrversion_star}-star-{subtype}.fits')
             pdffile = os.path.join(qadir, f'qa-templates-recon-{rrmethod}-{rrversion_star}-star-{subtype}.pdf')
+            pngfile = os.path.join(qadir, f'qa-templates-{rrmethod}-{rrversion_star}-star-{subtype}.pdf')
 
             modelwave, modelflux, H, W = _read_rrtemplate(rrtemplatefile)
-            
+
+            _plot_rrtemplates(modelwave, H, f'{rrmethod}-{rrversion_star}-star-{subtype}', pngfile)
+    
             log.info(f'Reading {modelfile}')
             flux = fitsio.read(modelfile, 'FLUX')
             wave = fitsio.read(modelfile, 'WAVE')
@@ -2234,48 +2419,6 @@ def qa_star_templates(rrmethod='NMF', rrversion='0.4', rrversion_star='0.1',
             flux /= norm[:, np.newaxis]
             
             _plot_reconstructed(wave, flux, meta, modelwave, modelflux, pdffile)
-
-    #pngfile = os.path.join(qadir, f'qa-templates-{rrmethod}-{rrversion}.png')
-    #
-    #fig, ax = plt.subplots()#figsize=(8, 5))
-    #I = np.arange(nwave)
-    #
-    #current_palette = sns.color_palette()
-    #sns.set_palette('Set1', H.shape[0])
-    #colors = iter(sns.color_palette())
-    #
-    #ymin, ymax = 1e6, 0.
-    ## plot in reverse order, so the most important templates are on top
-    #for ic in range(ncomp-1, -1, -1):
-    ##for ic in range(ncomp):
-    #    yplot = H[ic, I] / np.std(H[ic, I])
-    #    ax.plot(modelwave[I], yplot, alpha=0.9, color=next(colors), lw=1)
-    #    ylim = np.percentile(yplot, [15., 100.])
-    #    #print(ymin, ymax)
-    #    if ylim[0] < ymin:
-    #        ymin = ylim[0]
-    #    if ylim[1] > ymax:
-    #        ymax = ylim[1]
-    ##for ii, ic in enumerate(srt):
-    #    #I = np.where(H[ic, :] > 0)[0]
-    #    #ax.plot(modelwave[I]/1e4, H[ic, I] + ii)
-    #ax.set_ylim((ymin, ymax)) # -0.01, 0.01)
-    ##ax.set_ylim(-5, 10)#7.5, 7.5)
-    #ax.set_yscale('log')
-    ##ax.set_xlim(3727-20, 3727+20)
-    ##ax.set_yticklabels([])
-    #ax.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
-    #ax.set_ylabel(r'$F\ /\ \sigma_{F}$')
-    ##ax.set_ylabel(r'Normalized Flux (+offsets)')
-    #ax.margins(x=0)
-    ##ax.set_xscale('log')
-    ##ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: '{:g}'.format(y)))
-    #ax.set_title(f'{rrmethod}-{rrversion}')
-    #fig.tight_layout()
-    #fig.savefig(pngfile)
-    #plt.close()
-    #log.info(f'Wrote {pngfile}')
-    #sns.set_palette(current_palette)
 
     
 def _zstats(z, ztrue, spectype=None, vcut=1e3):
@@ -2768,7 +2911,7 @@ def qa_summarize(specprod='iron', zscan='zscan01', overwrite=False):
         allout.append(out)
 
         # new templates
-        for rrversion in ['0.1', '0.2', '0.3']:
+        for rrversion in ['0.1', '0.2', '0.3', '0.4']:
             for rrmethod in ['PCA', 'NMF']:
                 zcatfile = os.path.join(stacksdir, f'zcat-vitiles-templates-{rrmethod}-{rrversion}-{zscan}.fits')
                 if not os.path.isfile(zcatfile):
@@ -2776,7 +2919,6 @@ def qa_summarize(specprod='iron', zscan='zscan01', overwrite=False):
                     
                 zcat = Table(fitsio.read(zcatfile))
                 
-
                 out = Table()
                 out['METHOD-VERSION'] = [f'{rrmethod}-{rrversion}']                
                 #print(f'method-version: {rrmethod}-{rrversion}')
@@ -3063,7 +3205,7 @@ def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01
         ax[0].set_ylim(0.5 * ylims[0], 1.5*ylims[1])
         ax[0].set_xlabel(r'Observed-frame Wavelength ($\AA$)')
         ax[0].set_ylabel(r'$F_{\lambda}\ (10^{-17}~{\rm erg}~{\rm s}^{-1}~{\rm cm}^{-2}~\AA^{-1})$')
-        ax[0].set_title(f'{rrmethod}-{rrversion}: {out1["TILEID"]}/{out1["TARGETID"]}')
+        ax[0].set_title(f'{rrmethod}-{rrversion}: {out1["TILEID"]}-petal{out1["FIBER"]//500}/{out1["TARGETID"]}')
 
         txt = '\n'.join((
             f'z_RR: {out1["Z_RR_NEW"]:.4f}:{padit(out1["SPECTYPE_NEW"])}',
@@ -3193,6 +3335,11 @@ def main():
     parser.add_argument('--qa-templates', action='store_true', help='Redrock template QA.')
     parser.add_argument('--qa-star-templates', action='store_true', help='Redrock stellar template QA.')
 
+    parser.add_argument('--build-galaxy-ncomp-grid', action='store_true', help='Determine the number of galaxy components to use.')
+    parser.add_argument('--qa-galaxy-ncomp-grid', action='store_true', help='Generate a plot of number of chi2 vs number of components for galaxies.')
+    parser.add_argument('--build-star-ncomp-grid', action='store_true', help='Determine the number of stellar components to use.')
+    parser.add_argument('--qa-star-ncomp-grid', action='store_true', help='Generate a plot of number of chi2 vs number of components for stars.')
+
     parser.add_argument('--gather-specprod-results', action='store_true', help='Gather the specprod Redrock results for the VI tiles/healpixels.')
     parser.add_argument('--run-redrock', action='store_true', help='Run Redrock on the VI tiles/healpixels.')
     parser.add_argument('--redshift-qa', action='store_true', help='Redshift QA.')
@@ -3268,20 +3415,41 @@ def main():
             #for targetclass, select_broad in zip(['BGS', 'BGS', 'LRG', 'ELG'], [True, False, False, False]):
             #    qa_stacks(targetclass, select_broad=select_broad)
 
+    if args.build_galaxy_ncomp_grid:
+        build_redrock_templates(rrversion=args.rrversion, overwrite=args.overwrite,
+                                niter=100, build_ncomp_grid=True, nmf=True)
+        
+    if args.qa_galaxy_ncomp_grid:
+        qa_ncomp_grid(rrmethod=args.rrmethod, rrversion=args.rrversion, star=False)
+        
+    if args.build_star_ncomp_grid:
+        build_redrock_star_templates(rrversion=args.rrversion,
+                                     rrversion_star=args.rrversion_star,
+                                     overwrite=args.overwrite, WD=True,
+                                     build_ncomp_grid=True)
+        build_redrock_star_templates(rrversion=args.rrversion,
+                                     rrversion_star=args.rrversion_star,
+                                     overwrite=args.overwrite, WD=False,
+                                     build_ncomp_grid=True)
+
+    if args.qa_star_ncomp_grid:
+        qa_ncomp_grid(rrversion=args.rrversion, rrversion_star=args.rrversion_star, star=True)
+        qa_ncomp_grid(rrversion=args.rrversion, rrversion_star=args.rrversion_star, star=False)
+        
     # build the new Redrock templates
     if args.empca_templates:
         build_redrock_templates(rrversion=args.rrversion, nmf=False)
         
     if args.nmf_templates:
-        build_redrock_templates(rrversion=args.rrversion, nmf=True)
+        build_redrock_templates(niter=500, ncomp=10, rrversion=args.rrversion, nmf=True)
         
     if args.wd_templates:
-        build_redrock_star_templates(rrversion=args.rrversion,
+        build_redrock_star_templates(niter=100, ncomp=10, rrversion=args.rrversion,
                                      rrversion_star=args.rrversion_star,
                                      overwrite=args.overwrite, WD=True)
         
     if args.star_templates:
-        build_redrock_star_templates(rrversion=args.rrversion,
+        build_redrock_star_templates(niter=100, ncomp=10, rrversion=args.rrversion,
                                      rrversion_star=args.rrversion_star,
                                      overwrite=args.overwrite, WD=False)
         
@@ -3290,7 +3458,7 @@ def main():
 
     if args.qa_star_templates:
         qa_star_templates(rrversion=args.rrversion, rrversion_star=args.rrversion_star, WD=True)
-        #qa_star_templates(rrversion=args.rrversion, rrversion_star=args.rrversion_star, WD=False)
+        qa_star_templates(rrversion=args.rrversion, rrversion_star=args.rrversion_star, WD=False)
 
     # gather the {specprod} (iron) Redrock results.
     if args.gather_specprod_results:
@@ -3299,7 +3467,7 @@ def main():
     if args.run_redrock:
         # Run Redrock on the VI tiles with a redshift scan to z=1.7 and to z=4.
         run_redrock_vitiles(zscan_prior='01', rrversion=args.rrversion, rrmethod=args.rrmethod,
-                            specprod=args.specprod, overwrite=args.overwrite)
+                            specprod=args.specprod, overwrite=args.overwrite, write_slurm=False)
 
     if args.redshift_qa:
         # QA - redshift vs redshift results
