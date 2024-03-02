@@ -33,16 +33,12 @@ time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates -
       qa-parent-zhist.png
       {BGS,LRG,ELG}-{obs,rest,rest-bins}.png
 
-3. Build the stacked spectra in bins of properties.
-time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-stacks
-  --> stacks-{BGS,BGS_broad,LRG,ELG}.fits
+3. Build the models in bins of properties.
+salloc -N 1 -C cpu -A desi -t 04:00:00 --qos interactive
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-modelflux-bins
+  --> modelflux-bins-{BGS,LRG,ELG}.fits
 
-4. Model the resulting stacks using FastSpecFit.
-time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --fastspec-stacks
-  --> fastspec-stacks-{BGS,BGS_broad,LRG,ELG}.fits
-      modelflux-stacks-{BGS,BGS_broad,LRG,ELG}.fits
-
-5. Build empca and nmf templates.
+4. Build empca and nmf templates.
 salloc -N 1 -C 'gpu' -A desi -t 04:00:00 --qos interactive
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-galaxy-ncomp-grid
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-galaxy-ncomp-grid
@@ -58,7 +54,10 @@ time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates -
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --star-templates
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-star-templates
 
-6. Gather the {specprod} (iron) Redrock results.
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qso-templates
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-qso-templates
+
+5. Gather the {specprod} (iron) Redrock results.
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --gather-specprod-results
 
 7. Run Redrock with a few different priors:
@@ -1113,6 +1112,7 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     outfast = []
     outmeta = []
     
+    #for ibin, bin in enumerate(bins[bins['IBIN'] == 711]):
     for ibin, bin in enumerate(bins):
         if targetclass == 'BGS' or targetclass == 'ELG':
             I = ((allfast['Z'] > bin['ZOBJMIN']) * (allfast['Z'] < bin['ZOBJMAX']) *
@@ -1142,7 +1142,12 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
         
         t0 = time.time()
         os.environ['DESI_LOGLEVEL'] = 'critical'
+        
         #plt.clf()
+        #ymin, ymax = 1e6, -1e6
+        #xmin, xmax = 1500., 2500.
+        #I = I[:1]
+        
         for iobj, fast in enumerate(allfast[I]):
             dlum = cosmo.luminosity_distance(fast['Z'])
             continuum, _ = CTools.templates2data(templatecache['templateflux_nolines'],
@@ -1153,7 +1158,7 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
             ztemplatewave = templatewave * (1. + fast['Z'])
             W = np.where(ztemplatewave <= maxwave)[0]
             R = Resolution(np.ones((1, len(W)))) # Hack!
-            emspectrum = EMFit.emlinemodel_bestfit([ztemplatewave[W]], [R], fast, snrcut=0.)[0]
+            emspectrum = EMFit.emlinemodel_bestfit([ztemplatewave[W]], [R], fast, snrcut=2.5)[0]
 
             # this is where we would add other missing emission lines like Lya!!
             modelflux = continuum
@@ -1175,20 +1180,23 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
                 outbins['INDEX'][ibin][iobj] = index
                 index += 1 # advance
                 
-                #plt.plot(templatewave, continuum/norm, color='k', alpha=0.4)
+                #plt.plot(templatewave, continuum/norm, color='k')#, alpha=0.4)
                 #plt.plot(templatewave, modelflux/norm, color='gray', alpha=0.7)
-                #plt.plot(outwave, outflux1, color='red', alpha=0.3)
-                
-        #W = (outwave > 3000.) * (outwave < 4500.)
-        #ymin, ymax = np.min(outflux1[W]), np.max(outflux1[W])
-        #plt.ylim(-0.1, 20)
-        ##plt.ylim(ymin, ymax)
-        #plt.xlim(3670., 3770.)
+                ##plt.plot(outwave, outflux1, color='red', alpha=0.2)
+                #W = (outwave > xmin) * (outwave < xmax)
+                #if np.max(outflux1[W]) > ymax:
+                #    ymax = np.max(outflux1[W])
+                #if np.min(outflux1[W]) < ymin:
+                #    ymin = np.min(outflux1[W])
+
+        #plt.ylim(ymin, ymax)
+        #plt.xlim(xmin, xmax)
         ##plt.xscale('log')
         ##plt.yscale('log')
-        #plt.axvline(x=norm_flux_window[0], color='k', ls='--')
-        #plt.axvline(x=norm_flux_window[1], color='k', ls='--')
+        ##plt.axvline(x=norm_flux_window[0], color='k', ls='--')
+        ##plt.axvline(x=norm_flux_window[1], color='k', ls='--')
         #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp/junk2.png')
+        
         os.environ['DESI_LOGLEVEL'] = 'info'
 
         Igood = np.array(Igood)
@@ -1205,7 +1213,7 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
         
         log.info(f'Bin {ibin:04d}/{nbins:04d}: building {len(Igood):05d}/{outbins["NPARENT"][ibin]:05d} models (t={(time.time()-t0)/1.:.1f} s)')
         #log.info(f'Building {len(Igood):,d}/{outbins["NPARENT"][ibin]:,d} models took {(time.time()-t0)/1.:.2f} sec.')
-        
+
     # trim to just the populated bins
     I = np.where(outbins['NOBJ'] > 0)[0]
     outbins = outbins[I]
@@ -1238,6 +1246,8 @@ def qa_modelflux_bins(targetclass, nsmooth=3):
     bins = Table(fitsio.read(modelfluxfile, 'BINS'))
     nobj = len(bins)
 
+    #pdb.set_trace()
+
     if targetclass == 'LRG':
         colorlabel = '^{0.1}(r - W1)'
     else:
@@ -1255,16 +1265,16 @@ def qa_modelflux_bins(targetclass, nsmooth=3):
         from matplotlib.backends.backend_pdf import PdfPages
         pdf = PdfPages(pdffile)
 
-    for ipage in np.arange(npage):
-    #for ipage in [10]:#np.arange(npage):
+    #for ipage in np.arange(npage):
+    for ipage in [10]:#np.arange(npage):
         log.info(f'Building page {ipage+1}/{npage}')
         pageindx = np.where(zobj[ipage] == bins['ZOBJBIN'])[0]
 
         mstar = sorted(set(bins['MSTARBIN'][pageindx])) # subpage
         nsubpage = len(mstar)
 
-        for isubpage in np.arange(nsubpage):
-        #for isubpage in [1]:#np.arange(nsubpage):
+        #for isubpage in np.arange(nsubpage):
+        for isubpage in [1]:#np.arange(nsubpage):
             subpageindx = np.where((mstar[isubpage] == bins['MSTARBIN'][pageindx]))[0]
 
             fig, allax = plt.subplots(nrow, ncol, figsize=(inches_wide_perpanel*ncol, inches_tall_perpanel*nrow),
@@ -1273,9 +1283,12 @@ def qa_modelflux_bins(targetclass, nsmooth=3):
                 #log.info(ipage, isubpage, iplot, len(pageindx), len(subpageindx))
 
                 specindx = bins[indx]['INDEX'][:bins[indx]['NOBJ']]
-                for S in specindx[:10]:
+                parentindx = bins[indx]['PARENTINDEX'][:bins[indx]['NOBJ']]
+                for S, P in zip(specindx[:1], parentindx[:1]):
+                #for S in specindx[:10]:
+                    print(bins[indx]['IBIN'], S, P)
                     ax.plot(modelwave, gaussian_filter(modelflux[S, :], nsmooth), color='skyblue', alpha=0.5)
-                ax.plot(modelwave, gaussian_filter(np.mean(modelflux[specindx, :], axis=0), nsmooth), color='k', alpha=0.7)
+                #ax.plot(modelwave, gaussian_filter(np.mean(modelflux[specindx, :], axis=0), nsmooth), color='k', alpha=0.7)
                 
                 xmin, xmax = modelwave.min(), modelwave.max()
                 M = np.where(modelwave > 1215.)[0]
@@ -1293,6 +1306,7 @@ def qa_modelflux_bins(targetclass, nsmooth=3):
                         ha='left', va='top', transform=ax.transAxes, fontsize=10,
                         bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
 
+                #ax.set_xlim(xmin, xmax)
                 ax.set_xlim(1500, 2500) # xmin, xmax)
                 ax.set_ylim(ymin, ymax)
                 ax.set_yscale('log')
@@ -2121,6 +2135,118 @@ def build_redrock_star_templates(rrmethod='NMF', niter=500, ncomp=10, rrversion=
                                        iterate=True, add_legendre=True, verbose=True)
                 _write_redrock_templates(rrmethod, rrversion_star, wave, H, W, maintype='star',
                                          subtype=subtype, rrtemplatedir=rrtemplatedir)
+
+
+def build_redrock_qso_templates(rrmethod='NMF', niter=500, ncomp=10, rrversion='0.4',
+                                rrversion_qso='0.1', seed=1, overwrite=False,
+                                build_ncomp_grid=False):
+    """Build new QSO NMF templates.
+
+    """
+    from desispec.interpolation import resample_flux
+
+    rrtemplatedir = os.path.join(templatedir, f'{rrmethod}-{rrversion}')
+
+    if rrversion_qso == '0.1':
+        from desisim.io import read_basis_templates
+        from desisim.templates import SIMQSO
+        from simqso.sqgrids import QsoSimObjects
+            
+        mockdir = '/global/cfs/cdirs/desi/users/hiramk/desi/qq_mocks/EDR/fugu/all/mock/london/v9.0.9/fugu_all-0.3'
+
+        parentfile = os.path.join(mockdir, 'qsocat_fugu_all.fits')
+        jj = Table(fitsio.FITS(parentfile)[1].read())
+
+
+        #F = fitsio.FITS('/global/cfs/cdirs/desi/users/hiramk/desi/qq_mocks/EDR/fugu/all/mock/london/v9.0.9/fugu_all-0.3/spectra-16/2/296/truth-16-296.fits')
+        mockfile = os.path.join(mockdir, 'spectra-16', '2', '296', 'truth-16-296.fits')
+        mock = Table(fitsio.read(mockfile, 'TRUTH_QSO'))
+
+        Q = SIMQSO(restframe=False, colorcuts_function=None)
+        
+        flux, wave, meta, qsometa = Q.make_templates(input_qsometa=mockfile, qsometa_extname='TRUTH_QSO', nocolorcuts=True, return_qsometa=True, lyaforest=False)
+        
+        
+        pdb.set_trace()
+
+        dwave = 0.4
+        minwave = 400.
+        wave = np.arange(minwave, 11000.+dwave/2, dwave)
+
+        basemeta = None
+        for subtype in subtypes.keys():
+            starfile = os.path.join(stacksdir, f'modelflux-{rrversion_star}-star-{subtype}.fits')
+
+            if not os.path.isfile(starfile) or overwrite:
+                if basemeta is None:
+                    baseflux, basewave, basemeta = read_basis_templates(objtype='STAR')
+                    
+                I = np.where((basemeta['TEFF'] >= subtypes[subtype][0]) * (basemeta['TEFF'] < subtypes[subtype][1]))[0]
+                nstar = len(I)
+                log.info(f'Selecting {nstar} {subtype}-type stars.')
+
+                input_meta = basemeta['TEMPLATEID', ][I]
+                input_meta['REDSHIFT'] = [0.]
+                input_meta['SEED'] = [seed]
+                input_meta['MAG'] = [18.]
+                input_meta['MAGFILTER'] = ['decam2014-r']
+
+                tflux, twave, meta, objmeta = STAR().make_templates(input_meta=input_meta, restframe=True)#, seed=seed)
+                assert(np.all(objmeta['TEFF'] == basemeta['TEFF'][I]))
+                assert(np.all(objmeta['FEH'] == basemeta['FEH'][I]))
+                assert(np.all(objmeta['LOGG'] == basemeta['LOGG'][I]))
+
+                outmeta = meta['TEMPLATEID', 'SUBTYPE']
+                outmeta['SUBTYPE'] = subtype
+                outmeta['TEFF'] = objmeta['TEFF']
+                outmeta['LOGG'] = objmeta['LOGG']
+                outmeta['FEH'] = objmeta['FEH']
+
+                starflux = np.zeros((nstar, wave.size))
+                for iobj in range(nstar):
+                    starflux[iobj, :] = resample_flux(wave, twave, tflux[iobj, :], extrapolate=True)
+                
+                log.info(f'Writing {len(meta):,d} spectra to {starfile}')
+                fitsio.write(starfile, starflux.astype('f4'), clobber=True, extname='FLUX')
+                fitsio.write(starfile, wave, extname='WAVE')
+                fitsio.write(starfile, outmeta.as_array(), extname='METADATA')
+
+    # stars, split by spectral type
+    for subtype in subtypes.keys():
+        starfile = os.path.join(stacksdir, f'modelflux-{rrversion_star}-star-{subtype}.fits')
+
+        flux = fitsio.read(starfile, ext='FLUX')
+        wave = fitsio.read(starfile, ext='WAVE')
+        meta = Table(fitsio.read(starfile, ext='METADATA'))
+        log.info(f'Read {len(meta):,d} spectra from {starfile}')                
+
+        norm = np.median(flux, axis=1)
+        flux /= norm[:, np.newaxis]
+        nobj, nwave = flux.shape
+    
+        if build_ncomp_grid:
+            ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion_star}-star-{subtype}.fits')
+            if not os.path.isfile(ncompfile) or overwrite:
+                data = Table()
+                data.meta['NOBJ'] = nobj
+                data.meta['NWAVE'] = nwave
+                data.meta['SEED'] = seed
+                data.meta['NITER'] = niter
+                data['NCOMP'] = np.array([2, 5, 10, 15, 20, 25]).astype(np.int16)
+                data['CHI2'] = np.zeros(len(data), 'f4')
+                for icomp, ncomp in enumerate(data['NCOMP']):
+                    _, _, chi2 = build_nmf(flux, ncomp=ncomp, niter=niter, seed=seed, iterate=True,
+                                           add_legendre=True, verbose=True)
+                    data['CHI2'][icomp] = chi2
+                log.info(f'Writing {ncompfile}')
+                data.write(ncompfile, overwrite=True)
+            else:
+                log.info(f'Skipping existing {ncompfile}; regenerate using --overwrite.')
+        else:
+            H, W, chi2 = build_nmf(flux, ncomp=ncomp, niter=niter, seed=seed,
+                                   iterate=True, add_legendre=True, verbose=True)
+            _write_redrock_templates(rrmethod, rrversion_star, wave, H, W, maintype='qso',
+                                     subtype=subtype, rrtemplatedir=rrtemplatedir)
 
 
 def qa_ncomp_grid(rrmethod='NMF', rrversion='0.4', rrversion_star='0.1', star=False):
@@ -3332,6 +3458,7 @@ def main():
     parser.add_argument('--nmf-templates', action='store_true', help='Run NMF on the output of --parent-templates.')
     parser.add_argument('--wd-templates', action='store_true', help='Generate the WD NMF templates.')
     parser.add_argument('--star-templates', action='store_true', help='Generate the stellar NMF templates.')
+    parser.add_argument('--qso-templates', action='store_true', help='Generate the QSO NMF templates.')
     parser.add_argument('--qa-templates', action='store_true', help='Redrock template QA.')
     parser.add_argument('--qa-star-templates', action='store_true', help='Redrock stellar template QA.')
 
@@ -3351,6 +3478,7 @@ def main():
     parser.add_argument('--rrmethod', type=str, default='NMF', help='Redrock fitting method.')
     parser.add_argument('--rrversion', type=str, default='0.4', help='Redrock template version.')
     parser.add_argument('--rrversion-star', type=str, default='0.1', help='WD and stellar Redrock template version.')
+    parser.add_argument('--rrversion-qso', type=str, default='0.1', help='QSO Redrock template version.')
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing QA files.')    
     args = parser.parse_args()
@@ -3375,16 +3503,13 @@ def main():
     # Select fastspec models in physical bins of properties.
     if args.build_modelflux_bins:
         if args.targetclass:
-            build_modelflux_bins(args.targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
-                                 minperbin=3, maxperbin=100,
-                                 #fracperbin=0.03,
-                                 overwrite=args.overwrite)
+            targetclasses = [args.targetclass]
         else:
-            for targetclass in ['BGS', 'LRG', 'ELG']:
-                build_modelflux_bins(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
-                                     minperbin=3, maxperbin=100,
-                                     #fracperbin=0.03,
-                                     overwrite=args.overwrite)
+            targetclasses = ['BGS', 'LRG', 'ELG']
+        for targetclass in targetclasses:
+            build_modelflux_bins(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
+                                 minperbin=3, maxperbin=100, #fracperbin=0.03,
+                                 overwrite=args.overwrite)
 
     # QA of the model spectra in physical bins.
     if args.qa_modelflux_bins:
@@ -3452,6 +3577,11 @@ def main():
         build_redrock_star_templates(niter=100, ncomp=10, rrversion=args.rrversion,
                                      rrversion_star=args.rrversion_star,
                                      overwrite=args.overwrite, WD=False)
+        
+    if args.qso_templates:
+        build_redrock_qso_templates(niter=100, ncomp=10, rrversion=args.rrversion,
+                                    rrversion_qso=args.rrversion_qso,
+                                    overwrite=args.overwrite)
         
     if args.qa_templates:
         qa_redrock_templates(rrversion=args.rrversion)
