@@ -133,9 +133,9 @@ fphotofiles = {
 
 def get_zlims(lss_specprod, targtype=None):
     if lss_specprod == 'fuji':
-        zlims = {'BGS_ANY': [0.01, 0.6], 'LRG': [0.4, 1.1], 'ELG': [0.6, 1.6]}
+        zlims = {'BGS_ANY': [0.01, 0.6], 'LRG': [0.4, 1.1], 'ELG': [0.6, 1.6], 'QSO': [0.6, 3.5]}
     elif lss_specprod == 'iron':
-        zlims = {'BGS_ANY': [0.01, 0.5], 'LRG': [0.4, 1.1], 'ELG_LOPnotqso': [0.8, 1.6]}
+        zlims = {'BGS_ANY': [0.01, 0.5], 'LRG': [0.4, 1.1], 'ELG_LOPnotqso': [0.8, 1.6], 'QSO': [0.6, 3.5]}
     else:
         raise NotImplemented
     if targtype:
@@ -156,8 +156,8 @@ def get_vacdir(specprod='fuji', version=None):
     #if 'NERSC_HOST' in os.environ:
     #    vacdir = '/pscratch/sd/i/ioannis/fastspecfit/vac/data/'+specprod+'/catalogs' # to be updated
     #else:
-    #vacdir = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', specprod, version, 'catalogs')
-    vacdir = os.path.join(os.getenv('PSCRATCH'), 'fastspecfit', specprod, version, 'catalogs')
+    vacdir = os.path.join(os.getenv('DESI_ROOT'), 'spectro', 'fastspecfit', specprod, version, 'catalogs')
+    #vacdir = os.path.join(os.getenv('PSCRATCH'), 'fastspecfit', specprod, version, 'catalogs')
     log.info(f'VAC dir {vacdir}')
 
     return vacdir
@@ -408,6 +408,7 @@ def match_lss(specprod='iron', lss_specprod='fuji', overwrite=False):
     from fastspecfit.io import write_fastspecfit
 
     vacdir = get_vacdir(specprod)
+    vacdir_qso = get_vacdir('fuji')
 
     # read the clustering catalogs
     if lss_specprod == 'fuji':
@@ -424,14 +425,18 @@ def match_lss(specprod='iron', lss_specprod='fuji', overwrite=False):
     
     survey = 'sv3'
     
-    for targtype in zlims.keys():
+    for targtype in ['QSO']:#zlims.keys():
         log.info('##################################################')
         log.info(f'Working on {targtype}')
         if targtype == 'BGS_ANY':
             fastfile = os.path.join(vacdir, f'fastspec-{specprod}-{survey}-bright.fits')
             allfast, allmeta, _, _ = read_fastspecfit(fastfile)
         else:
-            fastfile = os.path.join(vacdir, f'fastspec-{specprod}-{survey}-dark.fits')
+            # for QSOs, use the Fuji catalogs because the redshifts can be quite different
+            if targtype == 'QSO':
+                fastfile = os.path.join(vacdir_qso, f'fastspec-{lss_specprod}-{survey}-dark.fits')
+            else:
+                fastfile = os.path.join(vacdir, f'fastspec-{specprod}-{survey}-dark.fits')
             allfast, allmeta, _, _ = read_fastspecfit(fastfile)
         
         for lsstype in ['clustering']:
