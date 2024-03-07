@@ -1,0 +1,192 @@
+#!/usr/bin/env python
+"""Call rrdesi on one object.
+
+${HOME}/code/desihub/fastspecfit-projects/redrock-templates/rrdesi-one \
+  --coadd /global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/stacks/redux-templates-NMF-0.4b-zscan01/vitiles/coadd-0-80607.fits
+  --targetid 39633331523948144
+
+"""
+import os, pdb
+import numpy as np
+import fitsio
+from astropy.table import Table
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from desiutil.log import get_logger
+log = get_logger()
+
+def main(coaddfile, targetid, rrtemplatedir, outdir, nsmooth=3):
+
+    from scipy.ndimage import gaussian_filter
+    from desispec.io import read_spectra
+    from desispec.interpolation import resample_flux
+    from desispec.resolution import Resolution
+    import redrock.templates
+    from redrock.results import read_zscan
+    from redrock.external.desi import rrdesi
+
+    redrockfile = os.path.join(outdir, 'zbest.fits')
+    h5file = os.path.join(outdir, 'rrdetails.h5')
+    pngfile = os.path.join(outdir, f'rrdesi-{targetid}.png')
+
+    cmd = f'-i {coaddfile} -o {redrockfile} -d {h5file} --negflux-nsig=5 --gpu -t {rrtemplatedir} --targetids {targetid}'
+    #cmd += " --zscan-galaxy=-0.005,0.1,3e-4"
+    log.info(f'rrdesi {cmd}')
+    rrdesi(cmd.split())
+
+    # read the results
+    os.environ['DESI_LOGLEVEL'] = 'warning'
+    orig_rrtemplatedir = os.getenv('RR_TEMPLATE_DIR')    
+    os.environ['RR_TEMPLATE_DIR'] = rrtemplatedir
+    templates = dict()
+    for filename in redrock.templates.find_templates():
+        t = redrock.templates.Template(filename)
+        templates[(t.template_type, t.sub_type)] = t
+    os.environ['RR_TEMPLATE_DIR'] = orig_rrtemplatedir
+    os.environ['DESI_LOGLEVEL'] = 'info'
+    
+    spec = read_spectra(coaddfile, targetids=targetid)
+    zscan, zfit = read_zscan(h5file)#, select_targetids=targetid)
+    zbest = Table(fitsio.read(redrockfile, 'REDSHIFTS'))#, rows=row))
+    zrr = zbest['Z']
+
+    print(zfit)
+
+    spectype = zbest['SPECTYPE'][0].strip()
+    subtype = zbest['SUBTYPE'][0].strip()
+    fulltype = (spectype, subtype)
+    if subtype != '':
+        sfulltype = f'{spectype}:::{subtype}'
+    else:
+        sfulltype = spectype
+        
+    ncoeff = templates[fulltype].flux.shape[0]
+    coeff = zbest['COEFF'][0][0:ncoeff]
+    rrwave = templates[fulltype].wave * (1. + zrr)
+    rrflux = templates[fulltype].flux.T.dot(coeff)
+
+    flux, ivar, wave, tflux = [], [], [], []
+    for cam in spec.bands:
+        wave.append(spec.wave[cam])
+        flux.append(spec.flux[cam].squeeze())
+        ivar.append(spec.ivar[cam].squeeze())
+        R = Resolution(spec.resolution_data[cam].squeeze())
+        tflux.append(R.dot(resample_flux(spec.wave[cam], rrwave, rrflux)))
+
+    # build the plot
+    sns.set(context='talk', style='ticks', font_scale=0.7, palette='Set2')    
+    bbox = dict(boxstyle='round', facecolor='lightgray', alpha=0.5)
+    
+    fig, ax = plt.subplots(2, 1, figsize=(8, 6))
+    for icam, color, modelcolor in zip(range(len(spec.bands)),
+                                           ['dodgerblue', 'darkseagreen', 'orangered'],
+                                           ['darkblue', 'darkgreen', 'darkred']):
+        ax[0].plot(wave[icam], gaussian_filter(flux[icam], nsmooth), color=color, alpha=0.7)
+        ax[0].plot(wave[icam], gaussian_filter(tflux[icam], nsmooth), color=modelcolor, alpha=0.9)
+        
+    ylims = np.percentile(np.hstack(flux), [1., 99.])
+    ax[0].set_ylim(0.5 * ylims[0], 1.5*ylims[1])
+    ax[0].set_xlabel(r'Observed-frame Wavelength ($\AA$)')
+    ax[0].set_ylabel(r'$F_{\lambda}\ (10^{-17}~{\rm erg}~{\rm s}^{-1}~{\rm cm}^{-2}~\AA^{-1})$')
+    if 'TILEID' in spec.fibermap.columns:
+        ax[0].set_title(f'{spec.fibermap["TILEID"][0]}/{spec.fibermap["FIBER"][0]//500}/{spec.fibermap["TARGETID"][0]}')
+    else:
+        ax[0].set_title(f'{spec.fibermap["TARGETID"][0]}')
+        #ax[0].set_title(f'{spec.fibermap.meta["SURVEY"]}/{spec.fibermap.meta["PROGRAM"]}/{spec.fibermap["HEALPIX"][0]}/{spec.fibermap["TARGETID"][0]}')
+        #ax[0].set_title(f'{spec.fibermap["SURVEY"][0]}/{spec.fibermap["PROGRAM"][0]}/{spec.fibermap["HEALPIX"][0]}/{spec.fibermap["TARGETID"][0]}')
+
+    #txt = '\n'.join((
+    #    f'z_RR: {zbest["Z"]:.4f}:{zbest["SPECTYPE"]}',
+    #    #f'Iron: {out1["Z_RR_IRON"]:.4f}:{padit(out1["SPECTYPE_IRON"])}',
+    #    #f'VI: {out1["VI_Z"]:.4f}:{padit(out1["VI_SPECTYPE"])}',
+    #    ))
+    #txt = f'z_RR: {zbest["Z"]:.4f}:{zbest["SPECTYPE"]}'
+    #ax[0].text(0.97, 0.94, txt, ha='right', va='top',
+    #           transform=ax[0].transAxes, fontsize=10, bbox=bbox)
+
+    zchi2 = zscan[targetid][sfulltype]['zchi2']
+    redshifts = zscan[targetid][sfulltype]['redshifts']
+    nn = np.min(zchi2)
+    snn = str(int(np.log10(nn)))
+    ax[1].plot(redshifts, zchi2/nn, color='k', alpha=0.7, label=r'$\chi^{2}$('+sfulltype+')')
+    ax[1].set_xlabel('Redshift')
+    ax[1].set_ylabel(r'$\chi^{2}\ /\ 10^{'+snn+'}$')
+
+    igal = ','.join(np.where(zfit['spectype'] == 'GALAXY')[0].astype(str))
+    iqso = ','.join(np.where(zfit['spectype'] == 'QSO')[0].astype(str))
+    istar = ','.join(np.where(zfit['spectype'] == 'STAR')[0].astype(str))
+
+    txt = '\n'.join((
+        r'$\chi^{2}$ minima:', 
+        f'  QSO: {iqso}',
+        f'  STAR: {istar}',
+        f'  GALAXY: {igal}',
+        ))
+    ax[1].text(0.02, 0.94, txt, ha='left', va='top',
+               transform=ax[1].transAxes, fontsize=7, bbox=bbox)
+
+    ## Did we get the right (VI) redshift at all? If so, plot it.
+    #G = np.where((zfit['spectype'] == out1['VI_SPECTYPE']) * (C_LIGHT * np.abs((zfit['z']-out1['VI_Z'])/(1.+out1['VI_Z'])) < 1e3))[0]
+    #if len(G) == 1:
+    #    vspectype = zfit[G]['spectype'][0].strip()
+    #    vsubtype = zfit[G]['subtype'][0].strip()
+    #    vfulltype = (vspectype, vsubtype)
+    #    if vsubtype != '':
+    #        vsfulltype = f'{vspectype}:::{vsubtype}'
+    #    else:
+    #        vsfulltype = vspectype
+    #    
+    #    vncoeff = templates[vfulltype].flux.shape[0]
+    #    vcoeff = zfit[G]['coeff'][0][0:vncoeff]
+    #    vrrwave = templates[vfulltype].wave * (1. + zfit[G]['z'])
+    #    vrrflux = templates[vfulltype].flux.T.dot(vcoeff)
+    #
+    #    vtflux = []
+    #    for icam, cam in enumerate(spec.bands):
+    #        R = Resolution(spec.resolution_data[cam].squeeze())
+    #        vtflux.append(R.dot(resample_flux(wave[icam], vrrwave, vrrflux)))
+    #        
+    #    for icam, cam in enumerate(spec.bands):                
+    #        ax[0].plot(wave[icam], gaussian_filter(vtflux[icam], nsmooth), color='gray', alpha=0.5)
+    #
+    #    if (spectype == 'STAR' and vspectype != 'STAR') or (spectype != 'STAR' and vspectype == 'STAR'):
+    #        pass
+    #    else:
+    #        vzchi2 = zscan[targetid][vsfulltype]['zchi2']
+    #        vredshifts = zscan[targetid][vsfulltype]['redshifts']
+    #        ax[1].plot(vredshifts, vzchi2/nn, color='gray', label=r'$\chi^{2}$('+vsfulltype+')', alpha=0.7)
+    #
+    #    if (spectype == 'STAR' and vspectype != 'STAR') or (spectype != 'STAR' and vspectype == 'STAR'):
+    #        pass
+    #    else:
+    #        ax[1].axvline(x=zfit[G]['z'], color='blue', lw=2, alpha=0.7, ls='--',
+    #                      label=f'z_VI (min {G[0]})')
+
+    ## check chi2 calculation
+    #print(np.sum(np.hstack(ivar) * (np.hstack(flux) - np.hstack(tflux))**2))
+    #print(np.sum(np.hstack(ivar) * (np.hstack(flux) - np.hstack(vtflux))**2))
+           
+    ax[1].axvline(x=zrr, color='blue', lw=2, alpha=0.7, ls='-', label='z_RR')
+
+    ax[1].legend(loc='lower right', fontsize=8)
+
+    fig.tight_layout()
+    plt.savefig(pngfile)
+    plt.close()
+    log.info(f'Wrote {pngfile}')
+
+
+if __name__ == '__main__':
+
+    import argparse
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)    
+    parser.add_argument('--coadd', type=str, required=True, help='Coadd filename.')
+    parser.add_argument('--targetid', type=np.int64, required=True, help='TARGETID.')
+    parser.add_argument('-t', '--rrtemplatedir', default='/global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/stacks/rrtemplates/NMF-0.5',
+                        type=str, help='Full path to templates.')
+    parser.add_argument('-o', '--outdir', default='$DESI_ROOT/users/ioannis/tmp', type=str, help='Output directory.')
+    args = parser.parse_args()
+
+    main(args.coadd, args.targetid, rrtemplatedir=args.rrtemplatedir, outdir=os.path.expandvars(args.outdir))

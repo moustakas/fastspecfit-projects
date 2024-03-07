@@ -40,9 +40,12 @@ time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates -
   --> modelflux-bins-{BGS,LRG,ELG}.fits
 
 4. Build empca and nmf templates.
-salloc -N 1 -C 'gpu' -A desi -t 04:00:00 --qos interactive
+salloc -N 1 -C 'gpu&hbm80g' -A desi -t 04:00:00 --qos interactive
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-galaxy-ncomp-grid
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-galaxy-ncomp-grid
+
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-qso-ncomp-grid
+time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-qso-ncomp-grid
 
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --build-star-ncomp-grid
 time $HOME/code/desihub/fastspecfit-projects/redrock-templates/stack-templates --qa-star-ncomp-grid
@@ -138,7 +141,7 @@ subtypes = dict(
     M = [2400, 3700],
     )
 
-normwaves = {'BGS': [5475., 5525.], 'LRG': [4475., 4525.], 'ELG': [3475., 3525.]}
+normwaves = {'BGS': [5475., 5525.], 'LRG': [4475., 4525.], 'ELG': [3475., 3525.], 'QSO': [5075., 5125.]}
 
 def get_zlims(lss_specprod, targetclass=None):
     if lss_specprod == 'fuji':
@@ -249,7 +252,7 @@ def gather_specprod_results(specprod='iron', overwrite=False):
 
 def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='NMF', rrversion='0.5',
                         afterburners=True, rrdetails=True, overwrite=False,
-                        write_slurm=False, nodes=1, max_gpuprocs=4):
+                        write_slurm=False, nodes=1, max_gpuprocs=1):
     """Wrapper to run Redrock on the VI tiles.
 
     """
@@ -288,8 +291,8 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='NMF', rrver
             S.write(f'#SBATCH --output=batch-run-redrock-{rrmethod}-{rrversion}-%j.log\n')
             S.write('\n')
             S.write('source /global/common/software/desi/desi_environment.sh main\n')
-            S.write('export PATH=${HOME}/code/desihub/redrock/bin:${PATH}\n')
-            S.write('export PYTHONPATH=${HOME}/code/desihub/redrock/py:${PYTHONPATH}\n')
+            #S.write('export PATH=${HOME}/code/desihub/redrock/bin:${PATH}\n')
+            #S.write('export PYTHONPATH=${HOME}/code/desihub/redrock/py:${PYTHONPATH}\n')
             S.write('export RR_TEMPLATE_DIR='+os.path.join(templatedir, f'{rrmethod}-{rrversion}\n'))
             S.write('\n')
 
@@ -327,7 +330,7 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='NMF', rrver
                     cmd += f' --zscan-galaxy={zscan_galaxy}'
                 if write_slurm:
                     with open(slurmfile, 'a') as S:
-                        S.write(f'cmd="srun -n {ntasks} -c {cpus_per_task} rrdesi --negflux-nsig 5 --gpu --max-gpuprocs={max_gpuprocs} {cmd}"\n')
+                        S.write(f'cmd="srun -n {ntasks} -c {cpus_per_task} rrdesi --negflux-nsig=5 --gpu --max-gpuprocs={max_gpuprocs} {cmd}"\n')
                         S.write('echo $cmd\n')
                         S.write('$cmd\n')
                 else:
@@ -337,10 +340,12 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='NMF', rrver
                 log.info(f'Skipping existing file {redrockfile}')
 
             if afterburners:
-                for prefix, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'], [qsoqn.main, qsomgii.main, emlinefit.main]):
+                for prefix, afterburn, maincmd in zip(['qso_qn', 'qso_mgii', 'emline'],
+                                                      ['qso_qn', 'qso_mgii', 'emlinefit'],
+                                                      [qsoqn.main, qsomgii.main, emlinefit.main]):
                     outfile = os.path.join(outdir, f'{prefix}-{petal}-{tileid}.fits')
                     if not os.path.isfile(outfile) or overwrite:
-                        cmd = f'desi_{prefix}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
+                        cmd = f'desi_{afterburn}_afterburner --coadd {coaddfile} --redrock {redrockfile} --output {outfile}'
                         if 'qso_' in prefix:
                             cmd += ' --target_selection all --save_target all'
                         if write_slurm:
@@ -1211,14 +1216,14 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     """Select fastspec models in physical bins of properties.
 
     """
+    from desisim.templates import SIMQSO
     from desispec.resolution import Resolution    
     from fastspecfit.io import read_fastspecfit, cache_templates, get_templates_filename
     from fastspecfit.emlines import EMFitTools
     from fastspecfit.continuum import ContinuumTools    
     from fastspecfit.util import TabulatedDESI, trapz_rebin
-
+        
     rand = np.random.default_rng(seed=seed)
-    cosmo = TabulatedDESI()    
 
     # build the rest-frame wavelength vector
     norm_flux_window = normwaves[targetclass]
@@ -1226,21 +1231,21 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     outwave = np.arange(minwave, maxwave, dwave)
     nwave = len(outwave)
 
-    templatesfile = get_templates_filename()
-    templatecache = cache_templates(templatesfile, log=log)
-    templatewave = templatecache['templatewave']
+    if targetclass == 'QSO':
+        # when restframe=True, the default pivot redshift is z=3
+        Q = SIMQSO(basewave_min=395., basewave_max=1.1e4, restframe=True,
+                   sqmodel='lya_simqso_model',
+                   normfilter_south='decam2014-r') # sqmodel='lya_simqso_model'
+    else:
+        cosmo = TabulatedDESI()    
+        
+        templatesfile = get_templates_filename()
+        templatecache = cache_templates(templatesfile, log=log)
+        templatewave = templatecache['templatewave']
 
-    EMFit = EMFitTools()
-    CTools = ContinuumTools(ignore_photometry=True)
+        EMFit = EMFitTools()
+        CTools = ContinuumTools(ignore_photometry=True)
     
-    #zmin, zmax = get_zlims(lss_specprod, targetclass=targetclass)
-    #
-    ## rest wavelength vector
-    #dwave = 0.4
-    #obswave_min, obswave_max = 3600., 9800.
-    #restwave = np.arange(obswave_min / (1. + zmax), obswave_max / (1. + zmin), dwave)
-    #npix = len(restwave)
-
     bins = stacking_bins(targetclass, verbose=False)
     nbins = len(bins)
 
@@ -1248,11 +1253,6 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     modelfluxfile = os.path.join(stacksdir, f'modelflux-bins-{targetclass}.fits')
         
     allfast, allmeta, _, _ = read_fastspecfit(fastfile)
-    #meta = Table(fitsio.read(fastfile, 'METADATA', columns=['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'Z'))
-    #allfast = Table(fitsio.read(fastfile, 'FASTSPEC', columns=['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'Z',
-    #                                                           'LOGMSTAR', 'ABSMAG01_SDSS_G', 'ABSMAG01_SDSS_R',
-    #                                                           'ABSMAG01_W1', 'BROAD_SIGMA', 'APERCORR']))
-    #allfast = Table(fitsio.read(fastfile, 'FASTSPEC'))
 
     if os.path.isfile(modelfluxfile) and not overwrite:
         log.info(f'Output file {modelfluxfile} exists and --overwrite not set.')
@@ -1260,20 +1260,14 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
 
     # initialize the output 'bins' table
     outbins = bins.copy()
-    #outbins = bins['IBIN', 'NPARENT', 'NOBJ']
-    #outbins['NOBJ'] = np.zeros(len(bins), int) 
-    #outbins['STACKID'] = outbins['IBIN']           # needed by FastSpecFit
-    #outbins['Z'] = np.zeros(len(bins), 'f8')        # needed by FastSpecFit (should be all zeros)
     outbins['ZMED'] = np.zeros(len(bins), 'f4')     # median redshift
-    outbins['MSTARMED'] = np.zeros(len(bins), 'f4') # median stellar mass
+    if targetclass == 'QSO':
+        outbins['ABSMAGMED'] = np.zeros(len(bins), 'f4') # median Mr
+    else:
+        outbins['MSTARMED'] = np.zeros(len(bins), 'f4') # median stellar mass
     outbins['COLORMED'] = np.zeros(len(bins), 'f4') # median color
-    #outbins['SNR'] = np.zeros(len(bins), 'f4')      # median S/N
     outbins['INDEX'] = np.zeros((1, maxperbin), np.int32)-1       # index into outflux giving the spectra in this bin
     outbins['PARENTINDEX'] = np.zeros((1, maxperbin), np.int32)-1 # index into parent-{BGS,LRG,ELG} giving the spectra in this bin
-
-    #stackflux = np.zeros((nbins, npix))
-    #stackivar = np.zeros((nbins, npix))
-    #outflux = np.zeros((nbins, nwave))
 
     # No way to know how many spectra we'll end up with.
     index = 0 # index into outflux
@@ -1281,7 +1275,8 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     outfast = []
     outmeta = []
     
-    #for ibin, bin in enumerate(bins[bins['IBIN'] == 711]):
+    #for ibin, bin in enumerate(bins[611:]):
+    #for ibin, bin in enumerate(bins[bins['IBIN'] == 612]):
     for ibin, bin in enumerate(bins):
         if targetclass == 'BGS' or targetclass == 'ELG':
             I = ((allfast['Z'] > bin['ZOBJMIN']) * (allfast['Z'] < bin['ZOBJMAX']) *
@@ -1291,6 +1286,11 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
         elif targetclass == 'LRG':
             I = ((allfast['Z'] > bin['ZOBJMIN']) * (allfast['Z'] < bin['ZOBJMAX']) *
                  (allfast['LOGMSTAR'] > bin['MSTARMIN']) * (allfast['LOGMSTAR'] < bin['MSTARMAX']) *
+                 ((allfast['ABSMAG01_SDSS_R']-allfast['ABSMAG01_W1']) > bin['COLORMIN']) *
+                 ((allfast['ABSMAG01_SDSS_R']-allfast['ABSMAG01_W1']) < bin['COLORMAX']))
+        elif targetclass == 'QSO':
+            I = ((allfast['Z'] > bin['ZOBJMIN']) * (allfast['Z'] < bin['ZOBJMAX']) *
+                 (allfast['ABSMAG01_SDSS_R'] > bin['ABSMAGMIN']) * (allfast['ABSMAG01_SDSS_R'] < bin['ABSMAGMAX']) *
                  ((allfast['ABSMAG01_SDSS_R']-allfast['ABSMAG01_W1']) > bin['COLORMIN']) *
                  ((allfast['ABSMAG01_SDSS_R']-allfast['ABSMAG01_W1']) < bin['COLORMAX']))
         I = np.where(I)[0]
@@ -1311,60 +1311,95 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
         
         t0 = time.time()
         os.environ['DESI_LOGLEVEL'] = 'critical'
-        
-        #plt.clf()
-        #ymin, ymax = 1e6, -1e6
-        #xmin, xmax = 1500., 2500.
-        #I = I[:1]
-        
-        for iobj, fast in enumerate(allfast[I]):
-            dlum = cosmo.luminosity_distance(fast['Z'])
-            continuum, _ = CTools.templates2data(templatecache['templateflux_nolines'],
-                                                 templatewave, dluminosity=dlum, 
-                                                 redshift=fast['Z'], synthphot=False,
-                                                 vdisp=fast['VDISP'], coeff=fast['COEFF'])
 
-            ztemplatewave = templatewave * (1. + fast['Z'])
-            W = np.where(ztemplatewave <= maxwave)[0]
-            R = Resolution(np.ones((1, len(W)))) # Hack!
-            emspectrum = EMFit.emlinemodel_bestfit([ztemplatewave[W]], [R], fast, snrcut=2.5)[0]
+        debug = False
+        if debug:
+            plt.clf()
+            ymin, ymax = 1e6, -1e6
+            xmin, xmax = 900., 1400. #9800.
+            #I = I[:1]
 
-            # this is where we would add other missing emission lines like Lya!!
-            modelflux = continuum
-            modelflux[W] += emspectrum
+        if targetclass == 'QSO':
+            zs = allmeta[I]['Z']
+            mags = 22.5 - 2.5 * np.log10(allmeta[I]['FLUX_R'])
+            magrange = (np.min(mags), np.max(mags))
+            if np.ptp(magrange) < 0.1:
+                magrange = [magrange[0], magrange[0]+0.1]
+            modelflux, templatewave, qsometa, qsoobjmeta = Q.make_templates(
+                nmodel=len(I), magrange=magrange, redshift=zs,
+                seed=seed, nocolorcuts=True, lyaforest=False)
+            for iobj in range(len(I)):
+                outflux1 = trapz_rebin(templatewave, modelflux[iobj, :], outwave)
+                norm = np.median(outflux1[Wnorm]) # normalize
+                if norm <= 0.:
+                    log.warning(f'Bin {ibin:04d}/{nbins:04d}: ill-defined normalization factor for object {iobj}; skipping')
+                else:
+                    Igood.append(iobj)
+                    outflux1 /= norm
+                    outflux.append(outflux1)
+                    outbins['PARENTINDEX'][ibin][iobj] = I[iobj]
+                    outbins['INDEX'][ibin][iobj] = index
+                    index += 1 # advance
+                    if debug:
+                        plt.plot(templatewave, modelflux[iobj, :]/norm, color='k', alpha=0.3)
+                        #plt.plot(outwave, outflux1, color='red', alpha=0.2)
+                        W = (outwave > xmin) * (outwave < xmax)
+                        if np.max(outflux1[W]) > ymax:
+                            ymax = np.max(outflux1[W])
+                        if np.min(outflux1[W]) < ymin:
+                            ymin = np.min(outflux1[W])
+        else:
+            for iobj, fast in enumerate(allfast[I]):
+                dlum = cosmo.luminosity_distance(fast['Z'])
+                continuum, _ = CTools.templates2data(templatecache['templateflux_nolines'],
+                                                     templatewave, dluminosity=dlum, 
+                                                     redshift=fast['Z'], synthphot=False,
+                                                     vdisp=fast['VDISP'], coeff=fast['COEFF'])
+    
+                ztemplatewave = templatewave * (1. + fast['Z'])
+                W = np.where(ztemplatewave <= maxwave)[0]
+                R = Resolution(np.ones((1, len(W)))) # Hack!
+                emspectrum = EMFit.emlinemodel_bestfit([ztemplatewave[W]], [R], fast, snrcut=2.5)[0]
+    
+                # this is where we would add other missing emission lines like Lya!!
+                modelflux = continuum
+                modelflux[W] += emspectrum
+    
+                outflux1 = trapz_rebin(templatewave, modelflux, outwave)
+    
+                # normalize
+                norm = np.median(outflux1[Wnorm])
+                if norm <= 0.:
+                    log.warning(f'Bin {ibin:04d}/{nbins:04d}: ill-defined normalization factor for object {iobj}; skipping')
+                else:
+                    Igood.append(iobj)
+    
+                    outflux1 /= norm
+                    outflux.append(outflux1)
+    
+                    outbins['PARENTINDEX'][ibin][iobj] = I[iobj]
+                    outbins['INDEX'][ibin][iobj] = index
+                    index += 1 # advance
+                    
+                    if debug:
+                        plt.plot(templatewave, continuum/norm, color='k')#, alpha=0.4)
+                        #plt.plot(templatewave, modelflux/norm, color='gray', alpha=0.7)
+                        #plt.plot(outwave, outflux1, color='red', alpha=0.2)
+                        W = (outwave > xmin) * (outwave < xmax)
+                        if np.max(outflux1[W]) > ymax:
+                            ymax = np.max(outflux1[W])
+                        if np.min(outflux1[W]) < ymin:
+                            ymin = np.min(outflux1[W])
 
-            outflux1 = trapz_rebin(templatewave, modelflux, outwave)
-
-            # normalize
-            norm = np.median(outflux1[Wnorm])
-            if norm <= 0.:
-                log.warning(f'Bin {ibin:04d}/{nbins:04d}: ill-defined normalization factor for object {iobj}; skipping')
-            else:
-                Igood.append(iobj)
-
-                outflux1 /= norm
-                outflux.append(outflux1)
-
-                outbins['PARENTINDEX'][ibin][iobj] = I[iobj]
-                outbins['INDEX'][ibin][iobj] = index
-                index += 1 # advance
-                
-                #plt.plot(templatewave, continuum/norm, color='k')#, alpha=0.4)
-                #plt.plot(templatewave, modelflux/norm, color='gray', alpha=0.7)
-                ##plt.plot(outwave, outflux1, color='red', alpha=0.2)
-                #W = (outwave > xmin) * (outwave < xmax)
-                #if np.max(outflux1[W]) > ymax:
-                #    ymax = np.max(outflux1[W])
-                #if np.min(outflux1[W]) < ymin:
-                #    ymin = np.min(outflux1[W])
-
-        #plt.ylim(ymin, ymax)
-        #plt.xlim(xmin, xmax)
-        ##plt.xscale('log')
-        ##plt.yscale('log')
-        ##plt.axvline(x=norm_flux_window[0], color='k', ls='--')
-        ##plt.axvline(x=norm_flux_window[1], color='k', ls='--')
-        #plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp/junk2.png')
+        if debug:
+            plt.ylim(ymin, ymax)
+            plt.xlim(xmin, xmax)
+            #plt.xscale('log')
+            #plt.yscale('log')
+            #plt.axvline(x=norm_flux_window[0], color='k', ls='--')
+            #plt.axvline(x=norm_flux_window[1], color='k', ls='--')
+            plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp/junk2.png')
+            pdb.set_trace()
         
         os.environ['DESI_LOGLEVEL'] = 'info'
 
@@ -1374,7 +1409,10 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
 
         outbins['NOBJ'][ibin] = len(Igood)
         outbins['ZMED'][ibin] = np.median(allfast['Z'][I[Igood]])
-        outbins['MSTARMED'][ibin] = np.median(allfast['LOGMSTAR'][I[Igood]])
+        if targetclass == 'QSO':        
+            outbins['ABSMAGMED'][ibin] = np.median(allfast['ABSMAG01_SDSS_R'][I[Igood]])
+        else:
+            outbins['MSTARMED'][ibin] = np.median(allfast['LOGMSTAR'][I[Igood]])
         if targetclass == 'BGS' or targetclass == 'ELG':
             outbins['COLORMED'][ibin] = np.median(allfast['ABSMAG01_SDSS_G'][I[Igood]]-allfast['ABSMAG01_SDSS_R'][I[Igood]])
         else:
@@ -1419,7 +1457,7 @@ def qa_modelflux_bins(targetclass, nsmooth=3):
 
     #pdb.set_trace()
 
-    if targetclass == 'LRG':
+    if targetclass == 'LRG' or targetclass == 'QSO':
         colorlabel = '^{0.1}(r - W1)'
     else:
         colorlabel = '^{0.1}(g - r)'
@@ -1444,12 +1482,19 @@ def qa_modelflux_bins(targetclass, nsmooth=3):
         log.info(f'Building page {ipage+1}/{npage}')
         pageindx = np.where(zobj[ipage] == bins['ZOBJBIN'])[0]
 
-        mstar = sorted(set(bins['MSTARBIN'][pageindx])) # subpage
-        nsubpage = len(mstar)
+        if targetclass == 'QSO':
+            absmag = sorted(set(bins['ABSMAGBIN'][pageindx])) # subpage
+            nsubpage = len(absmag)
+        else:
+            mstar = sorted(set(bins['MSTARBIN'][pageindx])) # subpage
+            nsubpage = len(mstar)
 
         for isubpage in np.arange(nsubpage):
         #for isubpage in [1]:#np.arange(nsubpage):
-            subpageindx = np.where((mstar[isubpage] == bins['MSTARBIN'][pageindx]))[0]
+            if targetclass == 'QSO':
+                subpageindx = np.where((absmag[isubpage] == bins['ABSMAGBIN'][pageindx]))[0]
+            else:
+                subpageindx = np.where((mstar[isubpage] == bins['MSTARBIN'][pageindx]))[0]
 
             fig, allax = plt.subplots(nrow, ncol, figsize=(inches_wide_perpanel*ncol, inches_tall_perpanel*nrow),
                                       sharex=False, sharey=False)#True)
@@ -1507,11 +1552,17 @@ def qa_modelflux_bins(targetclass, nsmooth=3):
             else:
                 for add in np.arange(iplot, 0, -1):
                     allax.flatten()[add].set_xlabel(r'Rest-frame Wavelength ($\mu$m)')
-             
-            fig.text(0.52, 0.968, r'${:.2f}<z<{:.2f}\ \ \ {:.2f}<{}<{:.2f}$'.format(
-                bins['ZOBJMIN'][indx], bins['ZOBJMAX'][indx],
-                bins['MSTARMIN'][indx], '\log_{10}(M/M_{\odot})',
-                bins['MSTARMAX'][indx]), ha='center', va='center', fontsize=18)
+
+            if targetclass == 'QSO':             
+                fig.text(0.52, 0.968, r'${:.2f}<z<{:.2f}\ \ \ {:.2f}<{}<{:.2f}$'.format(
+                    bins['ZOBJMIN'][indx], bins['ZOBJMAX'][indx],
+                    bins['ABSMAGMIN'][indx], 'M_{0.1r}',
+                    bins['ABSMAGMAX'][indx]), ha='center', va='center', fontsize=18)
+            else:
+                fig.text(0.52, 0.968, r'${:.2f}<z<{:.2f}\ \ \ {:.2f}<{}<{:.2f}$'.format(
+                    bins['ZOBJMIN'][indx], bins['ZOBJMAX'][indx],
+                    bins['MSTARMIN'][indx], '\log_{10}(M/M_{\odot})',
+                    bins['MSTARMAX'][indx]), ha='center', va='center', fontsize=18)
 
             pdf.savefig(fig)
             plt.close()
@@ -1897,8 +1948,8 @@ def _write_redrock_templates(rrmethod, rrversion, wave, H, W, maintype='galaxy',
     log.info(f'Wrote {rrtemplatefile}')
 
     
-def build_nmf(flux, ncomp=5, niter=5000, seed=1, iterate=True,
-              add_legendre=True, verbose=False):
+def build_nmf(flux, ncomp=5, niter=5000, seed=1, atol=1e-3,
+              iterate=True, add_legendre=True, verbose=False):
     """Build the NMF templates.
 
     """
@@ -1929,11 +1980,11 @@ def build_nmf(flux, ncomp=5, niter=5000, seed=1, iterate=True,
                 Hiter, Witer, chi2 = nearly_NMF(X=X, V=V, H_start=H[:(itemp + 1), :],
                                                 W_start=W_start[:, :(itemp + 1)],
                                                 n_iter=niter, return_chi_2=True,
-                                                verbose=True, atol=1e-3)
+                                                verbose=True, atol=atol)
             else:
                 Hiter, Witer = nearly_NMF(X=X, V=V, H_start=H[:(itemp + 1), :],
                                           W_start=W_start[:, :(itemp + 1)],
-                                          n_iter=niter, atol=1e-3)
+                                          n_iter=niter, atol=atol)
 
             # Update the solution.
             H[:(itemp + 1), :] = Hiter
@@ -1942,20 +1993,20 @@ def build_nmf(flux, ncomp=5, niter=5000, seed=1, iterate=True,
         # One last refinement.
         if verbose:
             H, W, chi2 = nearly_NMF(X=X, V=V, H_start=H, W_start=W, n_iter=niter,
-                                    return_chi_2=True, verbose=True, atol=1e-3)
+                                    return_chi_2=True, verbose=True, atol=atol)
         else:
-            H, W = nearly_NMF(X=X, V=V, H_start=H, W_start=W, n_iter=niter, atol=1e-3)
+            H, W = nearly_NMF(X=X, V=V, H_start=H, W_start=W, n_iter=niter, atol=atol)
     else:
         H_start = cp.array(rand.uniform(low=0., high=2., size=H_shape))
         W_start = cp.array(rand.uniform(low=0., high=2., size=W_shape))
     
         if verbose:
             H, W, chi2 = nearly_NMF(X=X, V=V, H_start=H_start, W_start=W_start,
-                                    n_iter=niter, atol=1e-3, return_chi_2=True,
+                                    n_iter=niter, atol=atol, return_chi_2=True,
                                     verbose=True)
         else:
             H, W = nearly_NMF(X=X, V=V, H_start=H_start, W_start=W_start,
-                              n_iter=niter, atol=1e-3)
+                              n_iter=niter, atol=atol)
 
     ## optionally add Legendre polynomials
     #if add_legendre:
@@ -1990,10 +2041,16 @@ def build_nmf(flux, ncomp=5, niter=5000, seed=1, iterate=True,
 
 
 def build_redrock_templates(niter=5000, ncomp=10, nmf=False, rrversion='0.5', seed=1,
-                            build_ncomp_grid=False, overwrite=False):
+                            atol=0.01, targetclass=None, build_ncomp_grid=False,
+                            overwrite=False):
     """Build new templates using either PCA or NMF.
 
     """
+    if targetclass is None:
+        targetclasses = ['BGS', 'LRG', 'ELG']
+    else:
+        targetclasses = [targetclass]
+
     if rrversion == '0.1':
         # build the sample of spectra from the stacks
     
@@ -2158,7 +2215,7 @@ def build_redrock_templates(niter=5000, ncomp=10, nmf=False, rrversion='0.5', se
             from nearly_nmf.nmf import nearly_NMF
 
             # one set of templates per type
-            for targetclass in ['BGS', 'LRG', 'ELG']:
+            for targetclass in targetclasses:
                 modelfile = os.path.join(stacksdir, f'modelflux-bins-{targetclass}.fits')
                 flux = fitsio.read(modelfile, 'FLUX') # [ngal, nwave]
                 wave = fitsio.read(modelfile, 'WAVE')
@@ -2171,7 +2228,8 @@ def build_redrock_templates(niter=5000, ncomp=10, nmf=False, rrversion='0.5', se
                 nobj, nwave = flux.shape
 
                 if build_ncomp_grid:
-                    ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion}-galaxy-{targetclass}.fits')
+                    ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion}-{targetclass}.fits')
+                        
                     if not os.path.isfile(ncompfile) or overwrite:
                         data = Table()
                         data.meta['NOBJ'] = nobj
@@ -2181,15 +2239,15 @@ def build_redrock_templates(niter=5000, ncomp=10, nmf=False, rrversion='0.5', se
                         data['NCOMP'] = np.array([2, 5, 10, 15, 20]).astype(np.int16)
                         data['CHI2'] = np.zeros(len(data), 'f4')
                         for icomp, ncomp in enumerate(data['NCOMP']):
-                            _, _, chi2 = build_nmf(flux, ncomp=ncomp, seed=seed, iterate=True,
-                                                   add_legendre=True, verbose=True)
+                            _, _, chi2 = build_nmf(flux, ncomp=ncomp, seed=seed, atol=atol,
+                                                   iterate=True, add_legendre=True, verbose=True)
                             data['CHI2'][icomp] = chi2
                         log.info(f'Writing {ncompfile}')
                         data.write(ncompfile, overwrite=True)
                     else:
                         log.info(f'Skipping existing {ncompfile}; regenerate using --overwrite.')
                 else:
-                    H, W, chi2 = build_nmf(flux, ncomp=ncomp, seed=seed,
+                    H, W, chi2 = build_nmf(flux, ncomp=ncomp, seed=seed, atol=atol,
                                            iterate=True, add_legendre=True, verbose=True)
                     _write_redrock_templates(rrmethod, rrversion, wave, H, W, maintype='galaxy',
                                              subtype=targetclass)
@@ -2208,8 +2266,8 @@ def build_redrock_templates(niter=5000, ncomp=10, nmf=False, rrversion='0.5', se
 
 
 def build_redrock_star_templates(rrmethod='NMF', niter=5000, ncomp=10, rrversion='0.5',
-                                 rrversion_star='0.1', seed=1, WD=False, overwrite=False,
-                                 build_ncomp_grid=False):
+                                 rrversion_star='0.1', seed=1, atol=0.01, WD=False,
+                                 overwrite=False, build_ncomp_grid=False):
     """Build new stellar NMF templates.
 
     """
@@ -2361,137 +2419,120 @@ def build_redrock_star_templates(rrmethod='NMF', niter=5000, ncomp=10, rrversion
 
 
 def build_redrock_qso_templates(rrmethod='NMF', niter=5000, ncomp=10, rrversion='0.5',
-                                rrversion_qso='0.1', seed=1, overwrite=False,
+                                rrversion_qso='0.1', seed=1, atol=0.01, overwrite=False,
                                 build_ncomp_grid=False):
     """Build new QSO NMF templates.
 
     """
-    from desispec.interpolation import resample_flux
+    from nearly_nmf.nmf import nearly_NMF    
 
+    targetclass = 'QSO'
     rrtemplatedir = os.path.join(templatedir, f'{rrmethod}-{rrversion}')
 
     if rrversion_qso == '0.1':
-        from desisim.io import read_basis_templates
-        from desisim.templates import SIMQSO
-
-        Q = SIMQSO(sqmodel='lya_simqso_model', restframe=True, basewave_min=400., basewave_max=1.0e4)
-
-        N = 1
-        flux, wave, meta, qsometa = Q.make_templates(nmodel=N, nocolorcuts=True, lyaforest=True)
-        plt.clf()
-        plt.plot(wave, flux.squeeze())
-        plt.savefig('ioannis/tmp/junk2.png')
+        modelfile = os.path.join(stacksdir, f'modelflux-bins-{targetclass}.fits')
+        flux = fitsio.read(modelfile, 'FLUX') # [ngal, nwave]
+        wave = fitsio.read(modelfile, 'WAVE')
+        meta = Table(fitsio.read(modelfile, ext='METADATA'))
+        log.info(f'Read {len(meta):,d} spectra from {modelfile}')
         
-        pdb.set_trace()
-            
-        mockdir = '/global/cfs/cdirs/desi/users/hiramk/desi/qq_mocks/EDR/fugu/all/mock/london/v9.0.9/fugu_all-0.3'
-
-        parentfile = os.path.join(mockdir, 'qsocat_fugu_all.fits')
-        jj = Table(fitsio.FITS(parentfile)[1].read())
-
-
-        #F = fitsio.FITS('/global/cfs/cdirs/desi/users/hiramk/desi/qq_mocks/EDR/fugu/all/mock/london/v9.0.9/fugu_all-0.3/spectra-16/2/296/truth-16-296.fits')
-        mockfile = os.path.join(mockdir, 'spectra-16', '2', '296', 'truth-16-296.fits')
-        mock = Table(fitsio.read(mockfile, 'TRUTH_QSO'))
-
-        Q = SIMQSO(restframe=False, colorcuts_function=None)
-        
-        flux, wave, meta, qsometa = Q.make_templates(input_qsometa=mockfile, qsometa_extname='TRUTH_QSO', nocolorcuts=True, return_qsometa=True, lyaforest=False)
-        
-        
-        pdb.set_trace()
-
-        dwave = 0.4
-        minwave = 400.
-        wave = np.arange(minwave, 11000.+dwave/2, dwave)
-
-        basemeta = None
-        for subtype in subtypes.keys():
-            starfile = os.path.join(stacksdir, f'modelflux-{rrversion_star}-star-{subtype}.fits')
-
-            if not os.path.isfile(starfile) or overwrite:
-                if basemeta is None:
-                    baseflux, basewave, basemeta = read_basis_templates(objtype='STAR')
-                    
-                I = np.where((basemeta['TEFF'] >= subtypes[subtype][0]) * (basemeta['TEFF'] < subtypes[subtype][1]))[0]
-                nstar = len(I)
-                log.info(f'Selecting {nstar} {subtype}-type stars.')
-
-                input_meta = basemeta['TEMPLATEID', ][I]
-                input_meta['REDSHIFT'] = [0.]
-                input_meta['SEED'] = [seed]
-                input_meta['MAG'] = [18.]
-                input_meta['MAGFILTER'] = ['decam2014-r']
-
-                tflux, twave, meta, objmeta = STAR().make_templates(input_meta=input_meta, restframe=True)#, seed=seed)
-                assert(np.all(objmeta['TEFF'] == basemeta['TEFF'][I]))
-                assert(np.all(objmeta['FEH'] == basemeta['FEH'][I]))
-                assert(np.all(objmeta['LOGG'] == basemeta['LOGG'][I]))
-
-                outmeta = meta['TEMPLATEID', 'SUBTYPE']
-                outmeta['SUBTYPE'] = subtype
-                outmeta['TEFF'] = objmeta['TEFF']
-                outmeta['LOGG'] = objmeta['LOGG']
-                outmeta['FEH'] = objmeta['FEH']
-
-                starflux = np.zeros((nstar, wave.size))
-                for iobj in range(nstar):
-                    starflux[iobj, :] = resample_flux(wave, twave, tflux[iobj, :], extrapolate=True)
-                
-                log.info(f'Writing {len(meta):,d} spectra to {starfile}')
-                fitsio.write(starfile, starflux.astype('f4'), clobber=True, extname='FLUX')
-                fitsio.write(starfile, wave, extname='WAVE')
-                fitsio.write(starfile, outmeta.as_array(), extname='METADATA')
-
-    # stars, split by spectral type
-    for subtype in subtypes.keys():
-        starfile = os.path.join(stacksdir, f'modelflux-{rrversion_star}-star-{subtype}.fits')
-
-        flux = fitsio.read(starfile, ext='FLUX')
-        wave = fitsio.read(starfile, ext='WAVE')
-        meta = Table(fitsio.read(starfile, ext='METADATA'))
-        log.info(f'Read {len(meta):,d} spectra from {starfile}')                
-
+        # normalize
         norm = np.median(flux, axis=1)
         flux /= norm[:, np.newaxis]
         nobj, nwave = flux.shape
-    
+        
         if build_ncomp_grid:
-            ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion_star}-star-{subtype}.fits')
+            ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion_qso}-{targetclass}.fits')            
+                
             if not os.path.isfile(ncompfile) or overwrite:
                 data = Table()
                 data.meta['NOBJ'] = nobj
                 data.meta['NWAVE'] = nwave
                 data.meta['SEED'] = seed
                 data.meta['NITER'] = niter
-                data['NCOMP'] = np.array([2, 5, 10, 15, 20, 25]).astype(np.int16)
+                data['NCOMP'] = np.array([2, 5, 10, 15, 20]).astype(np.int16)
                 data['CHI2'] = np.zeros(len(data), 'f4')
                 for icomp, ncomp in enumerate(data['NCOMP']):
-                    _, _, chi2 = build_nmf(flux, ncomp=ncomp, niter=niter, seed=seed, iterate=True,
-                                           add_legendre=True, verbose=True)
+                    _, _, chi2 = build_nmf(flux, ncomp=ncomp, seed=seed, atol=atol,
+                                           iterate=True, add_legendre=True, verbose=True)
                     data['CHI2'][icomp] = chi2
                 log.info(f'Writing {ncompfile}')
                 data.write(ncompfile, overwrite=True)
             else:
                 log.info(f'Skipping existing {ncompfile}; regenerate using --overwrite.')
         else:
-            H, W, chi2 = build_nmf(flux, ncomp=ncomp, niter=niter, seed=seed,
+            H, W, chi2 = build_nmf(flux, ncomp=ncomp, seed=seed, atol=atol,
                                    iterate=True, add_legendre=True, verbose=True)
-            _write_redrock_templates(rrmethod, rrversion_star, wave, H, W, maintype='qso',
-                                     subtype=subtype, rrtemplatedir=rrtemplatedir)
+            _write_redrock_templates(rrmethod, rrversion_qso, wave, H, W, maintype='QSO',
+                                     rrtemplatedir=rrtemplatedir)
 
 
-def qa_ncomp_grid(rrmethod='NMF', rrversion='0.5', rrversion_star='0.1', star=False):
+def qa_ncomp_grid(rrmethod='NMF', rrversion='0.5', rrversion_star='0.1', rrversion_qso='0.1',
+                  galaxy=True, star=False, qso=False):
     """Build a plot of chi2 vs number of components."""
 
-    if star:
-        maintype = 'star'
-    else:
+    if galaxy:
         maintype = 'galaxy'
+    elif qso:
+        maintype = 'QSO'
+    elif star:
+        maintype = 'star'
        
     pngfile = os.path.join(qadir, f'qa-ncomp-grid-{maintype}.png')
 
-    if star:
+    if galaxy:
+        maxncomp = 20
+        markers = ['s', 'o', 'v']
+        fig, ax = plt.subplots(figsize=(7, 5))
+        for iclass, targetclass in enumerate(['BGS', 'LRG', 'ELG']):
+            ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion}-galaxy-{targetclass}.fits')
+            if os.path.isfile(ncompfile):
+                data = Table.read(ncompfile)
+                ax.plot(data['NCOMP'], data['CHI2']/1e7, f'-{markers[iclass]}', markeredgecolor='k',
+                        label=f'{targetclass} (N={data.meta["NOBJ"]:,d})')
+            else:
+                log.info(f'Missing {ncompfile}')
+        ax.set_xlabel('Number of Eigentemplates')
+        ax.set_ylabel(r'$\chi^{2}\ /\ 10^{7}$')
+        ax.set_title(f'npix={data.meta["NWAVE"]} niter={data.meta["NITER"]}')
+        #ax.set_ylabel(r'$\chi^{2}/\chi^{2}_{min}$')
+        ax.set_xlim(0, maxncomp+2)
+        ax.set_yscale('log')
+        ax.set_ylim(1e-3, 1e2)
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{x:.16g}'))
+        #ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
+        ax.legend(loc='upper right', fontsize=10)
+        fig.tight_layout()
+        fig.savefig(pngfile)
+        plt.close()
+        log.info(f'Writing {pngfile}')
+    elif qso:
+        targetclass = 'QSO'
+        maxncomp = 20
+        marker = 's'
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion_qso}-{targetclass}.fits')
+        if os.path.isfile(ncompfile):
+            data = Table.read(ncompfile)
+            ax.plot(data['NCOMP'], data['CHI2']/1e8, f'-{marker}', markeredgecolor='k',
+                    label=f'{targetclass} (N={data.meta["NOBJ"]:,d})')
+        else:
+            log.info(f'Missing {ncompfile}')
+        ax.set_xlabel('Number of Eigentemplates')
+        ax.set_ylabel(r'$\chi^{2}\ /\ 10^{8}$')
+        ax.set_title(f'npix={data.meta["NWAVE"]} niter={data.meta["NITER"]}')
+        #ax.set_ylabel(r'$\chi^{2}/\chi^{2}_{min}$')
+        ax.set_xlim(0, maxncomp+2)
+        ax.set_yscale('log')
+        ax.set_ylim(1e-2, 10)
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{x:.16g}'))
+        #ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
+        ax.legend(loc='upper right', fontsize=10)
+        fig.tight_layout()
+        fig.savefig(pngfile)
+        plt.close()
+        log.info(f'Writing {pngfile}')
+    elif star:
         maxncomp = 25
         markers = ['D', 'o', 'v', 'p', '*', '^', 's']
         fig, ax = plt.subplots(figsize=(7, 5))
@@ -2515,31 +2556,6 @@ def qa_ncomp_grid(rrmethod='NMF', rrversion='0.5', rrversion_star='0.1', star=Fa
         fig.savefig(pngfile)
         plt.close()
         log.info(f'Writing {pngfile}')
-    else:
-        maxncomp = 20
-        markers = ['s', 'o', 'v']
-        fig, ax = plt.subplots(figsize=(7, 5))
-        for iclass, targetclass in enumerate(['BGS', 'LRG', 'ELG']):
-            ncompfile = os.path.join(stacksdir, f'ncomp-{rrmethod}-{rrversion}-galaxy-{targetclass}.fits')
-            if os.path.isfile(ncompfile):
-                data = Table.read(ncompfile)
-                ax.plot(data['NCOMP'], data['CHI2']/1e7, f'-{markers[iclass]}', markeredgecolor='k',
-                        label=f'{targetclass} (N={data.meta["NOBJ"]:,d})')
-            else:
-                log.info(f'Missing {ncompfile}')
-        ax.set_xlabel('Number of Eigentemplates')
-        ax.set_ylabel(r'$\chi^{2}\ /\ 10^{7}$')
-        ax.set_title(f'npix={data.meta["NWAVE"]} niter={data.meta["NITER"]}')
-        #ax.set_ylabel(r'$\chi^{2}/\chi^{2}_{min}$')
-        ax.set_xlim(0, maxncomp+2)
-        ax.set_yscale('log')
-        ax.set_ylim(0.1, 100)
-        ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
-        ax.legend(loc='upper right', fontsize=10)
-        fig.tight_layout()
-        fig.savefig(pngfile)
-        plt.close()
-        log.info(f'Writing {pngfile}')
     
 
 def _read_rrtemplate(rrtemplatefile):
@@ -2558,114 +2574,113 @@ def _read_rrtemplate(rrtemplatefile):
     return modelwave, modelflux, H, W
 
 
-def qa_redrock_templates(rrmethod='PCA', rrversion='0.1', nplot=25, seed=1):
+def qa_redrock_templates(targetclass=None, rrmethod='NMF', rrversion='0.5',
+                         rrversion_qso='0.1', nplot=25, seed=1):
     """QA of the new redrock templates.
 
     """
     from matplotlib.backends.backend_pdf import PdfPages
 
     rand = np.random.default_rng(seed=seed)
-    
-    rrtemplatedir = os.path.join(templatedir, f'{rrmethod}-{rrversion}')
-    rrtemplatefile = os.path.join(rrtemplatedir, f'rrtemplate-galaxy-{rrmethod}-{rrversion}.fits')
-    modelwave, modelflux, H, W = _read_rrtemplate(rrtemplatefile)
 
-    pngfile = os.path.join(qadir, f'qa-templates-{rrmethod}-{rrversion}.png')
-    #from speclite import filters
-    #filt = filters.load_filters('decam2014-g', 'decam2014-r')
-    #padflux, padwave = filt.pad_spectrum(nmf_eigenvec, wave, axis=0, method='edge')
-    #mags = filt.get_ab_magnitudes(padflux, padwave) # speclite.filters wants an [nmodel,npix] array
-    #gr = mags['decam2014-g'] - mags['decam2014-r']
-    #srt = np.argsort(gr)
+    if targetclass is None:
+        targetclasses = ['BGS', 'LRG', 'ELG', 'QSO']
+    else:
+        targetclasses = [targetclass]
 
-    fig, ax = plt.subplots()#figsize=(8, 5))
-    #I = np.arange(nwave)
-    #I = np.where((wave > 3727-20) * (wave < 3727+20))[0]
-    #I = np.where(wave < 900.)[0]
-    I = np.where(modelwave > 1000.)[0]
+    def _plot_reconstructed(targetclass, wave, flux, meta, modelwave, modelflux, pdffile, QSO=False):
+        # plot a random subset
+        I = rand.choice(flux.shape[0], size=nplot, replace=False)
+        pdf = PdfPages(pdffile)
+        for iobj in sorted(I):
+            if QSO:
+                title = targetclass
+                label = f'{rrmethod}-{rrversion_qso} Recon'
+                #title = f'TemplateID: {meta["TEMPLATEID"][iobj]} (Teff={meta["TEFF"][iobj]:.0f} K logg={meta["LOGG"][iobj]:.1f})'
+            else:
+                title = targetclass
+                label = f'{rrmethod}-{rrversion} Recon'
+                #title = f'TemplateID: {meta["TEMPLATEID"][iobj]} (Teff={meta["TEFF"][iobj]:.0f} K [Fe/H]={meta["FEH"][iobj]:.1f} logg={meta["LOGG"][iobj]:.1f})'
+            fig, ax = plt.subplots(figsize=(7, 5))
+            F = np.where((wave > 1500.) * (flux[iobj, :] != 0.))[0]
+            M = np.where((modelwave > 1500.) * (modelflux[iobj, :] != 0.))[0]
+            ax.plot(wave[F], flux[iobj, F], color='skyblue', label='Data')
+            ax.plot(modelwave[M], modelflux[iobj, M], color='k', alpha=0.75, lw=1, label=label)
+            ax.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
+            ax.set_ylabel(r'$F_{\lambda}$ (arbitrary normalization)')
+            ax.set_yscale('log')
+            ax.set_title(title)
+            ax.legend(loc='best', fontsize=10)
+            fig.tight_layout()
+            pdf.savefig(fig)
+            plt.close()
+        pdf.close()        
+        log.info(f'Wrote {pdffile}')
 
-    current_palette = sns.color_palette()
-    sns.set_palette('Set1', H.shape[0])
-    colors = iter(sns.color_palette())
+    def _plot_rrtemplates(modelwave, H, title, pngfile):
 
-    ymin, ymax = 1e6, 0.
-    # plot in reverse order, so the most important templates are on top
-    for ic in range(ncomp-1, -1, -1):
-    #for ic in range(ncomp):
-        yplot = H[ic, I] / np.std(H[ic, I])
-        ax.plot(modelwave[I], yplot, alpha=0.9, color=next(colors), lw=1)
-        ylim = np.percentile(yplot, [15., 100.])
-        #print(ymin, ymax)
-        if ylim[0] < ymin:
-            ymin = ylim[0]
-        if ylim[1] > ymax:
-            ymax = ylim[1]
-    #for ii, ic in enumerate(srt):
-        #I = np.where(H[ic, :] > 0)[0]
-        #ax.plot(modelwave[I]/1e4, H[ic, I] + ii)
-    ax.set_ylim((ymin, ymax)) # -0.01, 0.01)
-    #ax.set_ylim(-5, 10)#7.5, 7.5)
-    ax.set_yscale('log')
-    #ax.set_xlim(3727-20, 3727+20)
-    #ax.set_yticklabels([])
-    ax.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
-    ax.set_ylabel(r'$F\ /\ \sigma_{F}$')
-    #ax.set_ylabel(r'Normalized Flux (+offsets)')
-    ax.margins(x=0)
-    #ax.set_xscale('log')
-    #ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: '{:g}'.format(y)))
-    ax.set_title(f'{rrmethod}-{rrversion}')
-    fig.tight_layout()
-    fig.savefig(pngfile)
-    plt.close()
-    log.info(f'Wrote {pngfile}')
-    sns.set_palette(current_palette)
+        ncomp, nwave = H.shape
+        I = np.arange(nwave)
 
-    # plot the first nplot reconstructed spectra
-    flux, meta, bins = [], [], []
-    for targetclass in ['BGS', 'LRG', 'ELG']:
-        modelfile = os.path.join(stacksdir, f'modelflux-bins-{targetclass}.fits')
-        log.info(f'Reading {modelfile}')
-        flux.append(fitsio.read(modelfile, 'FLUX'))#, rows=np.arange(10)))
-        _meta = Table(fitsio.read(modelfile, 'METADATA'))
-        _meta['TARGETCLASS'] = targetclass
-        meta.append(_meta)
-        #bins.append(Table(fitsio.read(modelfile, 'BINS')))
-        # wavelength vector is identical
-        if targetclass == 'BGS':
-            wave = fitsio.read(modelfile, 'WAVE')
-    flux = np.vstack(flux) # [ngal, nwave]
-    meta = vstack(meta)
-
-    print('Selecting a subset!')
-    I = rand.choice(flux.shape[0], size=75000, replace=False)
-    flux = flux[I, :]
-    meta = meta[I]
-    #bins = bins[I]
-
-    # normalize
-    norm = np.median(flux, axis=1)
-    flux /= norm[:, np.newaxis]
-    
-    pdffile = os.path.join(qadir, f'qa-templates-recon-{rrmethod}-{rrversion}.pdf')
-    pdf = PdfPages(pdffile)
-    for iobj in range(nplot):
-        fig, ax = plt.subplots(figsize=(7, 5))
-        F = np.where((wave > 1500.) * (flux[iobj, :] != 0.))[0]
-        M = np.where((modelwave > 1500.) * (modelflux[iobj, :] != 0.))[0]
-        ax.plot(wave[F], flux[iobj, F], color='skyblue', label='Data')
-        ax.plot(modelwave[M], modelflux[iobj, M], color='k', alpha=0.75, lw=1, label=f'{rrmethod}-{rrversion} Recon')
-        ax.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
-        ax.set_ylabel(r'$F_{\lambda}$ (arbitrary normalization)')
+        fig, ax = plt.subplots()#figsize=(8, 5))
+        
+        current_palette = sns.color_palette()
+        sns.set_palette('Set1', ncomp)
+        colors = iter(sns.color_palette())
+        
+        ymin, ymax = 1e6, 0.
+        # plot in reverse order, so the most important templates are on top
+        for ic in range(ncomp-1, -1, -1):
+            yplot = H[ic, I] / np.std(H[ic, I])
+            ax.plot(modelwave[I], yplot, alpha=0.9, color=next(colors), lw=1)
+            ylim = np.percentile(yplot, [15., 95.])
+            if ylim[0] < ymin and ylim[0] > 1e-10:
+                ymin = ylim[0]
+            if ylim[1] > ymax:
+                ymax = ylim[1]
+        ax.set_ylim((ymin, ymax))
         ax.set_yscale('log')
-        ax.set_title(f'{meta["TARGETCLASS"][iobj]}/TargetID:{meta["TARGETID"][iobj]:03}')
-        #ax.set_title(f'{meta["TARGETCLASS"][iobj]}/TargetID:{meta["TARGETID"][iobj]:03} (Bin {bins["IBIN"]:04d})')
-        ax.legend(loc='best', fontsize=10)
+        ax.set_xlabel(r'Rest-frame Wavelength ($\AA$)')
+        ax.set_ylabel(r'$F\ /\ \sigma_{F}$')
+        ax.margins(x=0)
+        ax.set_title(title)
         fig.tight_layout()
-        pdf.savefig(fig)
+        fig.savefig(pngfile)
         plt.close()
-    pdf.close()        
-    log.info(f'Wrote {pdffile}')
+        log.info(f'Wrote {pngfile}')
+        sns.set_palette(current_palette)
+
+    rrtemplatedir = os.path.join(templatedir, f'{rrmethod}-{rrversion}')
+    for targetclass in targetclasses:
+
+        modelfile = os.path.join(stacksdir, f'modelflux-bins-{targetclass}.fits')
+
+        if targetclass == 'QSO':
+            QSO = True
+            rrtemplatefile = os.path.join(rrtemplatedir, f'rrtemplate-QSO-{rrmethod}-{rrversion_qso}.fits')
+            title = f'{rrmethod}-{rrversion_qso}-QSO'
+            pdffile = os.path.join(qadir, f'qa-templates-recon-{rrmethod}-{rrversion_qso}-QSO.pdf')
+            pngfile = os.path.join(qadir, f'qa-templates-{rrmethod}-{rrversion_qso}-QSO.png')
+        else:
+            QSO = False
+            rrtemplatefile = os.path.join(rrtemplatedir, f'rrtemplate-galaxy-{targetclass}-{rrmethod}-{rrversion}.fits')
+            title = f'{rrmethod}-{rrversion}-{targetclass}'
+            pdffile = os.path.join(qadir, f'qa-templates-recon-{rrmethod}-{rrversion}-{targetclass}.pdf')
+            pngfile = os.path.join(qadir, f'qa-templates-{rrmethod}-{rrversion}-{targetclass}.png')
+            
+        modelwave, modelflux, H, W = _read_rrtemplate(rrtemplatefile)
+        _plot_rrtemplates(modelwave, H, title, pngfile)
+
+        log.info(f'Reading {modelfile}')
+        flux = fitsio.read(modelfile, 'FLUX')
+        wave = fitsio.read(modelfile, 'WAVE')
+        meta = Table(fitsio.read(modelfile, 'METADATA'))
+
+        # normalize
+        norm = np.median(flux, axis=1)
+        flux /= norm[:, np.newaxis]
+            
+        _plot_reconstructed(targetclass, wave, flux, meta, modelwave, modelflux, pdffile, QSO=QSO)
 
     
 def qa_star_templates(rrmethod='NMF', rrversion='0.5', rrversion_star='0.1',
@@ -3269,7 +3284,8 @@ def qa_summarize(specprod='iron', zscan='zscan01', overwrite=False):
         allout.append(out)
 
         # new templates
-        for rrversion in ['0.1', '0.2', '0.3', '0.4', '0.5']:
+        #for rrversion in ['0.1', '0.2', '0.3', '0.4', '0.4b']:
+        for rrversion in ['0.1', '0.4', '0.4b']:
             for rrmethod in ['PCA', 'NMF']:
                 zcatfile = os.path.join(stacksdir, f'zcat-vitiles-templates-{rrmethod}-{rrversion}-{zscan}.fits')
                 if not os.path.isfile(zcatfile):
@@ -3331,18 +3347,21 @@ def qa_summarize(specprod='iron', zscan='zscan01', overwrite=False):
     fig, ax = plt.subplots(figsize=(8, 6))
     for targclass, color, facecolor, marker in zip(targclasses, colors, facecolors, markers):
         ax.plot(indx, out[f'F{targclass}'], marker=marker, markersize=12, color=color,
-                markerfacecolor=facecolor, label=targclass, linestyle='-', lw=1)
+                markerfacecolor=facecolor, label=targclass, linestyle='-.', lw=1)
         #ax.scatter(indx, out[targclass], marker=marker, s=100, color=color,
         #           facecolor=facecolor, label=targclass, linestyle='-')
+        ax.axhline(y=out[f'F{targclass}'][0], color=color, linestyle='-', lw=1)
+    
     ax.xaxis.set_major_locator(ticker.MultipleLocator(1))
     ax.set_xticks(indx)
     ax.set_xticklabels(xticklabels, rotation=45)
     ax.set_ylabel('Catastrophic Outlier Fraction (%)')
-    ax.axhline(y=0, color='gray')
-    ax.set_ylim(0.1, 50)
-    ax.set_yscale('log')
+    #ax.axhline(y=0, color='gray')
+    ax.set_ylim(-0.4, 5.)
+    #ax.set_ylim(0.1, 50)
+    #ax.set_yscale('log')
     ax.yaxis.set_major_formatter(major_formatter)
-    ax.legend(loc='upper left', fontsize=10)
+    ax.legend(loc='upper left', fontsize=10, ncols=5)
 
     fig.tight_layout()
     fig.savefig(pngfile)
@@ -3417,7 +3436,7 @@ def read_zscan(filename, select_targetids=None):
 
 
 def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01',
-                nsmooth=2, nplot=25, overwrite=False):
+                vi_quality=3., nsmooth=2, nplot=50, overwrite=False):
     """Outliers QA.
 
     """
@@ -3435,7 +3454,7 @@ def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01
         for targtype, targclass in zip(targtypes, targclasses):
             I = zcat[targclass] * (zcat['ZWARN'] == 0) * (zcat['COADD_FIBERSTATUS'] == 0)
             if dchi2dict[targtype] is not None:
-                I *= (zcat['DELTACHI2'] > dchi2dict[targtype])
+                I *= (zcat['DELTACHI2'] > dchi2dict[targtype]) * (zcat['VI_QUALITY'] >= vi_quality)
             outzcat = zcat[I]
             # flag outliers and then match to iron
             _, Idoom, _ = _zstats(outzcat['Z_RR'], outzcat['VI_Z'])
@@ -3507,6 +3526,8 @@ def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01
     os.environ['DESI_LOGLEVEL'] = 'info'
 
     zscancolors = {'GALAXY': 'k', 'STAR': 'k', 'QSO': 'k'}
+
+    pdb.set_trace()
 
     pdffile = os.path.join(qadir, f'outliers-vitiles-{rrmethod}-{rrversion}-{zscan}.pdf')
     pdf = PdfPages(pdffile)
@@ -3700,6 +3721,8 @@ def main():
 
     parser.add_argument('--build-galaxy-ncomp-grid', action='store_true', help='Determine the number of galaxy components to use.')
     parser.add_argument('--qa-galaxy-ncomp-grid', action='store_true', help='Generate a plot of number of chi2 vs number of components for galaxies.')
+    parser.add_argument('--build-qso-ncomp-grid', action='store_true', help='Determine the number of QSO components to use.')
+    parser.add_argument('--qa-qso-ncomp-grid', action='store_true', help='Generate a plot of number of chi2 vs number of components for QSOs.')
     parser.add_argument('--build-star-ncomp-grid', action='store_true', help='Determine the number of stellar components to use.')
     parser.add_argument('--qa-star-ncomp-grid', action='store_true', help='Generate a plot of number of chi2 vs number of components for stars.')
 
@@ -3743,8 +3766,6 @@ def main():
     # Select fastspec models in physical bins of properties.
     if args.build_modelflux_bins:
         for targetclass in targetclasses:
-            #if targetclass == 'QSO':
-            #    continue
             build_modelflux_bins(targetclass, specprod=args.specprod, lss_specprod=args.lss_specprod,
                                  minperbin=3, maxperbin=100, #fracperbin=0.03,
                                  overwrite=args.overwrite)
@@ -3776,11 +3797,23 @@ def main():
             #    qa_stacks(targetclass, select_broad=select_broad)
 
     if args.build_galaxy_ncomp_grid:
-        build_redrock_templates(rrversion=args.rrversion, overwrite=args.overwrite,
-                                build_ncomp_grid=True, nmf=True)
+        for targetclass in targetclasses:
+            if targetclass == 'QSO':
+                continue
+            build_redrock_templates(rrversion=args.rrversion, overwrite=args.overwrite,
+                                    targetclass=targetclass, build_ncomp_grid=True, nmf=True)
         
     if args.qa_galaxy_ncomp_grid:
-        qa_ncomp_grid(rrmethod=args.rrmethod, rrversion=args.rrversion, star=False)
+        qa_ncomp_grid(rrmethod=args.rrmethod, rrversion=args.rrversion, galaxy=True, star=False, qso=False)
+        
+    if args.build_qso_ncomp_grid:
+        build_redrock_templates(rrversion=args.rrversion, rrversion_qso=args.rrversion_qso,
+                                overwrite=args.overwrite, targetclass='QSO', build_ncomp_grid=True,
+                                nmf=True)
+        
+    if args.qa_qso_ncomp_grid:
+        qa_ncomp_grid(rrmethod=args.rrmethod, rrversion=args.rrversion, rrversion_qso=args.rrversion_qso,
+                      galaxy=False, star=False, qso=True)
         
     if args.build_star_ncomp_grid:
         build_redrock_star_templates(rrversion=args.rrversion,
@@ -3793,15 +3826,19 @@ def main():
                                      build_ncomp_grid=True)
 
     if args.qa_star_ncomp_grid:
-        qa_ncomp_grid(rrversion=args.rrversion, rrversion_star=args.rrversion_star, star=True)
-        qa_ncomp_grid(rrversion=args.rrversion, rrversion_star=args.rrversion_star, star=False)
+        qa_ncomp_grid(rrversion=args.rrversion, rrversion_star=args.rrversion_star,
+                      galaxy=False, star=True, qso=False)
         
     # build the new Redrock templates
     if args.empca_templates:
         build_redrock_templates(rrversion=args.rrversion, nmf=False)
         
     if args.nmf_templates:
-        build_redrock_templates(ncomp=10, rrversion=args.rrversion, nmf=True)
+        for targetclass in targetclasses:
+            if targetclass == 'QSO':
+                continue
+            build_redrock_templates(targetclass=targetclass, ncomp=10,
+                                    rrversion=args.rrversion, nmf=True)
         
     if args.wd_templates:
         build_redrock_star_templates(ncomp=10, rrversion=args.rrversion,
@@ -3819,13 +3856,17 @@ def main():
                                     overwrite=args.overwrite)
         
     if args.qa_templates:
-        qa_redrock_templates(rrversion=args.rrversion)
+        for targetclass in targetclasses:
+            qa_redrock_templates(targetclass, rrmethod=args.rrmethod, rrversion=args.rrversion,
+                                 rrversion_qso=args.rrversion_qso)
 
     if args.qa_wd_templates:
-        qa_star_templates(rrversion=args.rrversion, rrversion_star=args.rrversion_star, WD=True)
+        qa_star_templates(rrmethod=args.rrmethod, rrversion=args.rrversion,
+                          rrversion_star=args.rrversion_star, WD=True)
         
     if args.qa_star_templates:
-        qa_star_templates(rrversion=args.rrversion, rrversion_star=args.rrversion_star, WD=False)
+        qa_star_templates(rrmethod=args.rrmethod, rrversion=args.rrversion,
+                          rrversion_star=args.rrversion_star, WD=False)
 
     # gather the {specprod} (iron) Redrock results.
     if args.gather_specprod_results:
@@ -3834,7 +3875,7 @@ def main():
     if args.run_redrock:
         # Run Redrock on the VI tiles with a redshift scan to z=1.7 and to z=4.
         run_redrock_vitiles(zscan_prior='01', rrversion=args.rrversion, rrmethod=args.rrmethod,
-                            specprod=args.specprod, overwrite=args.overwrite, write_slurm=False)
+                            specprod=args.specprod, overwrite=args.overwrite, write_slurm=True)
 
     if args.redshift_qa:
         # QA - redshift vs redshift results
