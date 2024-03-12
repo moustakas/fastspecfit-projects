@@ -287,7 +287,7 @@ def run_redrock_vitiles(zscan_prior='01', specprod='iron', rrmethod='NMF', rrver
             S.write('#SBATCH --mail-user=jmoustakas@siena.edu\n')
             S.write('#SBATCH --mail-type=ALL\n')
             S.write(f'#SBATCH --nodes={nodes}\n')
-            S.write('#SBATCH --time=04:00:00\n')
+            S.write('#SBATCH --time=02:00:00\n')
             S.write(f'#SBATCH --output=batch-run-redrock-{rrmethod}-{rrversion}-%j.log\n')
             S.write('\n')
             S.write('source /global/common/software/desi/desi_environment.sh main\n')
@@ -3285,7 +3285,7 @@ def qa_summarize(specprod='iron', zscan='zscan01', overwrite=False):
 
         # new templates
         #for rrversion in ['0.1', '0.2', '0.3', '0.4', '0.4b']:
-        for rrversion in ['0.1', '0.4', '0.4b']:
+        for rrversion in ['0.1', '0.4', '0.4b', '0.5', '0.5b']:
             for rrmethod in ['PCA', 'NMF']:
                 zcatfile = os.path.join(stacksdir, f'zcat-vitiles-templates-{rrmethod}-{rrversion}-{zscan}.fits')
                 if not os.path.isfile(zcatfile):
@@ -3357,7 +3357,7 @@ def qa_summarize(specprod='iron', zscan='zscan01', overwrite=False):
     ax.set_xticklabels(xticklabels, rotation=45)
     ax.set_ylabel('Catastrophic Outlier Fraction (%)')
     #ax.axhline(y=0, color='gray')
-    ax.set_ylim(-0.4, 5.)
+    ax.set_ylim(-0.4, 7.)
     #ax.set_ylim(0.1, 50)
     #ax.set_yscale('log')
     ax.yaxis.set_major_formatter(major_formatter)
@@ -3365,7 +3365,7 @@ def qa_summarize(specprod='iron', zscan='zscan01', overwrite=False):
 
     fig.tight_layout()
     fig.savefig(pngfile)
-    print(f'Wrote {pngfile}')
+    log.info(f'Wrote {pngfile}')
 
 
 def read_zscan(filename, select_targetids=None):
@@ -3436,7 +3436,7 @@ def read_zscan(filename, select_targetids=None):
 
 
 def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01',
-                vi_quality=3., nsmooth=2, nplot=50, overwrite=False):
+                vi_quality=3., nsmooth=2, nplot=75, overwrite=False):
     """Outliers QA.
 
     """
@@ -3526,8 +3526,6 @@ def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01
     os.environ['DESI_LOGLEVEL'] = 'info'
 
     zscancolors = {'GALAXY': 'k', 'STAR': 'k', 'QSO': 'k'}
-
-    pdb.set_trace()
 
     pdffile = os.path.join(qadir, f'outliers-vitiles-{rrmethod}-{rrversion}-{zscan}.pdf')
     pdf = PdfPages(pdffile)
@@ -3685,7 +3683,400 @@ def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01
     log.info(f'Wrote {pdffile}')
 
     os.environ['RR_TEMPLATE_DIR'] = orig_templatedir
+
     
+def fit_powerlaw(zscan='zscan01', rrmethod='NFM', rrversion='0.5b', overwrite=False):
+    """Fit a power-law to each spectrum and record the chi2. Also measure the
+    inter-camera spectral break (see https://github.com/desihub/redrock/issues/286).
+
+    """
+    from scipy.ndimage import median_filter
+    from scipy.optimize import curve_fit    
+    from desispec.io import read_spectra
+
+    outfile = os.path.join(stacksdir, f'powerlaw-vitiles-{rrmethod}-{rrversion}-{zscan}.fits')
+    if os.path.isfile(outfile) and not overwrite:
+        log.info(f'Output file {outfile} exists and --overwrite not set.')
+        return
+
+    def powerlaw(wave, A, alpha):
+        return A * (wave / 5500.)**(-alpha)
+    
+    coadddir = os.path.join(stacksdir, f'redux-templates-{rrmethod}-{rrversion}-{zscan}', 'vitiles')
+
+    zcatfile = os.path.join(stacksdir, f'zcat-vitiles-templates-{rrmethod}-{rrversion}-{zscan}.fits')
+    zcat = Table(fitsio.read(zcatfile))
+    #zcat = zcat[:1000]
+    #zcat = zcat[zcat['TARGETID'] == 39627676687795663]
+    #zcat = zcat[zcat['TARGETID'] == 39627658593572177]
+    nobj = len(zcat)
+
+    nmed = 100
+    npix = 500
+    nmin = 9 # number of Redrock redshift minima
+
+    # 4 inter-camera interfaces:
+    #   b-r and r-NIR
+    zcat['MEDFLUX'] = np.zeros((nobj, 4), 'f4')
+    zcat['MEDFERR'] = np.zeros((nobj, 4), 'f4')
+    zcat['POWERLAW_NORM'] = np.ones(nobj, 'f4')
+    zcat['POWERLAW_ALPHA'] = np.zeros(nobj, 'f4')
+    zcat['POWERLAW_CHI2'] = np.zeros(nobj, 'f4')
+    zcat['RR_CHI2'] = np.zeros((nobj, nmin), 'f4')
+
+    for tileid in sorted(set(zcat['TILEID'])):
+        T = tileid == zcat['TILEID']
+        petals = zcat['FIBER'][T] // 500
+        for petal in sorted(set(petals)):
+            P = petal == petals
+            targetids = zcat[T][P]['TARGETID'].data
+
+            # copy the data so we can run the after-burners
+            coaddfile = os.path.join(coadddir, f'coadd-{petal}-{tileid}.fits')
+            h5file = coaddfile.replace('coadd-', 'rrdetails-').replace('.fits', '.h5')
+
+            #spec = read_spectra(coaddfile)#, targetids=39627676687795663)
+            #spec = read_spectra(coaddfile, targetids=39627658593572177)
+            spec = read_spectra(coaddfile)
+            
+            zscan, zfit = read_zscan(h5file)#, select_targetids=targetid)
+            log.info(f'Read {len(spec.target_ids())} targets from {coaddfile}')
+
+            for ii in range(spec.num_targets()):
+                I = np.where((spec.fibermap['TILEID'][ii] == zcat['TILEID']) *
+                             (spec.fibermap['PETAL_LOC'][ii] == zcat['FIBER']//500) *
+                             (spec.fibermap['TARGETID'][ii] == zcat['TARGETID']))[0]
+                if len(I) != 1:
+                    errmsg = f'Problem finding {spec.target_ids()[ii]} in zcat'
+                    log.warning(errmsg)
+                    raise ValueError(errmsg)
+
+                J = np.where(zfit['targetid'] == zcat['TARGETID'][I])[0]
+                if len(J) == 0:
+                    raise ValueError('Problem here!')
+                
+                flux, ivar, wave = [], [], []
+                for icam, cam in enumerate(spec.bands):
+                    cwave = spec.wave[cam]
+                    cflux = spec.flux[cam][ii, :]
+                    civar = spec.ivar[cam][ii, :]
+                    #medflux = median_filter(cflux, nmed)
+                    if icam == 0:
+                        P = np.percentile(cflux[-npix:], [25., 50., 75])
+                        zcat['MEDFLUX'][I, icam] = P[1]
+                        zcat['MEDFERR'][I, icam] = np.diff(P[[0, 2]]) / 1.349 / np.sqrt(npix) # robust sigma
+                        #zcat['MEDFLUX'][I, icam] = np.median(medflux[-npix:])
+                        #zcat['MEDIVAR'][I, icam] = np.median(civar[-npix:])
+                    elif icam == 1:
+                        P = np.percentile(cflux[:npix], [25., 50., 75])
+                        zcat['MEDFLUX'][I, icam] = P[1]
+                        zcat['MEDFERR'][I, icam] = np.diff(P[[0, 2]]) / 1.349 / np.sqrt(npix) # robust sigma
+                        P = np.percentile(cflux[-npix:], [25., 50., 75])
+                        zcat['MEDFLUX'][I, icam+1] = P[1]
+                        zcat['MEDFERR'][I, icam+1] = np.diff(P[[0, 2]]) / 1.349 / np.sqrt(npix) # robust sigma
+                        #zcat['MEDFLUX'][I, icam] = np.median(medflux[:npix])
+                        #zcat['MEDIVAR'][I, icam] = np.median(civar[:npix])
+                        #zcat['MEDFLUX'][I, icam+1] = np.median(medflux[-npix:])
+                        #zcat['MEDIVAR'][I, icam+1] = np.median(civar[-npix:])
+                    elif icam == 2:
+                        P = np.percentile(cflux[:npix], [25., 50., 75])
+                        zcat['MEDFLUX'][I, icam+1] = P[1]
+                        zcat['MEDFERR'][I, icam+1] = np.diff(P[[0, 2]]) / 1.349 / np.sqrt(npix) # robust sigma
+                        #zcat['MEDFLUX'][I, icam+1] = np.median(medflux[:npix])
+                        #zcat['MEDIVAR'][I, icam+1] = np.median(civar[:npix])
+                    
+                    wave.append(cwave)
+                    flux.append(cflux)
+                    ivar.append(civar)
+
+                wave = np.hstack(wave)
+                flux = np.hstack(flux)
+                ivar = np.hstack(ivar)
+
+                if np.all(ivar == 0):
+                    log.info('All pixels masked; skipping power-law fitting.')
+                    continue
+
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ferr = 1. / np.sqrt(ivar)
+
+                try:
+                    popt, _ = curve_fit(powerlaw, xdata=wave, ydata=flux,
+                                        sigma=ferr, p0=[np.median(flux), 1.])
+                except:# RuntimeError:
+                    log.warning('Fit did not converge.')
+                    popt = [0., 0.]
+
+                chi2 = np.sum(ivar * (flux - powerlaw(wave, popt[0], popt[1]))**2)
+                zcat['POWERLAW_NORM'][I] = popt[0]
+                zcat['POWERLAW_ALPHA'][I] = popt[1]
+                zcat['POWERLAW_CHI2'][I] = chi2
+
+                # Redrock minima
+                zcat['RR_CHI2'][I, :] = zfit[J]['chi2'].data
+
+    zcat.write(outfile, overwrite=True)
+    log.info(f'Wrote {len(zcat)} objects to {outfile}.')
+    
+    
+def qa_powerlaw(zscan_prior='zscan01', rrmethod='NFM', rrversion='0.5b'):
+    """QA of the output of fit_powerlaw()
+
+    """
+    from matplotlib.backends.backend_pdf import PdfPages
+    from scipy.ndimage import gaussian_filter
+    from desispec.io import read_spectra
+    from desispec.interpolation import resample_flux
+    from desispec.resolution import Resolution
+    import redrock.templates
+    
+    nsmooth = 2
+    bbox = dict(boxstyle='round', facecolor='lightgray', alpha=0.5)
+    
+    fitfile = os.path.join(stacksdir, f'powerlaw-vitiles-{rrmethod}-{rrversion}-{zscan_prior}.fits')
+    allfit = Table(fitsio.read(fitfile))
+    log.info(f'Read {len(allfit)} objects from {fitfile}')
+
+    zcat_iron = Table(fitsio.read(os.path.join(stacksdir, f'zcat-vitiles-templates-iron.fits')))
+    #zcat_iron = Table(fitsio.read(os.path.join(stacksdir, f'zcat-vitiles-templates-{specprod}.fits')))
+
+    # cache the RR templates
+    orig_templatedir = os.getenv('RR_TEMPLATE_DIR')
+    os.environ['RR_TEMPLATE_DIR'] = os.path.join(templatedir, f'{rrmethod}-{rrversion}')
+
+    os.environ['DESI_LOGLEVEL'] = 'warning'
+    templates = dict()
+    for filename in redrock.templates.find_templates():
+        t = redrock.templates.Template(filename)
+        templates[(t.template_type, t.sub_type)] = t
+    os.environ['DESI_LOGLEVEL'] = 'info'
+    
+    coadddir = os.path.join(stacksdir, f'redux-templates-{rrmethod}-{rrversion}-{zscan_prior}', 'vitiles')
+
+    sns.set(context='talk', style='ticks', font_scale=0.7, palette='Set2')
+
+    ###################################################
+    # is a power-law a better fit to the data?
+    
+    I = (allfit['RR_CHI2'][:, 0] - allfit['POWERLAW_CHI2']) > 0
+    fit = allfit[I]
+    #fit[I]['TILEID', 'TARGETID', 'FIBER', 'POWERLAW_CHI2', 'VI_Z', 'VI_QUALITY', 'VI_SPECTYPE']        
+
+    pdffile = os.path.join(qadir, f'qa-powerlaw-vitiles-{rrmethod}-{rrversion}-{zscan_prior}.pdf')
+    pdf = PdfPages(pdffile)
+    for indx in range(len(fit)):
+        targetid = fit['TARGETID'][indx]
+        petal = fit['FIBER'][indx] // 500
+        tileid = fit['TILEID'][indx]
+
+        coaddfile = os.path.join(coadddir, f'coadd-{petal}-{tileid}.fits')
+        spec = read_spectra(coaddfile, targetids=targetid)
+
+        # reconstruct the best RR model fit
+        redrockfile = coaddfile.replace('coadd-', 'redrock-')
+        row = np.where(fitsio.read(redrockfile, 'REDSHIFTS', columns='TARGETID') == targetid)[0]
+        zbest = Table(fitsio.read(redrockfile, 'REDSHIFTS', rows=row))
+        zrr = zbest['Z']
+
+        spectype = zbest['SPECTYPE'][0].strip()
+        subtype = zbest['SUBTYPE'][0].strip()
+        fulltype = (spectype, subtype)
+        if subtype != '':
+            sfulltype = f'{spectype}:::{subtype}'
+        else:
+            sfulltype = spectype
+        
+        ncoeff = templates[fulltype].flux.shape[0]
+        coeff = zbest['COEFF'][0][0:ncoeff]
+        rrwave = templates[fulltype].wave * (1. + zrr)
+        rrflux = templates[fulltype].flux.T.dot(coeff)
+
+        flux, ivar, wave, tflux = [], [], [], []
+        for cam in spec.bands:
+            wave.append(spec.wave[cam])
+            flux.append(spec.flux[cam].squeeze())
+            ivar.append(spec.ivar[cam].squeeze())
+            R = Resolution(spec.resolution_data[cam].squeeze())
+            tflux.append(R.dot(resample_flux(spec.wave[cam], rrwave, rrflux)))
+
+        h5file = coaddfile.replace('coadd-', 'rrdetails-').replace('.fits', '.h5')
+        os.environ['DESI_LOGLEVEL'] = 'warning'
+        _, zfit = read_zscan(h5file, select_targetids=targetid)
+        os.environ['DESI_LOGLEVEL'] = 'info'
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        for icam, color, modelcolor in zip(range(len(spec.bands)),
+                                           ['dodgerblue', 'darkseagreen', 'orangered'],
+                                           ['darkblue', 'darkgreen', 'darkred']):
+            ax.plot(wave[icam], gaussian_filter(flux[icam], nsmooth), color=color, alpha=0.7)
+            ax.plot(wave[icam], gaussian_filter(tflux[icam], nsmooth), color=modelcolor, alpha=0.4)
+
+        ww = np.hstack(wave)
+        ww = ww[np.argsort(ww)]
+        ax.plot(ww, fit['POWERLAW_NORM'][indx] * (ww / 5500.)**(-fit['POWERLAW_ALPHA'][indx]), color='k', lw=2, ls='-')
+            
+        ylims = np.percentile(np.hstack(flux), [1., 99.])
+        ax.set_ylim(0.5 * ylims[0], 1.5*ylims[1])
+        ax.set_xlabel(r'Observed-frame Wavelength ($\AA$)')
+        ax.set_ylabel(r'$F_{\lambda}\ (10^{-17}~{\rm erg}~{\rm s}^{-1}~{\rm cm}^{-2}~\AA^{-1})$')
+        ax.set_title(f'{rrmethod}-{rrversion}: {tileid}-petal{petal}/{targetid}')
+
+        z_iron = zcat_iron[zcat_iron['TARGETID'] == targetid]['Z'][0]
+        spectype_iron = zcat_iron[zcat_iron['TARGETID'] == targetid]['SPECTYPE'][0]
+        txt = '\n'.join((
+            f'{rrmethod}-{rrversion}: {fit[indx]["Z"]:.4f}:{fit[indx]["SPECTYPE"]}',
+            f'Iron: {z_iron:.4f}:{spectype_iron}',
+            f'VI: {fit[indx]["VI_Z"]:.4f}:{fit[indx]["VI_SPECTYPE"]}',
+            ))
+        ax.text(0.97, 0.94, txt, ha='right', va='top',
+                transform=ax.transAxes, fontsize=10, bbox=bbox)
+
+        deltachi2 = fit["RR_CHI2"][indx][0] - fit["POWERLAW_CHI2"][indx]
+        txt = '\n'.join((
+            r'$\chi^{2}(Redrock)='+f'{fit["RR_CHI2"][indx][0]:.2f}$',
+            r'$\chi^{2}(\alpha='+f'{fit["POWERLAW_ALPHA"][indx]:.3f})={fit["POWERLAW_CHI2"][indx]:.2f}$',
+            r'$\Delta\chi^{2}='+f'{deltachi2:.2f}$',
+            ))
+        ax.text(0.07, 0.94, txt, ha='left', va='top',
+                transform=ax.transAxes, fontsize=10, bbox=bbox)
+        
+        fig.tight_layout()
+        pdf.savefig(fig)
+        plt.close()
+
+    pdf.close()
+    log.info(f'Wrote {pdffile}')
+
+    pdb.set_trace()
+
+    ###################################################
+    # spectral break stuff
+
+    I = np.where((np.sum(allfit['MEDFLUX'] != 0, axis=1) == 4.) *
+                 (np.sum(allfit['MEDFERR'] != 0, axis=1) == 4.))[0]
+    fit = allfit[I]
+
+    break_cam12 = np.abs(fit['MEDFLUX'][:, 0] - fit['MEDFLUX'][:, 1])
+    break_cam23 = np.abs(fit['MEDFLUX'][:, 2] - fit['MEDFLUX'][:, 3])
+
+    break_sigma_cam12 = np.sqrt(fit['MEDFERR'][:, 0]**2 + fit['MEDFERR'][:, 1]**2)
+    break_sigma_cam23 = np.sqrt(fit['MEDFERR'][:, 2]**2 + fit['MEDFERR'][:, 3]**2)
+
+    snr12 = break_cam12 / break_sigma_cam12
+    snr23 = break_cam23 / break_sigma_cam23
+
+    #J = fit['TARGETID'] == 39627676687795663
+    #_, Idoom, _ = _zstats(fit['Z_RR_NEW'], out['VI_Z'], vcut=3e3)
+
+    nsig = 40.
+    
+    pngfile = os.path.join(qadir, f'qa-break-vitiles-{rrmethod}-{rrversion}-{zscan_prior}.png')
+
+    dz = C_LIGHT * np.abs(fit['Z'] - fit['VI_Z'])/(1.+fit['VI_Z'])
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.scatter(snr12, dz, marker='s', s=5, alpha=0.7, label=r'$b-r$ break')
+    ax.scatter(snr23, dz, marker='o', s=5, alpha=0.7, label=r'$r-NIR$ break')
+    ax.axhline(y=1e3, ls='--', color='k')
+    ax.axvline(x=nsig, ls='-', color='gray')
+    #ax.scatter(snr12[J], fit[J]['Z'] - fit[J]['VI_Z'], marker='s', color='k', s=50)
+    #ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_ylim(1e-3, 1e7)
+    ax.set_xlabel('S/N of Break Across Cameras')
+    ax.set_ylabel(r'$c|\Delta z|/(1+z_{VI})$ (km/s)')
+    ax.legend(loc='lower right')
+    fig.tight_layout()
+    fig.savefig(pngfile)
+    log.info(f'Wrote {pngfile}')
+
+    # plot individual spectra
+    #B = np.where(np.logical_or(break_cam12 > nsig * break_sigma_cam12, break_cam23 > nsig * break_sigma_cam23))[0]
+    B1 = np.where(np.logical_and(np.logical_or(break_cam12 > nsig * break_sigma_cam12, break_cam23 > nsig * break_sigma_cam23), dz < 1e3))[0][:7]
+    B2 = np.where(np.logical_and(np.logical_or(break_cam12 > nsig * break_sigma_cam12, break_cam23 > nsig * break_sigma_cam23), dz > 1e3))[0][:7]
+    B = np.hstack((B1, B2))
+
+    npix = 500
+    
+    pdffile = os.path.join(qadir, f'qa-break-vitiles-{rrmethod}-{rrversion}-{zscan_prior}.pdf')
+    pdf = PdfPages(pdffile)
+    for indx in B:
+        targetid = fit['TARGETID'][indx]
+        petal = fit['FIBER'][indx] // 500
+        tileid = fit['TILEID'][indx]
+
+        coaddfile = os.path.join(coadddir, f'coadd-{petal}-{tileid}.fits')
+        spec = read_spectra(coaddfile, targetids=targetid)
+
+        # reconstruct the best RR model fit
+        redrockfile = coaddfile.replace('coadd-', 'redrock-')
+        row = np.where(fitsio.read(redrockfile, 'REDSHIFTS', columns='TARGETID') == targetid)[0]
+        zbest = Table(fitsio.read(redrockfile, 'REDSHIFTS', rows=row))
+        zrr = zbest['Z']
+
+        spectype = zbest['SPECTYPE'][0].strip()
+        subtype = zbest['SUBTYPE'][0].strip()
+        fulltype = (spectype, subtype)
+        if subtype != '':
+            sfulltype = f'{spectype}:::{subtype}'
+        else:
+            sfulltype = spectype
+        
+        ncoeff = templates[fulltype].flux.shape[0]
+        coeff = zbest['COEFF'][0][0:ncoeff]
+        rrwave = templates[fulltype].wave * (1. + zrr)
+        rrflux = templates[fulltype].flux.T.dot(coeff)
+
+        flux, ivar, wave, tflux = [], [], [], []
+        for cam in spec.bands:
+            wave.append(spec.wave[cam])
+            flux.append(spec.flux[cam].squeeze())
+            ivar.append(spec.ivar[cam].squeeze())
+            R = Resolution(spec.resolution_data[cam].squeeze())
+            tflux.append(R.dot(resample_flux(spec.wave[cam], rrwave, rrflux)))
+
+        h5file = coaddfile.replace('coadd-', 'rrdetails-').replace('.fits', '.h5')
+        os.environ['DESI_LOGLEVEL'] = 'warning'
+        _, zfit = read_zscan(h5file, select_targetids=targetid)
+        os.environ['DESI_LOGLEVEL'] = 'info'
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        for icam, color, modelcolor in zip(range(len(spec.bands)),
+                                           ['dodgerblue', 'darkseagreen', 'orangered'],
+                                           ['darkblue', 'darkgreen', 'darkred']):
+            ax.plot(wave[icam], gaussian_filter(flux[icam], nsmooth), color=color, alpha=0.7)
+            ax.plot(wave[icam], gaussian_filter(tflux[icam], nsmooth), color=modelcolor, alpha=0.4)
+        ylims = np.percentile(np.hstack(flux), [1., 99.])
+        ax.set_ylim(0.5 * ylims[0], 1.5*ylims[1])
+        ax.set_xlabel(r'Observed-frame Wavelength ($\AA$)')
+        ax.set_ylabel(r'$F_{\lambda}\ (10^{-17}~{\rm erg}~{\rm s}^{-1}~{\rm cm}^{-2}~\AA^{-1})$')
+        ax.set_title(f'{rrmethod}-{rrversion}: {tileid}-petal{petal}/{targetid}')
+
+        ax.plot(wave[0][-npix:], [fit['MEDFLUX'][indx, 0]] * npix, color='k', ls='-', lw=3)        
+        ax.plot(wave[1][:npix], [fit['MEDFLUX'][indx, 1]] * npix, color='k', ls='-', lw=3)
+        ax.plot(wave[1][-npix:], [fit['MEDFLUX'][indx, 2]] * npix, color='k', ls='-', lw=3)
+        ax.plot(wave[2][:npix], [fit['MEDFLUX'][indx, 3]] * npix, color='k', ls='-', lw=3)
+        #ax.plot(wave[0][-npix:], [fit['MEDFLUX'][indx, 0]+fit['MEDFERR'][indx, 0]] * npix, color='k', ls='--')
+        #ax.plot(wave[0][-npix:], [fit['MEDFLUX'][indx, 0]-fit['MEDFERR'][indx, 0]] * npix, color='k', ls='--')
+
+        z_iron = zcat_iron[zcat_iron['TARGETID'] == targetid]['Z'][0]
+        spectype_iron = zcat_iron[zcat_iron['TARGETID'] == targetid]['SPECTYPE'][0]
+        txt = '\n'.join((
+            f'{rrmethod}-{rrversion}: {fit[indx]["Z"]:.4f}:{fit[indx]["SPECTYPE"]}',
+            f'Iron: {z_iron:.4f}:{spectype_iron}',
+            f'VI: {fit[indx]["VI_Z"]:.4f}:{fit[indx]["VI_SPECTYPE"]}',
+            ))
+        ax.text(0.97, 0.94, txt, ha='right', va='top',
+                transform=ax.transAxes, fontsize=10, bbox=bbox)
+        
+        fig.tight_layout()
+        pdf.savefig(fig)
+        plt.close()
+
+    pdf.close()
+    log.info(f'Wrote {pdffile}')
+
+
 
 def main():
     """Main wrapper."""
@@ -3728,14 +4119,18 @@ def main():
 
     parser.add_argument('--gather-specprod-results', action='store_true', help='Gather the specprod Redrock results for the VI tiles/healpixels.')
     parser.add_argument('--run-redrock', action='store_true', help='Run Redrock on the VI tiles/healpixels.')
+    parser.add_argument('--write-slurm', action='store_true', help='Write a SLURM file.')    
     parser.add_argument('--redshift-qa', action='store_true', help='Redshift QA.')
     parser.add_argument('--outliers-qa', action='store_true', help='QA of redshift-fitting outliers.')
 
     parser.add_argument('--summarize', action='store_true', help='Summarize the fitting results.')
+
+    parser.add_argument('--fit-powerlaw', action='store_true', help='Fit a power law to the data.')
+    parser.add_argument('--qa-powerlaw', action='store_true', help='QA of the power-law fits.')
     
     parser.add_argument('--targetclass', type=str, default=None, help='Target class to process')
     parser.add_argument('--rrmethod', type=str, default='NMF', help='Redrock fitting method.')
-    parser.add_argument('--rrversion', type=str, default='0.5', help='Redrock template version.')
+    parser.add_argument('--rrversion', type=str, default='0.5b', help='Redrock template version.')
     parser.add_argument('--rrversion-star', type=str, default='0.2', help='WD and stellar Redrock template version.')
     parser.add_argument('--rrversion-qso', type=str, default='0.1', help='QSO Redrock template version.')
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
@@ -3875,7 +4270,7 @@ def main():
     if args.run_redrock:
         # Run Redrock on the VI tiles with a redshift scan to z=1.7 and to z=4.
         run_redrock_vitiles(zscan_prior='01', rrversion=args.rrversion, rrmethod=args.rrmethod,
-                            specprod=args.specprod, overwrite=args.overwrite, write_slurm=True)
+                            specprod=args.specprod, overwrite=args.overwrite, write_slurm=args.write_slurm)
 
     if args.redshift_qa:
         # QA - redshift vs redshift results
@@ -3897,6 +4292,12 @@ def main():
         
     if args.summarize:
         qa_summarize(specprod=args.specprod, overwrite=args.overwrite)
+
+    if args.fit_powerlaw:
+        fit_powerlaw(rrversion=args.rrversion, rrmethod=args.rrmethod, overwrite=args.overwrite)
+
+    if args.qa_powerlaw:
+        qa_powerlaw(rrversion=args.rrversion, rrmethod=args.rrmethod)
 
         
 if __name__ == '__main__':

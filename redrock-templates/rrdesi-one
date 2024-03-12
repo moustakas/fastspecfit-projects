@@ -184,7 +184,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)    
     parser.add_argument('--coadd', type=str, required=True, help='Coadd filename.')
     parser.add_argument('--targetid', type=np.int64, required=True, help='TARGETID.')
-    parser.add_argument('-t', '--rrtemplatedir', default='/global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/stacks/rrtemplates/NMF-0.5',
+    parser.add_argument('-t', '--rrtemplatedir', default='/global/cfs/cdirs/desi/users/ioannis/fastspecfit/redrock-templates/stacks/rrtemplates/NMF-0.5b',
                         type=str, help='Full path to templates.')
     parser.add_argument('-o', '--outdir', default='$DESI_ROOT/users/ioannis/tmp', type=str, help='Output directory.')
     args = parser.parse_args()
