@@ -1275,9 +1275,9 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
     outfast = []
     outmeta = []
     
-    #for ibin, bin in enumerate(bins[611:]):
+    for ibin, bin in enumerate(bins[611:]):
     #for ibin, bin in enumerate(bins[bins['IBIN'] == 612]):
-    for ibin, bin in enumerate(bins):
+    #for ibin, bin in enumerate(bins):
         if targetclass == 'BGS' or targetclass == 'ELG':
             I = ((allfast['Z'] > bin['ZOBJMIN']) * (allfast['Z'] < bin['ZOBJMAX']) *
                  (allfast['LOGMSTAR'] > bin['MSTARMIN']) * (allfast['LOGMSTAR'] < bin['MSTARMAX']) *
@@ -1349,6 +1349,7 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
                         if np.min(outflux1[W]) < ymin:
                             ymin = np.min(outflux1[W])
         else:
+            outflux_bin = []
             for iobj, fast in enumerate(allfast[I]):
                 dlum = cosmo.luminosity_distance(fast['Z'])
                 continuum, _ = CTools.templates2data(templatecache['templateflux_nolines'],
@@ -1375,6 +1376,7 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
                     Igood.append(iobj)
     
                     outflux1 /= norm
+                    outflux_bin.append(outflux1)
                     outflux.append(outflux1)
     
                     outbins['PARENTINDEX'][ibin][iobj] = I[iobj]
@@ -1399,7 +1401,6 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
             #plt.axvline(x=norm_flux_window[0], color='k', ls='--')
             #plt.axvline(x=norm_flux_window[1], color='k', ls='--')
             plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp/junk2.png')
-            pdb.set_trace()
         
         os.environ['DESI_LOGLEVEL'] = 'info'
 
@@ -1421,6 +1422,23 @@ def build_modelflux_bins(targetclass='BGS', minperbin=3, maxperbin=None, seed=1,
         log.info(f'Bin {ibin:04d}/{nbins:04d}: building {len(Igood):05d}/{outbins["NPARENT"][ibin]:05d} models (t={(time.time()-t0)/1.:.1f} s)')
         #log.info(f'Building {len(Igood):,d}/{outbins["NPARENT"][ibin]:,d} models took {(time.time()-t0)/1.:.2f} sec.')
 
+        from desisim.archetypes import ArcheTypes, compute_chi2
+        flux = np.vstack(outflux_bin)
+        chi2, amp = compute_chi2(flux)
+        Arch = ArcheTypes(chi2)
+        iarch, resp, respindx = Arch.get_archetypes(responsibility=True, chi2_thresh=10**2.5)
+        log.info(f'Generated {iarch.size} archetypes.')
+
+        pdb.set_trace()
+
+        sort = resp.argsort()[::-1]
+        resp = resp[sort]/resp.sum()
+        subtype = (subtype[iarch])[sort]
+        flux = (flux[iarch,:])[sort]
+        flux /= np.median(flux,axis=1)[:,None]
+
+
+        
     # trim to just the populated bins
     I = np.where(outbins['NOBJ'] > 0)[0]
     outbins = outbins[I]
@@ -3285,7 +3303,7 @@ def qa_summarize(specprod='iron', zscan='zscan01', overwrite=False):
 
         # new templates
         #for rrversion in ['0.1', '0.2', '0.3', '0.4', '0.4b']:
-        for rrversion in ['0.1', '0.4', '0.4b', '0.5', '0.5b']:
+        for rrversion in ['0.1', '0.4', '0.4b', '0.5', '0.5b', '0.6']:
             for rrmethod in ['PCA', 'NMF']:
                 zcatfile = os.path.join(stacksdir, f'zcat-vitiles-templates-{rrmethod}-{rrversion}-{zscan}.fits')
                 if not os.path.isfile(zcatfile):
@@ -3685,7 +3703,7 @@ def qa_outliers(specprod='iron', rrmethod='PCA', rrversion='0.1', zscan='zscan01
     os.environ['RR_TEMPLATE_DIR'] = orig_templatedir
 
     
-def fit_powerlaw(zscan='zscan01', rrmethod='NFM', rrversion='0.5b', overwrite=False):
+def fit_powerlaw(zscan='zscan01', rrmethod='NFM', rrversion='0.6', overwrite=False):
     """Fit a power-law to each spectrum and record the chi2. Also measure the
     inter-camera spectral break (see https://github.com/desihub/redrock/issues/286).
 
@@ -3819,7 +3837,7 @@ def fit_powerlaw(zscan='zscan01', rrmethod='NFM', rrversion='0.5b', overwrite=Fa
     log.info(f'Wrote {len(zcat)} objects to {outfile}.')
     
     
-def qa_powerlaw(zscan_prior='zscan01', rrmethod='NFM', rrversion='0.5b'):
+def qa_powerlaw(zscan_prior='zscan01', rrmethod='NFM', rrversion='0.6'):
     """QA of the output of fit_powerlaw()
 
     """
@@ -3947,8 +3965,6 @@ def qa_powerlaw(zscan_prior='zscan01', rrmethod='NFM', rrversion='0.5b'):
     pdf.close()
     log.info(f'Wrote {pdffile}')
 
-    pdb.set_trace()
-
     ###################################################
     # spectral break stuff
 
@@ -3977,8 +3993,8 @@ def qa_powerlaw(zscan_prior='zscan01', rrmethod='NFM', rrversion='0.5b'):
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.scatter(snr12, dz, marker='s', s=5, alpha=0.7, label=r'$b-r$ break')
     ax.scatter(snr23, dz, marker='o', s=5, alpha=0.7, label=r'$r-NIR$ break')
-    ax.axhline(y=1e3, ls='--', color='k')
-    ax.axvline(x=nsig, ls='-', color='gray')
+    ax.axhline(y=4e3, ls='--', color='k')
+    #ax.axvline(x=nsig, ls='-', color='gray')
     #ax.scatter(snr12[J], fit[J]['Z'] - fit[J]['VI_Z'], marker='s', color='k', s=50)
     #ax.set_xscale('log')
     ax.set_yscale('log')
@@ -3997,6 +4013,15 @@ def qa_powerlaw(zscan_prior='zscan01', rrmethod='NFM', rrversion='0.5b'):
     B = np.hstack((B1, B2))
 
     npix = 500
+
+    #C = np.where(np.logical_and(np.logical_or(break_cam12 > 20. * break_sigma_cam12, break_cam23 > 20. * break_sigma_cam23), dz > 4e3))[0]
+    #out = fit[C]['TILEID', 'FIBER', 'TARGETID']
+    #out['PETAL'] = out['FIBER'] // 500
+    #out['DZ'] = dz[C]
+    #out['SNR12'] = snr12[C]
+    #out['SNR23'] = snr23[C]
+    #out = out[np.lexsort((out['FIBER'], out['TILEID']))]
+    #pdb.set_trace()
     
     pdffile = os.path.join(qadir, f'qa-break-vitiles-{rrmethod}-{rrversion}-{zscan_prior}.pdf')
     pdf = PdfPages(pdffile)
@@ -4130,7 +4155,7 @@ def main():
     
     parser.add_argument('--targetclass', type=str, default=None, help='Target class to process')
     parser.add_argument('--rrmethod', type=str, default='NMF', help='Redrock fitting method.')
-    parser.add_argument('--rrversion', type=str, default='0.5b', help='Redrock template version.')
+    parser.add_argument('--rrversion', type=str, default='0.6', help='Redrock template version.')
     parser.add_argument('--rrversion-star', type=str, default='0.2', help='WD and stellar Redrock template version.')
     parser.add_argument('--rrversion-qso', type=str, default='0.1', help='QSO Redrock template version.')
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')

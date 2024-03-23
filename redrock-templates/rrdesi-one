@@ -90,10 +90,20 @@ def main(coaddfile, targetid, rrtemplatedir, outdir, nsmooth=3):
     ax[0].set_ylim(0.5 * ylims[0], 1.5*ylims[1])
     ax[0].set_xlabel(r'Observed-frame Wavelength ($\AA$)')
     ax[0].set_ylabel(r'$F_{\lambda}\ (10^{-17}~{\rm erg}~{\rm s}^{-1}~{\rm cm}^{-2}~\AA^{-1})$')
-    if 'TILEID' in spec.fibermap.columns:
-        ax[0].set_title(f'{spec.fibermap["TILEID"][0]}/{spec.fibermap["FIBER"][0]//500}/{spec.fibermap["TARGETID"][0]}')
-    else:
-        ax[0].set_title(f'{spec.fibermap["TARGETID"][0]}')
+    ax[0].set_title(f'{os.path.basename(coaddfile)}')
+
+    txt = '\n'.join((
+        f'targetid: {targetid}, fiber: {spec.fibermap["FIBER"][0]}',
+        f'z={zbest["Z"][0]:.6f}, zwarn={zbest["ZWARN"][0]}',
+        f'spectype={sfulltype}',
+        ))
+    ax[0].text(0.04, 0.94, txt, ha='left', va='top',
+               transform=ax[0].transAxes, fontsize=9, bbox=bbox)
+
+    #if 'TILEID' in spec.fibermap.columns:
+    #    ax[0].set_title(f'{spec.fibermap["TILEID"][0]}/{spec.fibermap["FIBER"][0]//500}/{spec.fibermap["TARGETID"][0]}')
+    #else:
+    #    ax[0].set_title(f'{spec.fibermap["TARGETID"][0]}')
         #ax[0].set_title(f'{spec.fibermap.meta["SURVEY"]}/{spec.fibermap.meta["PROGRAM"]}/{spec.fibermap["HEALPIX"][0]}/{spec.fibermap["TARGETID"][0]}')
         #ax[0].set_title(f'{spec.fibermap["SURVEY"][0]}/{spec.fibermap["PROGRAM"][0]}/{spec.fibermap["HEALPIX"][0]}/{spec.fibermap["TARGETID"][0]}')
 
@@ -111,6 +121,7 @@ def main(coaddfile, targetid, rrtemplatedir, outdir, nsmooth=3):
     nn = np.min(zchi2)
     snn = str(int(np.log10(nn)))
     ax[1].plot(redshifts, zchi2/nn, color='k', alpha=0.7, label=r'$\chi^{2}$('+sfulltype+')')
+    ax[1].set_ylim(np.min(zchi2/nn), np.max(zchi2/nn)*1.01)
     ax[1].set_xlabel('Redshift')
     ax[1].set_ylabel(r'$\chi^{2}\ /\ 10^{'+snn+'}$')
 
