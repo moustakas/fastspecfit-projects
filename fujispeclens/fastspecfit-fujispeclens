@@ -1,0 +1,209 @@
+#!/usr/bin/env python
+
+"""Subtract the model of the lens spectrum and then fit the source (at the new,
+source redshift).
+
+1.
+  time $HOME/code/desihub/fastspecfit-projects/fujispeclens/fastspecfit-fujispeclens --gather-lens-coadds --mp 128 --overwrite
+
+2.
+  fastspec ./redrock-lens.fits -o fastspec-lens.fits --ignore-photometry --ignore-quasarnet --mp 128
+  fastqa ./fastspec-lens.fits --redrockfiles redrock-lens.fits --mp 128 -o ./qa-lens --overwrite
+
+3.
+  time $HOME/code/desihub/fastspecfit-projects/fujispeclens/fastspecfit-fujispeclens --build-source-coadds --mp 128 --overwrite
+
+4.
+  fastspec ./redrock-source.fits -o fastspec-source.fits --ignore-photometry --ignore-quasarnet --mp 128
+  fastqa ./fastspec-source.fits --redrockfiles redrock-source.fits --mp 1 -o ./qa-source --overwrite
+
+
+"""
+import pdb # for debugging
+
+import os, time, subprocess
+import numpy as np
+import fitsio
+from astropy.table import Table, vstack
+import matplotlib.pyplot as plt
+
+from desitarget import geomask        
+from desiutil.log import get_logger
+log = get_logger()
+
+def main():
+    """Main wrapper
+
+    """
+    import argparse    
+
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing processes per MPI rank or node.')
+    parser.add_argument('-n', '--ntargets', type=int, help='Number of targets to process in each file.')
+    parser.add_argument('--targetids', type=str, default=None, help='Comma-separated list of TARGETIDs to process.')
+
+    parser.add_argument('--gather-lens-coadds', action='store_true', help='Gather the coadded spectra.')
+    parser.add_argument('--build-source-coadds', action='store_true', help='Build the source coadded spectra.')
+
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing files.')
+    parser.add_argument('--nolog', action='store_true', help='Do not write a log (useful for debugging).')
+    parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
+    parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
+    args = parser.parse_args()
+
+    #prefix = 'fastspec-'
+    #fits = 'fits.gz'
+    #extname = 'fastspec'
+
+    specprod = 'fuji'
+    desi_root = os.getenv('DESI_ROOT')
+    specprod_dir = os.path.join(desi_root, 'spectro', 'redux', specprod, 'healpix')
+
+    datadir = '/global/cfs/cdirs/desicollab/users/ioannis/fastspecfit/fujispeclens'
+    samplefile = os.path.join(datadir, 'zall-pix-fuji-with-Z2.fits')
+
+    if args.gather_lens_coadds:
+        from desispec.io import read_spectra_parallel, write_spectra
+        from fastspecfit.mpi import _findfiles
+
+        out_coaddfile = os.path.join(datadir, 'coadd-lens.fits')
+        out_redrockfile = os.path.join(datadir, 'redrock-lens.fits')
+        
+        nsample = Table(fitsio.read(samplefile))
+        log.info(f'Read {len(sample)} rows from {samplefile}')
+        
+        redrockfiles, ntargets = _findfiles(specprod_dir, prefix='redrock', sample=sample)
+        #fastfiles, _ = _findfiles(datadir, prefix='fastspec', sample=sample)
+
+        coadd = read_spectra_parallel(sample, prefix='coadd', specprod=specprod, nproc=128)
+        assert(np.all(coadd.target_ids() == sample['TARGETID']))
+        log.info(f'Writing {out_coaddfile}')
+        write_spectra(out_coaddfile, coadd)
+
+        zbest, tsnr2 = [], []
+        for redrockfile in redrockfiles:
+            _, survey, program, healpix = os.path.basename(redrockfile).split('-')
+            healpix = int(healpix.split('.')[0])
+            I = (sample['SURVEY'] == survey) * (sample['PROGRAM'] == program) * (sample['HEALPIX'] == healpix)
+            #targetids = ','.join(sample[I]['TARGETID'].astype(str))
+            targetids = sample['TARGETID'][I]
+
+            reftargetids = fitsio.read(redrockfile, ext='REDSHIFTS', columns='TARGETID')
+            rows = np.where(np.isin(reftargetids, targetids))[0]
+
+            zbest.append(Table(fitsio.read(redrockfile, ext='REDSHIFTS', rows=rows)))
+            tsnr2.append(Table(fitsio.read(redrockfile, ext='TSNR2', rows=rows)))
+
+        zbest = vstack(zbest)
+        tsnr2 = vstack(tsnr2)
+
+        I = geomask.match_to(zbest['TARGETID'], sample['TARGETID'])
+        zbest = zbest[I]
+        tsnr2 = tsnr2[I]
+        assert(np.all(zbest['TARGETID'] == sample['TARGETID']))
+        assert(np.all(tsnr2['TARGETID'] == sample['TARGETID']))
+        
+        log.info(f'Writing {out_redrockfile}')
+        fitsio.write(out_redrockfile, zbest.as_array(), extname='REDSHIFTS', clobber=True)
+        fitsio.write(out_redrockfile, tsnr2.as_array(), extname='TSNR2')
+
+    # subtract the fastspec model and write out
+    if args.build_source_coadds:
+        from scipy.ndimage import gaussian_filter        
+        from desispec.io import read_spectra, write_spectra
+        from fastspecfit.io import read_fastspecfit, cache_templates, DESISpectra
+        from fastspecfit.emlines import EMFitTools
+        from fastspecfit.continuum import ContinuumTools    
+        from fastspecfit.util import TabulatedDESI, trapz_rebin
+
+        sample = Table(fitsio.read(samplefile))#, rows=[0, 1]))
+        log.info(f'Read {len(sample)} rows from {samplefile}')
+
+        coaddfile = os.path.join(datadir, 'coadd-lens.fits')
+        redrockfile = os.path.join(datadir, 'redrock-lens.fits')
+
+        out_coaddfile = os.path.join(datadir, 'coadd-source.fits')
+        out_redrockfile = os.path.join(datadir, 'redrock-source.fits')
+
+        coadd = read_spectra(coaddfile, targetids=sample['TARGETID'])
+        reftargetids = fitsio.read(redrockfile, ext='REDSHIFTS', columns='TARGETID')
+        rows = geomask.match_to(reftargetids, sample['TARGETID'])
+
+        zbest = Table(fitsio.read(redrockfile, ext='REDSHIFTS', rows=rows))
+        zbest['Z'] = sample['Z2'] # note!
+        tsnr2 = Table(fitsio.read(redrockfile, ext='TSNR2', rows=rows))
+        
+        fastfile = os.path.join(datadir, 'fastspec-lens.fits')
+        allfast, allmeta, _, _ = read_fastspecfit(fastfile)
+
+        templatecache = cache_templates()
+        templatewave = templatecache['templatewave']
+
+        cosmo = TabulatedDESI()    
+        Spec = DESISpectra()
+        EMFit = EMFitTools()
+        CTools = ContinuumTools(ignore_photometry=True)
+
+        for iobj, fast in enumerate(allfast):
+            redshift = fast['Z']
+            dlum = cosmo.luminosity_distance(redshift)
+            
+            Spec.select(redrockfiles=redrockfile, targetids=[fast['TARGETID']])
+                        #input_redshifts=input_redshifts,
+                        #redrockfile_prefix=args.redrockfile_prefix,
+                        #specfile_prefix=args.specfile_prefix,
+                        #qnfile_prefix=args.qnfile_prefix)
+            data = Spec.read_and_unpack(synthphot=True, mp=args.mp, ignore_photometry=True)[0] # one object
+
+            # per-camera model
+            desicontinuum, _ = CTools.templates2data(templatecache['templateflux_nolines'], templatecache['templatewave'],
+                                                     redshift=redshift, dluminosity=dlum, synthphot=False,
+                                                     specwave=data['wave'], specres=data['res'],
+                                                     specmask=data['mask'], cameras=data['cameras'],
+                                                     vdisp=fast['VDISP'],
+                                                     coeff=fast['COEFF'])
+
+            # Need to be careful we don't pass a large negative residual where
+            # there are gaps in the data.
+            desiresiduals = []
+            for icam in np.arange(len(data['cameras'])):
+                resid = data['flux'][icam] - desicontinuum[icam]
+                I = (data['flux'][icam] == 0.0) * (data['ivar'][icam] == 0.0)
+                if np.any(I):
+                    resid[I] = 0.0
+                desiresiduals.append(resid)
+
+            #if np.all(fast['COEFF'] == 0) or no_smooth_continuum:
+            #    fullsmoothcontinuum = np.zeros_like(fullwave)
+            #else:
+            #    fullsmoothcontinuum, _ = CTools.smooth_continuum(
+            #        fullwave, np.hstack(desiresiduals), np.hstack(data['ivar']), 
+            #        redshift=redshift, linemask=np.hstack(data['linemask']),
+            #        camerapix=data['camerapix'])
+            #desismoothcontinuum = []
+            #for campix in data['camerapix']:
+            #    desismoothcontinuum.append(fullsmoothcontinuum[campix[0]:campix[1]])
+
+            # full model spectrum
+            desiemlines = EMFit.emlinemodel_bestfit(data['wave'], data['res'], fast, snrcut=2.)
+
+            for icam, cam in enumerate(data['cameras']):
+                coadd[iobj].flux[cam] -= (desicontinuum[icam] + desiemlines[icam])
+                
+            plt.clf()
+            for icam, color in enumerate(['blue', 'green', 'red']):
+                plt.plot(data['wave'][icam], desiresiduals[icam], color='gray')
+                #plt.plot(data['wave'][icam], gaussian_filter(desiresiduals[icam], 4), color='gray')
+                #plt.plot(data['wave'][icam], data['flux'][icam], color='gray')
+                #plt.plot(data['wave'][icam], desicontinuum[icam] + desiemlines[icam], color=color)
+            plt.xlim(8550, 8700)
+            plt.savefig('/global/cfs/cdirs/desi/users/ioannis/tmp/junk.png')            
+
+        write_spectra(out_coaddfile, coadd)
+
+        fitsio.write(out_redrockfile, zbest.as_array(), extname='REDSHIFTS', clobber=True)
+        fitsio.write(out_redrockfile, tsnr2.as_array(), extname='TSNR2')
+
+if __name__ == '__main__':
+    main()
+
