@@ -158,6 +158,7 @@ def get_zlims(lss_specprod, targetclass=None):
 def read_vi(vi_spectype=None, quality=2.5):
     # see https://data.desi.lbl.gov/doc/releases/edr/vac/vi/
     from glob import glob
+
     #vifiles = glob('/global/cfs/cdirs/desi/public/edr/vac/edr/vi/v1.0/*.csv')
     allvi = []
     for targ in ['BGS', 'LRG', 'ELG', 'QSO']:
@@ -178,10 +179,47 @@ def read_vi(vi_spectype=None, quality=2.5):
         I = allvi['VI_SPECTYPE'] == vi_spectype
         log.info(f'Trimming to {np.sum(I):,d}/{len(allvi):,d} objects with VI_SPECTYPE={vi_spectype}.')
         allvi = allvi[I]
-    
+
+    # veto bad fibers
+    veto = np.loadtxt('/global/cfs/cdirs/desi/survey/catalogs/Y1/LSS/iron/unique_badfibers.txt')
+    I = np.isin(allvi['FIBER'], veto)
+    log.info(f'Vetoing {np.sum(I):,d}/{len(allvi):,d} bad fibers.')
+    allvi = allvi[~I]
+
     return allvi
 
 
+def qa_vi_zhist():
+    """Redshift histogram.
+
+    """
+    from matplotlib import colors
+
+    vi = read_vi()
+
+    cols = np.array([colors.to_hex(col) for col in ['darkgreen', 'darkred', 'darkblue', 'black']])
+    
+    zlim = (0., 2.)
+    srt = [0, 2, 1, 3]
+    
+    fig, xx = plt.subplots(figsize=(8, 6))
+    for targtype, col in zip(np.array(['BGS', 'LRG', 'ELG', 'QSO'])[srt], cols[:5][srt]):
+    #for targtype, col in zip(['BGS', 'LRG', 'ELG', 'QSO'], cols[:5]):
+        I = np.where(vi['SUFFIX'] == targtype)[0]
+        xx.hist(vi['VI_Z'][I], bins=50, color=col, range=zlim, alpha=0.5,
+                label=f'{targtype} (N={len(I):,d})')
+    #hh, ll = xx.get_legend_handles_labels()
+    #xx.legend([hh[ii] for ii in srt+[4,]], [ll[ii] for ii in srt+[4,]], loc='upper right', fontsize=11)
+
+    xx.legend(loc='upper right', fontsize=11)
+    xx.set_xlabel('VI Redshift (Q>=2.5)')
+    xx.set_ylabel('Number')
+    fig.tight_layout()
+    pngfile = os.path.join(qadir, 'qa-vi-zhist.png')
+    fig.savefig(pngfile)
+    print(f'Wrote {pngfile}')
+
+        
 def gather_specprod_results(specprod='iron', overwrite=False):
     """Wrapper to gather nominal Redrock results.
 
@@ -198,6 +236,7 @@ def gather_specprod_results(specprod='iron', overwrite=False):
             os.makedirs(zcatdir, exist_ok=True)
     
         vi = read_vi()
+        
         for tileid in sorted(set(vi['TILEID'])):
             T = tileid == vi['TILEID']
             petals = vi['FIBER'][T] // 500
@@ -2829,7 +2868,7 @@ def _zstats(z, ztrue, spectype=None, vcut=1e3):
     return N, Idoom, txt
 
 
-def qa_zcompleteness(specprod='iron'):
+def qa_zcompleteness(specprod='iron', rrmethod='NMF', rrversion='0.5b'):
     """Redshift completeness results.
 
     """
@@ -2968,38 +3007,7 @@ def qa_zcompleteness(specprod='iron'):
         _makeplot(old, new, targtype, targclass)
 
 
-def qa_vi_zhist():
-    """Redshift histogram.
-
-    """
-    from matplotlib import colors
-
-    vi = read_vi()
-
-    cols = np.array([colors.to_hex(col) for col in ['darkgreen', 'darkred', 'darkblue', 'black']])
-    
-    zlim = (0., 2.)
-    srt = [0, 2, 1, 3]
-    
-    fig, xx = plt.subplots(figsize=(8, 6))
-    for targtype, col in zip(np.array(['BGS', 'LRG', 'ELG', 'QSO'])[srt], cols[:5][srt]):
-    #for targtype, col in zip(['BGS', 'LRG', 'ELG', 'QSO'], cols[:5]):
-        I = np.where(vi['SUFFIX'] == targtype)[0]
-        xx.hist(vi['VI_Z'][I], bins=50, color=col, range=zlim, alpha=0.5,
-                label=f'{targtype} (N={len(I):,d})')
-    #hh, ll = xx.get_legend_handles_labels()
-    #xx.legend([hh[ii] for ii in srt+[4,]], [ll[ii] for ii in srt+[4,]], loc='upper right', fontsize=11)
-
-    xx.legend(loc='upper right', fontsize=11)
-    xx.set_xlabel('VI Redshift (Q>=2.5)')
-    xx.set_ylabel('Number')
-    fig.tight_layout()
-    pngfile = os.path.join(qadir, 'qa-vi-zhist.png')
-    fig.savefig(pngfile)
-    print(f'Wrote {pngfile}')
-
-        
-def qa_zvz(specprod='iron', rrmethod='PCA', rrversion='0.1'):
+def qa_zvz(specprod='iron', rrmethod='NMF', rrversion='0.5b'):
     """Redshift vs redshift fitting results.
 
     """
@@ -3285,21 +3293,31 @@ def qa_summarize(specprod='iron', zscan='zscan01', overwrite=False):
             # iron templates
             cat = zcat_iron[zcat_iron[targclass]]
 
+            # Purity = what fraction of redrock confident answers were actually correct?  i.e. #(goodz AND ZWARN=0)/#(ZWARN=0)
+            # Completeness = what fraction of all good VI entries had correct and confident redshifts? i.e. #(goodz AND ZWARN=0)/#(total)
+            # Catastrophic outliers = minimize number of wrong answers incorrectly flagged as good, i.e. #(badz AND ZWARN=0) / #(total)
+
             I = (cat['COADD_FIBERSTATUS'] == 0) * (cat['ZWARN'] == 0)
             if dchi2cut is not None:
                 I *= (cat['DELTACHI2'] > dchi2cut)
+            I = np.where(I)[0]
                 
-            N, Idoom, statstxt = _zstats(cat['Z_RR'][I], cat['VI_Z'][I])#, spectype=spectype)
+            N, Idoom, _ = _zstats(cat['Z_RR'][I], cat['VI_Z'][I])#, spectype=spectype)
             Nall += N
             Nalldoom += len(Idoom)
 
-            #print(f'{targclass} N={N}, {statstxt}')
-            out[f'N{targclass}'] = [N]
+            #purity = (len(I) - len(Idoom)) / len(I)
+            #completeness = (len(I) - len(Idoom)) / len(cat)
+            #outliers = len(Idoom) / len(cat)
+
+            out[f'{targclass}'] = [N]
             out[f'F{targclass}'] = [100. * len(Idoom) / N]
 
         out['NALL'] = [Nall]
         out['FALL'] = [100. * Nalldoom / Nall]
         allout.append(out)
+
+        pdb.set_trace()
 
         # new templates
         #for rrversion in ['0.1', '0.2', '0.3', '0.4', '0.4b']:
@@ -4146,6 +4164,7 @@ def main():
     parser.add_argument('--run-redrock', action='store_true', help='Run Redrock on the VI tiles/healpixels.')
     parser.add_argument('--write-slurm', action='store_true', help='Write a SLURM file.')    
     parser.add_argument('--redshift-qa', action='store_true', help='Redshift QA.')
+    parser.add_argument('--completeness-qa', action='store_true', help='Redshift completeness QA.')
     parser.add_argument('--outliers-qa', action='store_true', help='QA of redshift-fitting outliers.')
 
     parser.add_argument('--summarize', action='store_true', help='Summarize the fitting results.')
@@ -4291,6 +4310,7 @@ def main():
     # gather the {specprod} (iron) Redrock results.
     if args.gather_specprod_results:
         gather_specprod_results(specprod=args.specprod, overwrite=args.overwrite)
+        #qa_vi_zhist()
 
     if args.run_redrock:
         # Run Redrock on the VI tiles with a redshift scan to z=1.7 and to z=4.
@@ -4302,11 +4322,9 @@ def main():
         qa_zvz(specprod=args.specprod, rrversion=args.rrversion, rrmethod=args.rrmethod)
         #qa_zvz(specprod=args.specprod, rrversion=args.rrversion, rrmethod='PCA')
 
-        ## QA - redshift completeness results
-        #qa_zcompleteness(specprod=args.specprod)
-
-        #qa_vi_zhist()
-        #return
+    # QA - redshift completeness results
+    if args.completeness_qa:
+        qa_zcompleteness(specprod=args.specprod, rrversion=args.rrversion, rrmethod=args.rrmethod)
 
     if args.outliers_qa:
         qa_outliers(specprod=args.specprod, rrversion=args.rrversion, rrmethod=args.rrmethod,

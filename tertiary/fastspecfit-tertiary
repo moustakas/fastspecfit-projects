@@ -12,6 +12,10 @@ Fit the DESI-II Tertiary tiles / observations--
 time $HOME/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 1
 time $HOME/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 1 --merge
 
+time $HOME/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 1 --fitsky
+time $HOME/code/desihub/fastspecfit-projects/tertiary/fastspecfit-tertiary --mp 128 --tertiary 1 --fitsky --merge
+
+
 """
 import pdb # for debugging
 
@@ -44,6 +48,7 @@ def main():
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing files.')
     parser.add_argument('--nolog', action='store_true', help='Do not write a log (useful for debugging).')
     parser.add_argument('--redrock', action='store_true', help='Run Redrock.')
+    parser.add_argument('--fitsky', action='store_true', help='Fit sky targets.')
     parser.add_argument('--merge', action='store_true', help='Merge all individual catalogs into one large file.')
     parser.add_argument('--makeqa', action='store_true', help='Build QA in parallel.')
     parser.add_argument('--makehtml', action='store_true', help='Build the HTML page.')
@@ -65,8 +70,9 @@ def main():
         '23': 'v02132024',
         '26': 'v02132024',
         }
-    
+
     datadir = os.path.join(desi_root, 'users', 'jratajcz', f'{tertiary}-{redux_version[args.tertiary]}', 'healpix')
+    #mergefile = os.path.join(datadir, f'merge-{tertiary}-{redux_version[args.tertiary]}.fits')
     
     #maxphotwave = 35. # [micron]
     #fphotodirs = {
@@ -94,7 +100,10 @@ def main():
         fits = 'fits'
         extname = 'fastphot'
     else:
-        prefix = 'fastspec-'
+        if args.fitsky:
+            prefix = 'fastspec-sky-'
+        else:
+            prefix = 'fastspec-'
         fits = 'fits.gz'
         extname = 'fastspec'
     outdir = os.path.join(args.outdir, tertiary, extname)
@@ -177,12 +186,12 @@ def main():
 
                 #targetids = '39089837499745334'
 
-                cmd = f'fastspec {redrockfile} -o {outfile} --targetids {targetids} --input-redshifts {input_redshifts} '
-                cmd += f'--mp {args.mp} --fphotodir {fphotodir} --fphotofile {fphotofile} '
+                cmd = f'fastspec {redrockfile} -o={outfile} --targetids={targetids} --input-redshifts={input_redshifts} '
+                cmd += f'--mp={args.mp} --fphotodir={fphotodir} --fphotofile={fphotofile} '
                 if args.ntargets:
-                    cmd += ' --ntargets {}'.format(args.ntargets)
+                    cmd += f' --ntargets={args.ntargets}'
                 if args.targetids:
-                    cmd += ' --targetids {}'.format(args.targetids)
+                    cmd += f' --targetids {args.targetids}'
                 if args.tertiary == '26':
                     cmd += ' --no-smooth-continuum --constrain-age'
                 log.info(cmd)
@@ -230,7 +239,7 @@ def main():
             coaddfile = os.path.join(datadir, f'coadd-{healpix}.fits')
             redrockfile = os.path.join(outdir, f'redrock-nmf-{healpix}.fits')
 
-            cmd = f'rrdesi -i {coaddfile} -o {redrockfile} --targetids {targetids} --mp {args.mp}'
+            cmd = f'rrdesi -i={coaddfile} -o={redrockfile} --targetids={targetids} --mp={args.mp}'
             log.info(cmd)
             err = subprocess.call(cmd.split())            
     elif args.makehtml:
@@ -240,17 +249,24 @@ def main():
         #redrockfiles = glob(os.path.join(datadir, 'redrock-27333.fits'))
         redrockfiles = glob(os.path.join(datadir, 'redrock-?????.fits'))
         for redrockfile in redrockfiles:
+            if args.fitsky:
+                cat = Table(fitsio.read(redrockfile, 'FIBERMAP', columns=['OBJTYPE', 'TARGETID']))
+                cat = cat[cat['OBJTYPE'] == 'SKY'][:2]
+                targetids = ','.join(cat['TARGETID'].astype(str))
+            else:
+                targetids = args.targetids
+                
             fastfile = os.path.join(outdir, os.path.basename(redrockfile).replace('redrock-', prefix))
             if not args.fastphot:
                 fastfile += '.gz'
             if not os.path.isfile(fastfile) or args.overwrite:
-                cmdargs = f'{redrockfile} -o {fastfile} --mp {args.mp} '#--fphotodir={fphotodir} --fphotofile={fphotofile}'
+                cmdargs = f'{redrockfile} -o={fastfile} --mp={args.mp} '#--fphotodir={fphotodir} --fphotofile={fphotofile}'
+                if args.fitsky:
+                    cmdargs += f' --ignore-photometry'
                 if args.ntargets:
-                    cmdargs += f' --ntargets {args.ntargets}'
-                if args.targetids:
-                    cmdargs += f' --targetids {args.targetids}'
-                #if args.tertiary == '23':
-                #    cmdargs += ' --no-smooth-continuum --constrain-age'
+                    cmdargs += f' --ntargets={args.ntargets}'
+                if targetids:
+                    cmdargs += f' --targetids={targetids}'
                 if args.fastphot:
                     from fastspecfit.fastspecfit import fastphot as fast
                     log.info(f'fastphot {cmdargs}')
