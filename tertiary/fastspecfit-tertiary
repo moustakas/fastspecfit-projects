@@ -27,6 +27,9 @@ from astropy.table import Table, vstack
 
 from desispec.parallel import stdouterr_redirected
 from desimodel.footprint import radec2pix
+
+from fastspecfit.io import ZWarningMask
+
 from desiutil.log import get_logger
 log = get_logger()
 
@@ -250,9 +253,10 @@ def main():
         redrockfiles = glob(os.path.join(datadir, 'redrock-?????.fits'))
         for redrockfile in redrockfiles:
             if args.fitsky:
-                cat = Table(fitsio.read(redrockfile, 'FIBERMAP', columns=['OBJTYPE', 'TARGETID']))
-                cat = cat[cat['OBJTYPE'] == 'SKY'][:2]
-                targetids = ','.join(cat['TARGETID'].astype(str))
+                fm = Table(fitsio.read(redrockfile, 'FIBERMAP', columns=['OBJTYPE', 'TARGETID']))
+                zb = Table(fitsio.read(redrockfile, 'REDSHIFTS', columns=['Z', 'ZWARN']))
+                I = (fm['OBJTYPE'] == 'SKY') * (zb['Z'] > 1e-3) * (zb['ZWARN'] & ZWarningMask.NODATA == 0)
+                targetids = ','.join(np.unique(fm['TARGETID'][I]).astype(str))
             else:
                 targetids = args.targetids
                 
