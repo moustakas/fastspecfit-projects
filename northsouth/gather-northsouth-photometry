@@ -1,0 +1,165 @@
+#!/usr/bin/env python
+
+"""The purpose of this script is to gather Tractor photometry in the overlap
+region between the (north) BASS+MzLS and (south) DECaLS surveys based on
+Iron/main/bright objects.
+
+It takes roughly 30 minutes in an interactive node with 128 MPI taks:
+
+salloc -N 1 -C cpu -A desi -t 01:00:00 --qos interactive
+source /global/cfs/common/software/desi/desi_environment.sh main
+time srun --network=no_vni --ntasks=128 /global/cfs/cdirs/desicollab/users/ioannis/fastspecfit/northsouth/gather-photometry
+
+"""
+import os, time, pdb
+import fitsio
+import numpy as np
+from desitarget import geomask
+from astropy.table import Table, vstack
+
+
+def tractorphot_onebrick(cat, region, RACOLUMN='RA', DECCOLUMN='DEC'):
+    """Simple wrapper on desispec.io.photo.gather_tractorphot."""
+    from desispec.io.photo import gather_tractorphot
+    tractorphot = gather_tractorphot(cat, racolumn=RACOLUMN, deccolumn=DECCOLUMN, restrict_region=region)
+    return tractorphot
+
+
+def tractorphot(cat, region, comm=None, RACOLUMN='RA', DECCOLUMN='DEC'):
+    """Gather targeting photometry for observed targets.
+
+    """
+    from desitarget.targets import decode_targetid
+    from desispec.parallel import weighted_partition
+
+    if comm is None:
+        rank, size = 0, 1
+    else:
+        rank, size = comm.rank, comm.size
+
+    if rank == 0:
+        t0 = time.time()
+
+        ubricknames, nperbrick = np.unique(cat['BRICKNAME'].data, return_counts=True)
+        groups = weighted_partition(nperbrick, size)
+    else:
+        ubricknames = np.array([])
+        groups = [np.array([])]
+
+    # broadcast the work to the other ranks
+    if comm:
+        ubricknames = comm.bcast(ubricknames, root=0)
+        groups = comm.bcast(groups, root=0)
+
+    tractorphots = []
+    for ibrick, brickname in enumerate(ubricknames[groups[rank]]):
+        print(f'Rank {rank:03d} is working on brick {brickname} ({ibrick+1:04d}/{len(ubricknames[groups[rank]]):04d})')
+        I = np.where(cat['BRICKNAME'] == brickname)[0]
+        _tractorphot_onebrick = tractorphot_onebrick(cat[I], region, RACOLUMN, DECCOLUMN)
+        assert(np.all(_tractorphot_onebrick['TARGETID'] == cat[I]['TARGETID']))
+        tractorphots.append(_tractorphot_onebrick)
+        
+    if len(tractorphots) > 0:            
+        tractorphot = vstack(tractorphots)
+
+    if comm:
+        tractorphot = comm.gather(tractorphot, root=0)
+
+    # sort and return
+    if rank == 0:
+        tractorphot = vstack(tractorphot)
+        tractorphot = tractorphot[geomask.match_to(tractorphot['TARGETID'], cat['TARGETID'])]
+        assert(np.all(tractorphot['TARGETID'] == cat['TARGETID']))
+        print(f'Total time: {(time.time()-t0)/60.:.3f} min')
+        return tractorphot
+
+
+def main():
+    """Main wrapper.
+
+    """
+    from desiutil.brick import brickname as get_brickname
+
+    try:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+    except ImportError:
+        comm = None
+
+    if comm is None:
+        rank, size = 0, 1
+    else:
+        rank, size = comm.rank, comm.size
+
+    if rank == 0:
+        print('Rank 0 started working.')
+        fastfile = '/dvs_ro/cfs/cdirs/desi/public/dr1/vac/dr1/fastspecfit/iron/v2.1/catalogs/fastspec-iron-main-bright.fits'
+        meta = Table(fitsio.read(fastfile, 'METADATA', columns=['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'RA', 'DEC']))#, rows=np.arange(1000))
+        print(f'Read {len(meta):,d} objects from {fastfile}')
+    
+        # North-South overlap regions
+        I1 = (meta['RA'] > 100.) * (meta['RA'] < 280.) * (meta['DEC'] > 32.5) * (meta['DEC'] < 34.5)
+        I2 = (meta['RA'] > 36.) * (meta['RA'] < 42.) * (meta['DEC'] > -1.3) * (meta['DEC'] < 1.3)
+        I3 = (meta['RA'] > 350.) * (meta['DEC'] > -1.3) * (meta['DEC'] < 1.3)
+        I4 = (meta['RA'] < 10.) * (meta['DEC'] > -1.3) * (meta['DEC'] < 1.3)
+        I5 = (meta['RA'] > 317.) * (meta['RA'] < 330.) * (meta['DEC'] > -1.3) * (meta['DEC'] < 1.3)
+        I6 = (meta['RA'] > 330.) * (meta['RA'] < 336.) * (meta['DEC'] > -1.3) * (meta['DEC'] < 1.3)
+        I = np.logical_or.reduce((I1, I2, I3, I4, I5, I6))
+        meta = meta[I]
+        print(f'Selected {len(meta):,d} objects in overlap regions from Dey+19.')
+    
+        # subselect objects with both north and south bricks
+        legacysurveydir = '/global/cfs/cdirs/cosmo/data/legacysurvey/dr9'
+        bricknames = get_brickname(meta['RA'], meta['DEC'])
+        meta['BRICKNAME'] = bricknames
+        ubricknames = np.unique(bricknames)
+        I = []
+        for ubrickname in ubricknames:
+            tractorfile_north = os.path.join(legacysurveydir, 'north', 'tractor', ubrickname[:3], f'tractor-{ubrickname}.fits')
+            tractorfile_south = os.path.join(legacysurveydir, 'south', 'tractor', ubrickname[:3], f'tractor-{ubrickname}.fits')
+            if os.path.isfile(tractorfile_north) and os.path.isfile(tractorfile_south):
+                I.append(np.where(ubrickname == bricknames)[0])
+        I = np.sort(np.hstack(I))
+        print(f'Found {len(I):,d} objects with north and south Tractor catalogs.')
+        meta = meta[I]
+    else:
+        meta = Table()
+
+    if comm:
+        meta = comm.bcast(meta, root=0)        
+
+    if rank == 0:
+        print(f'Gathering north Tractor photometry for {len(meta):,d} objects.')
+    north = tractorphot(meta, 'north', comm=comm)
+
+    if rank == 0:
+        print(f'Gathering south Tractor photometry for {len(meta):,d} objects.')
+    south = tractorphot(meta, 'south', comm=comm)
+
+    if comm:
+        comm.barrier()
+
+    # write out on rank 0
+    if rank == 0:
+        metafile = '/global/cfs/cdirs/desicollab/users/ioannis/fastspecfit/northsouth/metadata-iron-main-bright.fits'
+        northfile = '/global/cfs/cdirs/desicollab/users/ioannis/fastspecfit/northsouth/tractor-iron-main-bright-north.fits'
+        southfile = '/global/cfs/cdirs/desicollab/users/ioannis/fastspecfit/northsouth/tractor-iron-main-bright-south.fits'
+
+        # require 3-band photometry in both surveys
+        I = ((north['FLUX_G'] > 0.) * (north['FLUX_R'] > 0.) * (north['FLUX_Z'] > 0.) *
+             (south['FLUX_G'] > 0.) * (south['FLUX_R'] > 0.) * (south['FLUX_Z'] > 0.))
+        meta = meta[I]
+        north = north[I]
+        south = south[I]
+        
+        for ff, cc in zip([metafile, northfile, southfile], [meta, north, south]):
+            assert(np.all(cc['TARGETID'] == meta['TARGETID']))
+            print(f'Writing {len(cc):,d} objects to {ff}')
+            cc.write(ff, overwrite=True)
+
+
+if __name__ == '__main__':
+    main()
+
+
+
