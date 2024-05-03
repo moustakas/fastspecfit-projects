@@ -1,0 +1,241 @@
+#!/usr/bin/env python
+
+"""Synthesize optical photometry from the rest-frame DESI spectrum and
+corresponding FastSpecFit model.
+
+It takes roughly XX minutes in an interactive node with 128 MPI taks:
+
+salloc -N 1 -C cpu -A desi -t 01:00:00 --qos interactive
+
+source /global/common/software/desi/desi_environment.sh main
+module load fastspecfit/2.5.2
+
+time srun --network=no_vni --ntasks=128 $HOME/code/desihub/fastspecfit-projects/ewhaimf/mpi-synthphot
+
+"""
+import os, time, pdb
+import fitsio
+import numpy as np
+from astropy.table import Table, vstack
+
+from desiutil.log import get_logger
+log = get_logger()
+
+projectdir = '/global/cfs/cdirs/desicollab/users/ioannis/fastspecfit/ewhaimf'
+
+def synthphot_onehealpix(allfast, dluminosity, restmodelwave, templateflux,
+                         specprod='iron'):
+    """Compute data and model photometry for all objects on a single healpixel.
+
+    """
+    from speclite import filters    
+    from desispec.io.spectra import read_spectra_parallel
+    from desispec.coaddition import coadd_cameras    
+    from desispec.resolution import Resolution    
+    from fastspecfit.emlines import EMFitTools
+    from fastspecfit.continuum import ContinuumTools
+    from fastspecfit.io import FLUXNORM
+    #from fastspecfit.util import trapz_rebin
+
+    # Read the filter curves and initialize the output table.
+    filt = filters.load_filters('decam2014-g', 'decam2014-r', 'decam2014-z')
+    nfilt = len(filt)
+
+    phot = allfast['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'Z']
+    colnames = []
+    modelcolnames = []
+    for band in filt.names:
+        col = band.replace('-', '_').upper()
+        modelcol = f'MODEL_{col}'
+        colnames.append(col)
+        modelcolnames.append(modelcol)
+        phot[col] = np.zeros(len(allfast), 'f4')
+        phot[modelcol] = np.zeros(len(allfast), 'f4')
+
+    # Instantiate the fastspecfit classes we need to reconstruct the model.
+    EMFit = EMFitTools()
+    CTools = ContinuumTools()
+
+    # Read the data.
+    rdspec_kwargs = {'skip_hdus': ['EXP_FIBERMAP', 'SCORES', 'EXTRA_CATALOG']} # 'RESOLUTION'
+    spec = read_spectra_parallel(allfast, prefix='coadd', specprod=specprod,
+                                 nproc=1, rdspec_kwargs=rdspec_kwargs)
+    coadd_spec = coadd_cameras(spec)
+    bands = coadd_spec.bands[0]
+
+    obswave = coadd_spec.wave[bands]
+    obsflux = coadd_spec.flux[bands] # [nobj,npix]
+    maxwave = np.max(obswave)
+
+    # Unfortunately, we have to loop because every object is at a different redshift...
+    for iobj, fast in enumerate(allfast):
+
+        oneplusz = 1. + fast['Z']
+        T = oneplusz * (4. * np.pi * (1e6 * dluminosity[iobj])**2) / FLUXNORM
+        
+        restwave = obswave / oneplusz
+        restflux = obsflux[iobj, :] * T
+
+        padrestflux, padrestwave = filt.pad_spectrum(restflux, restwave, axis=0, method='edge')
+        restmaggies = filt.get_ab_maggies(padrestflux, padrestwave)
+        restmaggies = restmaggies.as_array().tolist()[0]
+
+        # Build the fastspecfit model.
+        obsmodelflux, _ = CTools.templates2data(templateflux, restmodelwave,
+                                                dluminosity=dluminosity[iobj],
+                                                redshift=fast['Z'], synthphot=False,
+                                                vdisp=fast['VDISP'], coeff=fast['COEFF'])
+        obstemplatewave = restmodelwave * oneplusz
+
+        W = np.where(obstemplatewave <= maxwave)[0]
+        R = Resolution(np.ones((1, len(W)))) # Hack!
+
+        emspectrum = EMFit.emlinemodel_bestfit([obstemplatewave[W]], [R], fast, snrcut=2.)[0]
+        obsmodelflux[W] += emspectrum
+
+        restmodelflux = obsmodelflux * T
+        restmodelmaggies = filt.get_ab_maggies(restmodelflux, restmodelwave)        
+        restmodelmaggies = restmodelmaggies.as_array().tolist()[0]
+
+        # Pack up the results.
+        for ifilt, (col, modelcol) in enumerate(zip(colnames, modelcolnames)):
+            if restmaggies[ifilt] > 0:
+                phot[iobj][col] = -2.5 * np.log10(restmaggies[ifilt])
+            if restmodelmaggies[ifilt] > 0:
+                phot[iobj][modelcol] = -2.5 * np.log10(restmodelmaggies[ifilt])
+
+    return phot
+
+
+def synthphot(fast, comm=None, specprod='iron'):
+    """Synthesize rest-frame photometry for all objects.
+
+    """
+    from desispec.parallel import weighted_partition
+    from fastspecfit.io import cache_templates
+
+    if comm is None:
+        rank, size = 0, 1
+    else:
+        rank, size = comm.rank, comm.size
+
+    # Parallelize over healpixels.
+    if rank == 0:
+        t0 = time.time()
+        uhealpix, nperhealpix = np.unique(fast['HEALPIX'].data, return_counts=True)
+        groups = weighted_partition(nperhealpix, size)
+
+        from fastspecfit.util import TabulatedDESI
+        cosmo = TabulatedDESI()    
+        dluminosity = cosmo.luminosity_distance(fast['Z'].data)
+    else:
+        uhealpix = np.array([])
+        groups = [np.array([])]
+        dluminosity = np.array([])
+
+    # Broadcast the work to the other ranks.
+    if comm:
+        uhealpix = comm.bcast(uhealpix, root=0)
+        groups = comm.bcast(groups, root=0)
+        dluminosity = comm.bcast(dluminosity, root=0)
+
+    # Read the model templates.
+    templatecache = cache_templates(log=log)
+    restmodelwave = templatecache['templatewave']
+    templateflux = templatecache['templateflux']
+    del templatecache
+
+    phot = []
+    for ipix, healpix in enumerate(uhealpix[groups[rank]]):
+        log.info(f'Rank {rank:03d} is working on healpix {healpix} ({ipix+1:04d}/{len(uhealpix[groups[rank]]):04d})')
+        I = np.where(fast['HEALPIX'] == healpix)[0]
+        _phot = synthphot_onehealpix(fast[I], dluminosity[I], restmodelwave, templateflux, specprod)
+        phot.append(_phot)
+    if len(phot) > 0:
+        phot = vstack(phot)
+
+    # Gather the results from all the ranks, sort, and return.
+    if comm:
+        phot = comm.gather(phot, root=0)
+
+    if rank == 0:
+        from desitarget import geomask
+        
+        if len(phot) > 0:
+            phot = vstack(phot)
+            
+        fastkey = [f'{ss}-{pp}-{hh}-{tt}' for ss, pp, hh, tt in zip(fast['SURVEY'], fast['PROGRAM'], fast['HEALPIX'], fast['TARGETID'])]
+        photkey = [f'{ss}-{pp}-{hh}-{tt}' for ss, pp, hh, tt in zip(phot['SURVEY'], phot['PROGRAM'], phot['HEALPIX'], phot['TARGETID'])]
+        phot = phot[geomask.match_to(photkey, fastkey)]
+        assert(np.all(phot['TARGETID'] == fast['TARGETID']))
+        
+        log.info(f'Total time: {(time.time()-t0)/60.:.3f} min')
+        return phot
+
+
+def main():
+    """Main wrapper.
+
+    """
+    try:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+    except ImportError:
+        comm = None
+
+    if comm is None:
+        rank, size = 0, 1
+    else:
+        rank, size = comm.rank, comm.size
+
+    specprod = 'iron'
+
+    if rank == 0:
+        from importlib import resources
+        from desispec.io.meta import get_desi_root_readonly
+        
+        log.info('Rank 0 started working.')
+
+        # Only read the columns we need.
+        fastfile = os.path.join(get_desi_root_readonly(), 'public', 'dr1', 'vac', 'dr1', 'fastspecfit',
+                                specprod, 'v2.1', 'catalogs', f'fastspec-{specprod}-main-bright.fits')
+
+        fastcols = ['SURVEY', 'PROGRAM', 'HEALPIX', 'TARGETID', 'Z', 'VDISP', 'COEFF']
+
+        emlinesfile = resources.files('fastspecfit').joinpath('data/emlines.ecsv')
+        emlines = Table.read(emlinesfile)
+        for linename in emlines['name']:
+            fastcols += [f'{linename.upper()}_{param}' for param in ['MODELAMP', 'AMP', 'AMP_IVAR', 'SIGMA', 'VSHIFT']]
+        fastcols += ['MGII_DOUBLET_RATIO', 'OII_DOUBLET_RATIO', 'SII_DOUBLET_RATIO']
+
+        fast = Table(fitsio.read(fastfile, 'FASTSPEC', columns=fastcols, rows=np.arange(1000)))
+
+        # Require non-zero continuum coefficients and a basic upper redshift cut.
+        I = (fast['Z'] < 0.5) * (np.sum(fast['COEFF'] > 0, axis=1) > 0)
+        fast = fast[I]
+        log.info(f'Read {len(fast):,d} objects from {fastfile}')
+        
+    else:
+        fast = Table()
+
+    # Broadcast the parent sample to all the ranks and then run the main code.
+    if comm:
+        fast = comm.bcast(fast, root=0)        
+    phot = synthphot(fast, comm=comm, specprod=specprod)
+
+    # Wait for all the ranks to finish.
+    if comm:
+        comm.barrier()
+
+    # Write out on rank 0.
+    if rank == 0:
+        photfile = os.path.join(projectdir, 'ewhaimf-photometry.fits')
+        log.info(f'Writing {len(phot):,d} objects to {photfile}')
+        phot.write(photfile, overwrite=True)
+
+
+if __name__ == '__main__':
+    main()
+
+
+
