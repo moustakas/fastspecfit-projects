@@ -137,7 +137,7 @@ def main():
                 cmd += f'--fphotodir {fphotodir} --fphotofile {fphotofile} --maxphotwave {maxphotwave} '
                 cmd += f'--emline_snrmin 1.0 --nsmoothspec 2'
                 if args.ntargets:
-                    cmd += ' --ntargets {}'.format(args.ntargets)
+                    cmd += f' --ntargets {args.ntargets}'
                 if args.overwrite:
                     cmd += ' --overwrite'
                 #log.info('HACK!!!')
