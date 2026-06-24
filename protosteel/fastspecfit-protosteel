@@ -32,7 +32,7 @@ Example usage (on Perlmutter):
   time ./fastspecfit-protosteel --fastspec --vi-redshifts --mp 128
 
 """
-import os, subprocess
+import os
 import numpy as np
 import fitsio
 from astropy.table import Table
@@ -381,19 +381,20 @@ def fastspec_qa(fastphot=False, vi_redshifts=False, coadd_type='healpix', mp=1,
             log.warning(f'FastSpec file not found, skipping QA: {fastfile}')
             continue
 
-        cmd = (
-            f'fastspecfit-qa {fastfile} -o {outdir}'
+        from fastspecfit.qa import fastqa
+        cmdargs = (
+            f'{fastfile} -o {outdir}'
             f' --redrockfiles {redrockfile}'
             f' --mp {mp}'
             f' --fphotodir {fphotodir}'
             f' --fphotofile {fphotofile}'
         )
         if ntargets:
-            cmd += f' --ntargets {ntargets}'
+            cmdargs += f' --ntargets {ntargets}'
         if overwrite:
-            cmd += ' --overwrite'
-        log.info(cmd)
-        subprocess.run(cmd.split(), check=True)
+            cmdargs += ' --overwrite'
+        log.info(f'fastqa {cmdargs}')
+        fastqa(args=cmdargs.split())
 
 
 def build_qa_html(fastphot=False, vi_redshifts=False, coadd_type='healpix'):
