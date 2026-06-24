@@ -75,18 +75,27 @@ def _specprod_dir(coaddfile):
     raise ValueError(f'Cannot determine coadd type from path: {coaddfile}')
 
 
-def _outdir(prefix):
-    """Return the top-level output directory for a given run prefix."""
-    return os.path.join(projectdir, selection, prefix)
+def _outdir(prefix, coadd_type=None):
+    """Return the top-level output directory for a given run prefix.
+
+    Healpix paths need an explicit 'healpix' subdirectory because the path
+    remainder after specprod_dir starts with the survey name, not 'healpix'.
+    Cumulative paths already carry 'cumulative/' from the tiles directory
+    structure, so no extra subdirectory is added.
+    """
+    base = os.path.join(projectdir, selection, prefix)
+    if coadd_type == 'healpix':
+        return os.path.join(base, 'healpix')
+    return base
 
 
-def _outfile(redrockfile, prefix, specprod_dir):
+def _outfile(redrockfile, prefix, specprod_dir, coadd_type=None):
     """Derive the FastSpecFit output path from a redrock file path.
 
     Mirrors the convention in fastspecfit.mpi.plan:
       outfile = redrockfile.replace(specprod_dir, outdir).replace('redrock-', f'{prefix}-')
     """
-    outdir = _outdir(prefix)
+    outdir = _outdir(prefix, coadd_type=coadd_type)
     fastfile = redrockfile.replace(specprod_dir, outdir).replace('redrock-', f'{prefix}-')
     if not prefix.startswith('fastphot'):
         fastfile += '.gz'
@@ -218,7 +227,7 @@ def run_fastspec(targetids=None, fastphot=False, vi_redshifts=False,
             log.warning(f'Redrock file not found: {redrockfile}')
             continue
 
-        fastfile = _outfile(redrockfile, prefix, specprod_dir)
+        fastfile = _outfile(redrockfile, prefix, specprod_dir, coadd_type=coadd_type)
         os.makedirs(os.path.dirname(fastfile), exist_ok=True)
 
         if os.path.isfile(fastfile) and not overwrite:
@@ -296,14 +305,14 @@ def merge_fastspec(mp=1, vi_redshifts=False, fastphot=False, coadd_type='healpix
                 os.path.basename(orig_coaddfile).replace('coadd-', 'redrock-'),
             )
             specprod_dir = _specprod_dir(orig_coaddfile)
-            fastfile = _outfile(redrockfile, prefix, specprod_dir)
+            fastfile = _outfile(redrockfile, prefix, specprod_dir, coadd_type=coadd_type)
             if os.path.isfile(fastfile):
                 fastfiles.append(fastfile)
             else:
                 log.warning(f'FastSpec file not found, skipping: {fastfile}')
     else:
         for redrockfile, tiles_dir in _get_cumulative_redrockfiles():
-            fastfile = _outfile(redrockfile, prefix, tiles_dir)
+            fastfile = _outfile(redrockfile, prefix, tiles_dir, coadd_type=coadd_type)
             if os.path.isfile(fastfile):
                 fastfiles.append(fastfile)
             else:
@@ -344,7 +353,6 @@ def fastspec_qa(fastphot=False, vi_redshifts=False, coadd_type='healpix', mp=1,
         prefix += '-vi'
 
     qadir = os.path.join(projectdir, selection, f'qa-{prefix}')
-    os.makedirs(qadir, exist_ok=True)
 
     if coadd_type == 'healpix':
         _, fspec = read_catalog(vi_redshifts=vi_redshifts)
@@ -355,15 +363,17 @@ def fastspec_qa(fastphot=False, vi_redshifts=False, coadd_type='healpix', mp=1,
                 os.path.basename(orig_coaddfile).replace('coadd-', 'redrock-'),
             )
             specprod_dir = _specprod_dir(orig_coaddfile)
-            fastfile = _outfile(redrockfile, prefix, specprod_dir)
-            pairs.append((redrockfile, fastfile))
+            fastfile = _outfile(redrockfile, prefix, specprod_dir, coadd_type=coadd_type)
+            outdir = os.path.dirname(fastfile).replace(_outdir(prefix), qadir)
+            pairs.append((redrockfile, fastfile, outdir))
     else:
-        pairs = [
-            (rr, _outfile(rr, prefix, td))
-            for rr, td in _get_cumulative_redrockfiles()
-        ]
+        pairs = []
+        for rr, td in _get_cumulative_redrockfiles():
+            fastfile = _outfile(rr, prefix, td, coadd_type=coadd_type)
+            outdir = os.path.dirname(fastfile).replace(_outdir(prefix), qadir)
+            pairs.append((rr, fastfile, outdir))
 
-    for redrockfile, fastfile in pairs:
+    for redrockfile, fastfile, outdir in pairs:
         if not os.path.isfile(redrockfile):
             log.warning(f'Redrock file not found: {redrockfile}')
             continue
@@ -372,7 +382,7 @@ def fastspec_qa(fastphot=False, vi_redshifts=False, coadd_type='healpix', mp=1,
             continue
 
         cmd = (
-            f'fastspecfit-qa {fastfile} -o {qadir}'
+            f'fastspecfit-qa {fastfile} -o {outdir}'
             f' --redrockfiles {redrockfile}'
             f' --mp {mp}'
             f' --fphotodir {fphotodir}'
