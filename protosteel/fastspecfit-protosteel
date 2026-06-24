@@ -451,6 +451,23 @@ def build_qa_html(fastphot=False, vi_redshifts=False, coadd_type='healpix'):
                                 'targetid': targetid,
                                 'path': os.path.relpath(png, start=root),
                             })
+    elif coadd_type == 'cumulative':
+        for tile in sorted(os.scandir(root), key=lambda e: e.name):
+            if not tile.is_dir():
+                continue
+            for night in sorted(os.scandir(tile.path), key=lambda e: e.name):
+                if not night.is_dir():
+                    continue
+                for png in sorted(_glob(os.path.join(night.path, '*.png'))):
+                    targetid = os.path.basename(png).replace('.png', '').split('-')[-1]
+                    records.append({
+                        'survey': '',
+                        'program': '',
+                        'group': tile.name,
+                        'healpix': night.name,
+                        'targetid': targetid,
+                        'path': os.path.relpath(png, start=root),
+                    })
 
     log.info(f'Found {len(records)} QA PNGs under {root}')
     if not records:
@@ -459,6 +476,19 @@ def build_qa_html(fastphot=False, vi_redshifts=False, coadd_type='healpix'):
 
     title = f'ProtoSTEEL QA · {prefix} · {version}'
     manifest_json = json.dumps(records, separators=(',', ':'))
+
+    if coadd_type == 'healpix':
+        labels_json = json.dumps({
+            'l1': 'group', 'l1p': 'groups', 'l1_title': 'Healpix groups',
+            'l2': 'pixel', 'l2p': 'pixels', 'l2_title': 'Healpix pixels',
+            'search_hint': 'healpix or targetid',
+        })
+    else:
+        labels_json = json.dumps({
+            'l1': 'tile', 'l1p': 'tiles', 'l1_title': 'Tiles',
+            'l2': 'thrunight', 'l2p': 'thrunights', 'l2_title': 'Thrunights',
+            'search_hint': 'tile or targetid',
+        })
 
     # Use placeholder substitution to avoid f-string brace escaping in CSS/JS.
     template = """\
@@ -485,17 +515,19 @@ h3{margin:.8em 0 .3em;font-size:.9em;color:#555;text-transform:uppercase;letter-
 </head>
 <body>
 <h1>__TITLE__</h1>
-<input type="text" id="search" placeholder="search healpix or targetid…" oninput="doSearch()">
+<input type="text" id="search" placeholder="search __SEARCH_HINT__…" oninput="doSearch()">
 <div id="nav"></div>
 <div id="content"></div>
 <script>
 const DATA=__DATA__;
+const L=__LABELS__;
 const byGroup={};
 DATA.forEach(r=>{
   if(!byGroup[r.group])byGroup[r.group]={};
   if(!byGroup[r.group][r.healpix])byGroup[r.group][r.healpix]=[];
   byGroup[r.group][r.healpix].push(r);
 });
+function breadcrumb(parts){return parts.filter(Boolean).join(' / ');}
 function showRoot(){
   document.getElementById('search').value='';
   document.getElementById('nav').innerHTML='';
@@ -504,7 +536,7 @@ function showRoot(){
   groups.forEach(g=>{
     const pix=Object.keys(byGroup[g]);
     const n=pix.reduce((s,p)=>s+byGroup[g][p].length,0);
-    h+=`<div class="row" onclick="showGroup('${g}')">${g} · ${pix.length} pixel${pix.length>1?'s':''} · ${n} spectra</div>`;
+    h+=`<div class="row" onclick="showGroup('${g}')">${g} · ${pix.length} ${pix.length>1?L.l2p:L.l2} · ${n} spectra</div>`;
   });
   document.getElementById('content').innerHTML=h||'<p>No QA files found.</p>';
 }
@@ -512,7 +544,7 @@ function showGroup(g){
   document.getElementById('search').value='';
   const r0=Object.values(byGroup[g])[0][0];
   document.getElementById('nav').innerHTML=
-    `<a href="#" onclick="showRoot()">‹ groups</a>   ${r0.survey} / ${r0.program} / ${g}`;
+    `<a href="#" onclick="showRoot()">‹ ${L.l1p}</a>   ${breadcrumb([r0.survey,r0.program,g])}`;
   const pix=Object.keys(byGroup[g]).sort((a,b)=>+a-+b);
   let h='';
   pix.forEach(p=>{
@@ -525,9 +557,9 @@ function showPixel(g,p){
   document.getElementById('search').value='';
   const recs=byGroup[g][p],r0=recs[0];
   document.getElementById('nav').innerHTML=
-    `<a href="#" onclick="showRoot()">‹ groups</a>  `+
+    `<a href="#" onclick="showRoot()">‹ ${L.l1p}</a>  `+
     `<a href="#" onclick="showGroup('${g}')">‹ ${g}</a>  `+
-    `${r0.survey} / ${r0.program} / ${g} / ${p} · ${recs.length} spectra`;
+    `${breadcrumb([r0.survey,r0.program,g,p])} · ${recs.length} spectra`;
   let h='<div class="grid">';
   recs.forEach(r=>{
     h+=`<div class="thumb"><a href="${r.path}" target="_blank"><img src="${r.path}" loading="lazy"><div class="tid">${r.targetid}</div></a></div>`;
@@ -541,27 +573,27 @@ function doSearch(){
   let h='';
   const mg=Object.keys(byGroup).filter(g=>g.includes(q)).sort((a,b)=>+a-+b);
   if(mg.length){
-    h+='<h3>Healpix groups</h3>';
+    h+=`<h3>${L.l1_title}</h3>`;
     mg.forEach(g=>{
       const pix=Object.keys(byGroup[g]);
       const n=pix.reduce((s,p)=>s+byGroup[g][p].length,0);
-      h+=`<div class="row" onclick="showGroup('${g}')">${g} · ${pix.length} pixels · ${n} spectra</div>`;
+      h+=`<div class="row" onclick="showGroup('${g}')">${g} · ${pix.length} ${L.l2p} · ${n} spectra</div>`;
     });
   }
   const mp=[];
   Object.keys(byGroup).forEach(g=>Object.keys(byGroup[g]).forEach(p=>{if(p.includes(q))mp.push([g,p]);}));
   if(mp.length){
-    h+='<h3>Healpix pixels</h3>';
+    h+=`<h3>${L.l2_title}</h3>`;
     mp.sort((a,b)=>+a[1]-+b[1]).forEach(([g,p])=>{
       const n=byGroup[g][p].length;
-      h+=`<div class="row" onclick="showPixel('${g}','${p}')">${p} (group ${g}) · ${n} spectra</div>`;
+      h+=`<div class="row" onclick="showPixel('${g}','${p}')">${p} (${L.l1} ${g}) · ${n} spectra</div>`;
     });
   }
   const mt=DATA.filter(r=>r.targetid.includes(q));
   if(mt.length){
     h+=`<h3>Targets (${mt.length}${mt.length>50?' — showing first 50':''})</h3>`;
     mt.slice(0,50).forEach(r=>{
-      h+=`<div class="row"><a href="${r.path}" target="_blank">${r.targetid}</a>   healpix ${r.healpix}</div>`;
+      h+=`<div class="row"><a href="${r.path}" target="_blank">${r.targetid}</a>   ${L.l1} ${r.group}</div>`;
     });
   }
   document.getElementById('content').innerHTML=h||`<p>No results for “${q}”.</p>`;
@@ -571,7 +603,11 @@ showRoot();
 </body>
 </html>"""
 
-    html = template.replace('__TITLE__', title).replace('__DATA__', manifest_json)
+    html = (template
+            .replace('__TITLE__', title)
+            .replace('__SEARCH_HINT__', json.loads(labels_json)['search_hint'])
+            .replace('__DATA__', manifest_json)
+            .replace('__LABELS__', labels_json))
     htmlfile = os.path.join(root, 'index.html')
     with open(htmlfile, 'w') as f:
         f.write(html)
