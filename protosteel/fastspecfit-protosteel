@@ -396,6 +396,187 @@ def fastspec_qa(fastphot=False, vi_redshifts=False, coadd_type='healpix', mp=1,
         subprocess.run(cmd.split(), check=True)
 
 
+def build_qa_html(fastphot=False, vi_redshifts=False, coadd_type='healpix'):
+    """Build an HTML navigation page for the QA PNG figures.
+
+    Walks the QA directory, builds a JSON manifest of all PNG files, and
+    writes a single self-contained ``index.html`` with client-side navigation
+    and search (no server required).
+
+    Parameters
+    ----------
+    fastphot : bool
+        If True, build the page for fastphot QA outputs.
+    vi_redshifts : bool
+        If True, build the page for VI-redshift refit QA outputs.
+    coadd_type : str
+        Either ``'healpix'`` (default) or ``'cumulative'``.
+    """
+    import json
+    from glob import glob as _glob
+
+    prefix = 'fastphot' if fastphot else 'fastspec'
+    if vi_redshifts:
+        prefix += '-vi'
+
+    qadir = os.path.join(projectdir, selection, f'qa-{prefix}')
+    root = os.path.join(qadir, coadd_type)
+
+    if not os.path.isdir(root):
+        log.warning(f'QA directory not found: {root}')
+        return
+
+    records = []
+    if coadd_type == 'healpix':
+        for sv in sorted(os.scandir(root), key=lambda e: e.name):
+            if not sv.is_dir():
+                continue
+            for prog in sorted(os.scandir(sv.path), key=lambda e: e.name):
+                if not prog.is_dir():
+                    continue
+                for grp in sorted(os.scandir(prog.path), key=lambda e: e.name):
+                    if not grp.is_dir():
+                        continue
+                    for hpx in sorted(os.scandir(grp.path), key=lambda e: e.name):
+                        if not hpx.is_dir():
+                            continue
+                        for png in sorted(_glob(os.path.join(hpx.path, '*.png'))):
+                            targetid = os.path.basename(png).replace('.png', '').split('-')[-1]
+                            records.append({
+                                'survey': sv.name,
+                                'program': prog.name,
+                                'group': grp.name,
+                                'healpix': hpx.name,
+                                'targetid': targetid,
+                                'path': os.path.relpath(png, start=root),
+                            })
+
+    log.info(f'Found {len(records)} QA PNGs under {root}')
+    if not records:
+        log.warning('No QA files found; run --qa first.')
+        return
+
+    title = f'ProtoSTEEL QA · {prefix} · {version}'
+    manifest_json = json.dumps(records, separators=(',', ':'))
+
+    # Use placeholder substitution to avoid f-string brace escaping in CSS/JS.
+    template = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>__TITLE__</title>
+<style>
+body{font-family:sans-serif;max-width:1000px;margin:0 auto;padding:1em;color:#333}
+h1{font-size:1.15em;border-bottom:1px solid #ccc;padding-bottom:.3em}
+#search{width:100%;box-sizing:border-box;padding:.5em;font-size:1em;margin-bottom:.75em}
+#nav{margin-bottom:.6em;font-size:.9em;color:#555}
+.row{padding:.4em .5em;border-bottom:1px solid #eee;cursor:pointer}
+.row:hover{background:#f5f5f5}
+.grid{display:flex;flex-wrap:wrap;gap:.5em;margin-top:.5em}
+.thumb{width:180px;text-align:center}
+.thumb img{width:180px;border:1px solid #ddd;display:block}
+.tid{font-size:.65em;color:#666;word-break:break-all;margin-top:.2em}
+a{color:#0066cc;text-decoration:none}
+a:hover{text-decoration:underline}
+h3{margin:.8em 0 .3em;font-size:.9em;color:#555;text-transform:uppercase;letter-spacing:.05em}
+</style>
+</head>
+<body>
+<h1>__TITLE__</h1>
+<input type="text" id="search" placeholder="search healpix or targetid…" oninput="doSearch()">
+<div id="nav"></div>
+<div id="content"></div>
+<script>
+const DATA=__DATA__;
+const byGroup={};
+DATA.forEach(r=>{
+  if(!byGroup[r.group])byGroup[r.group]={};
+  if(!byGroup[r.group][r.healpix])byGroup[r.group][r.healpix]=[];
+  byGroup[r.group][r.healpix].push(r);
+});
+function showRoot(){
+  document.getElementById('search').value='';
+  document.getElementById('nav').innerHTML='';
+  const groups=Object.keys(byGroup).sort((a,b)=>+a-+b);
+  let h='';
+  groups.forEach(g=>{
+    const pix=Object.keys(byGroup[g]);
+    const n=pix.reduce((s,p)=>s+byGroup[g][p].length,0);
+    h+=`<div class="row" onclick="showGroup('${g}')">${g} · ${pix.length} pixel${pix.length>1?'s':''} · ${n} spectra</div>`;
+  });
+  document.getElementById('content').innerHTML=h||'<p>No QA files found.</p>';
+}
+function showGroup(g){
+  document.getElementById('search').value='';
+  const r0=Object.values(byGroup[g])[0][0];
+  document.getElementById('nav').innerHTML=
+    `<a href="#" onclick="showRoot()">‹ groups</a>   ${r0.survey} / ${r0.program} / ${g}`;
+  const pix=Object.keys(byGroup[g]).sort((a,b)=>+a-+b);
+  let h='';
+  pix.forEach(p=>{
+    const n=byGroup[g][p].length;
+    h+=`<div class="row" onclick="showPixel('${g}','${p}')">${p} · ${n} spectr${n>1?'a':'um'}</div>`;
+  });
+  document.getElementById('content').innerHTML=h;
+}
+function showPixel(g,p){
+  document.getElementById('search').value='';
+  const recs=byGroup[g][p],r0=recs[0];
+  document.getElementById('nav').innerHTML=
+    `<a href="#" onclick="showRoot()">‹ groups</a>  `+
+    `<a href="#" onclick="showGroup('${g}')">‹ ${g}</a>  `+
+    `${r0.survey} / ${r0.program} / ${g} / ${p} · ${recs.length} spectra`;
+  let h='<div class="grid">';
+  recs.forEach(r=>{
+    h+=`<div class="thumb"><a href="${r.path}" target="_blank"><img src="${r.path}" loading="lazy"><div class="tid">${r.targetid}</div></a></div>`;
+  });
+  document.getElementById('content').innerHTML=h+'</div>';
+}
+function doSearch(){
+  const q=document.getElementById('search').value.trim();
+  if(!q){showRoot();return;}
+  document.getElementById('nav').innerHTML='';
+  let h='';
+  const mg=Object.keys(byGroup).filter(g=>g.includes(q)).sort((a,b)=>+a-+b);
+  if(mg.length){
+    h+='<h3>Healpix groups</h3>';
+    mg.forEach(g=>{
+      const pix=Object.keys(byGroup[g]);
+      const n=pix.reduce((s,p)=>s+byGroup[g][p].length,0);
+      h+=`<div class="row" onclick="showGroup('${g}')">${g} · ${pix.length} pixels · ${n} spectra</div>`;
+    });
+  }
+  const mp=[];
+  Object.keys(byGroup).forEach(g=>Object.keys(byGroup[g]).forEach(p=>{if(p.includes(q))mp.push([g,p]);}));
+  if(mp.length){
+    h+='<h3>Healpix pixels</h3>';
+    mp.sort((a,b)=>+a[1]-+b[1]).forEach(([g,p])=>{
+      const n=byGroup[g][p].length;
+      h+=`<div class="row" onclick="showPixel('${g}','${p}')">${p} (group ${g}) · ${n} spectra</div>`;
+    });
+  }
+  const mt=DATA.filter(r=>r.targetid.includes(q));
+  if(mt.length){
+    h+=`<h3>Targets (${mt.length}${mt.length>50?' — showing first 50':''})</h3>`;
+    mt.slice(0,50).forEach(r=>{
+      h+=`<div class="row"><a href="${r.path}" target="_blank">${r.targetid}</a>   healpix ${r.healpix}</div>`;
+    });
+  }
+  document.getElementById('content').innerHTML=h||`<p>No results for “${q}”.</p>`;
+}
+showRoot();
+</script>
+</body>
+</html>"""
+
+    html = template.replace('__TITLE__', title).replace('__DATA__', manifest_json)
+    htmlfile = os.path.join(root, 'index.html')
+    with open(htmlfile, 'w') as f:
+        f.write(html)
+    log.info(f'Wrote {htmlfile}')
+
+
 def main():
     """Main entry point."""
     import argparse
@@ -419,6 +600,8 @@ def main():
                         help='Merge per-coadd outputs into a single catalog.')
     parser.add_argument('--qa', action='store_true',
                         help='Build FastSpecFit QA figures.')
+    parser.add_argument('--html', action='store_true',
+                        help='Build HTML navigation page for QA figures.')
 
     parser.add_argument('--coadd-type', choices=['healpix', 'cumulative'], default='healpix',
                         help='Coadd type to process.')
@@ -445,6 +628,10 @@ def main():
         fastspec_qa(fastphot=args.fastphot, vi_redshifts=args.vi_redshifts,
                     coadd_type=args.coadd_type, mp=args.mp,
                     ntargets=args.ntargets, overwrite=args.overwrite)
+
+    if args.html:
+        build_qa_html(fastphot=args.fastphot, vi_redshifts=args.vi_redshifts,
+                      coadd_type=args.coadd_type)
 
 
 if __name__ == '__main__':
