@@ -115,11 +115,22 @@ Each arm is written to `$RUNDIR/<arm>/iron/` and merged into
 `$RUNDIR/<arm>/iron/catalogs/fastspec-iron-emfit.fits`. `compare-emfit` picks up
 whichever arms exist, so it can be run before all of them finish.
 
-Cost: about 41,000 objects spread over roughly 25,000 healpix files, so
-per-file I/O is comparable to the fitting time (about 8 s/object/core for
-bright-time targets). The Slurm script asks for 4 nodes and 4 hours for the
-five arms; this is an estimate, and the job resumes where it stopped if
-resubmitted.
+Cost: 40,897 objects in 16,885 healpix files, at about 14 s per file (mean
+from job 59592459, which was heavily oversubscribed). The Slurm script runs
+the five arms concurrently, one node each, without MPI (`--nompi --mp=128`),
+which should take roughly half an hour per arm; it asks for 2 hours. The job
+resumes where it stopped if resubmitted. Each arm has its own log in
+`$RUNDIR/fastspec-emfit-<arm>-<jobid>.log`.
+
+MPI is avoided because in job 59592459 all 32 `srun` tasks came up as
+independent "rank 0" processes, each fitting the whole sample. The cause is
+not yet known; `mpi-fastspecfit` silently falls back to no MPI when
+`from mpi4py import MPI` fails. To check, in an interactive allocation with
+the same environment:
+
+```bash
+srun -n 4 python -c "from mpi4py import MPI; print(MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size)"
+```
 
 ## Output of `compare-emfit`
 

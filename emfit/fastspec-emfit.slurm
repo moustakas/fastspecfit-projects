@@ -4,8 +4,8 @@
 #SBATCH --constraint=cpu
 #SBATCH --mail-user=jmoustakas@siena.edu
 #SBATCH --mail-type=ALL
-#SBATCH --nodes=4
-#SBATCH --time=04:00:00
+#SBATCH --nodes=5
+#SBATCH --time=02:00:00
 #SBATCH --job-name=fastspec-emfit
 #SBATCH --output=fastspec-emfit-%j.log
 
@@ -13,19 +13,24 @@
 # smooth-cont branch of fastspecfit, once per "arm". Each arm is fit and then
 # merged into ${rundir}/${arm}/iron/catalogs/fastspec-iron-emfit.fits.
 #
+# The arms run concurrently, one node each, without MPI: a single process per
+# node with one multiprocessing worker per physical core, each fitting one
+# healpix file at a time. (With MPI, job 59592459 launched 32 independent
+# "rank 0" processes which all fit the full sample.)
+#
 # Existing per-healpix output files are skipped, so the job can be resubmitted
 # if it times out.
 
 # ---------------------------------------------------------------------------
 # Edit the variables below before submitting.
 # ---------------------------------------------------------------------------
-N=4                     # number of nodes (must match --nodes above)
-mp=16                   # multiprocessing workers per MPI rank
+mp=128                  # multiprocessing workers per node
 specprod=iron
 fastspecfit_dir=/global/common/software/desi/users/ioannis/fastspecfit   # checkout of the smooth-cont branch
 rundir=${PSCRATCH}/fastspecfit/emfit
 samplefile=${rundir}/emfit-sample.fits
 # knotsNNN = --smooth-knot-spacing=NNN [Angstrom]; nosmooth = --no-smooth-continuum
+# The number of arms must match --nodes above.
 arms="knots100 knots200 knots400 knots800 nosmooth"
 # ---------------------------------------------------------------------------
 
@@ -53,26 +58,29 @@ srun --nodes=1 --ntasks=1 --cpus-per-task=2 --cpu-bind=cores \
     --outdir-data=/tmp/fastspecfit-warmup --overwrite
 echo "Warm-up complete."
 
-ntasks=$(( 128 * N / mp ))
-cpus_per_task=$(( mp * 2 ))
-
-for arm in ${arms}; do
+run_arm() {
+    arm=$1
     case "${arm}" in
         nosmooth) armargs="--no-smooth-continuum" ;;
         knots*)   armargs="--smooth-knot-spacing=${arm#knots}" ;;
-        *)        echo "Unrecognized arm ${arm}"; exit 1 ;;
+        *)        echo "Unrecognized arm ${arm}"; return 1 ;;
     esac
 
     args="--specprod=${specprod} --coadd-type=healpix --samplefile=${samplefile}"
-    args+=" --outdir-data=${rundir}/${arm}"
+    args+=" --outdir-data=${rundir}/${arm} --nompi"
+    srun="srun --nodes=1 --ntasks=1 --cpus-per-task=256 --cpu-bind=none"
 
-    cmd="srun --nodes=${N} --ntasks=${ntasks} --cpus-per-task=${cpus_per_task} --cpu-bind=none"
-    cmd+=" ${mpiscript} ${args} --mp=${mp} ${armargs}"
+    cmd="${srun} ${mpiscript} ${args} --mp=${mp} ${armargs}"
     echo "${cmd}"
-    time ${cmd}
+    ${cmd} > ${rundir}/fastspec-emfit-${arm}-${SLURM_JOB_ID}.log 2>&1
 
-    cmd="srun --nodes=1 --ntasks=1 --cpus-per-task=64 --cpu-bind=none"
-    cmd+=" ${mpiscript} ${args} --mp=32 --nompi --merge --merge-suffix=emfit --overwrite"
+    cmd="${srun} ${mpiscript} ${args} --mp=32 --merge --merge-suffix=emfit --overwrite"
     echo "${cmd}"
-    time ${cmd}
+    ${cmd} > ${rundir}/merge-emfit-${arm}-${SLURM_JOB_ID}.log 2>&1
+    echo "Finished ${arm} at $(date)"
+}
+
+for arm in ${arms}; do
+    run_arm ${arm} &
 done
+wait
