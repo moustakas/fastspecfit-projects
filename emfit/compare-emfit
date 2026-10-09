@@ -1,0 +1,469 @@
+#!/usr/bin/env python
+"""
+Compare fastspecfit against EmFit as a function of the smooth-continuum model.
+
+Each "arm" is one fastspecfit run of the sample built by build-emfit-sample:
+the iron/v4.0 baseline plus every ${rundir}/<arm>/iron/catalogs/
+fastspec-iron-emfit.fits written by fastspec-emfit.slurm.
+
+For each arm we measure:
+  * the fraction of Pucha+26 BL-AGN in which fastspecfit adopts a broad
+    H-alpha line (the "recovery rate"), in bins of the EmFit FWHM;
+  * the fraction of narrow-line control galaxies with a (spurious) broad
+    H-alpha line;
+  * the broad H-alpha FWHM and flux relative to EmFit for the "gold"
+    (VI_FLAG=0) BL-AGN;
+  * the narrow H-alpha and [NII] 6584 fluxes relative to EmFit;
+  * the amplitude of the smooth-continuum correction in each camera.
+
+  compare-emfit --rundir $PSCRATCH/fastspecfit/emfit
+
+Output (to --outdir, by default ${rundir}/compare):
+  summary.txt                 - one row per arm
+  recovery.png                - recovery and false-positive rates
+  fwhm.png                    - fastspecfit vs EmFit broad H-alpha FWHM
+  smoothcorr.png              - distribution of the smooth-continuum corrections
+  changed-<arm>.txt           - objects whose broad-line classification differs
+                                from the baseline (e.g., for fastqa)
+
+"""
+import os, argparse
+from glob import glob
+import numpy as np
+import fitsio
+from astropy.table import Table, vstack
+
+from desiutil.log import get_logger
+
+from emfit_util import (SAMPLEFILE, BASELINEFILE, BASELINE, SIGMA2FWHM, FAST_METACOLS,
+                        FAST_COLS, FAST_CAMERAS, emfit_narrow_flux, match_targetid)
+
+log = get_logger()
+
+# Edges of the EmFit broad H-alpha FWHM bins [km/s]; 589 km/s is the smallest
+# width allowed by fastspecfit (minsigma_balmer_broad = 250 km/s).
+FWHMBINS = np.array([300., 589., 1000., 1500., 2000., 3000., 5000., 14000.])
+
+# Plot styles: gray for the baseline, a single-hue (light-to-dark) ramp for the
+# ordered knot spacings, and a contrasting hue for no smooth continuum.
+RAMP = ['#86b6ef', '#3987e5', '#1c5cab', '#0d366b']
+EXTRA = ['#1baf7a', '#eda100', '#e87ba4', '#4a3aa7']
+MARKERS = ['o', 's', '^', 'D', 'v', 'P', 'X', '*']
+
+
+def arm_styles(arms):
+    """Assign a color, line style, and marker to each arm.
+
+    """
+    knots = sorted([arm for arm in arms if arm.startswith('knots')],
+                   key=lambda arm: float(arm[5:]))
+    ramp = RAMP if len(knots) <= len(RAMP) else \
+        [RAMP[i] for i in np.round(np.linspace(0, len(RAMP) - 1, len(knots))).astype(int)]
+    extra = iter(EXTRA * len(arms))
+
+    styles = {}
+    for iarm, arm in enumerate(arms):
+        if arm == BASELINE:
+            color, ls = '#6b6a63', '--'
+        elif arm == 'nosmooth':
+            color, ls = '#eb6834', '-.'
+        elif arm in knots:
+            color, ls = ramp[knots.index(arm)], '-'
+        else:
+            color, ls = next(extra), ':'
+        styles[arm] = {'color': color, 'ls': ls, 'marker': MARKERS[iarm % len(MARKERS)]}
+    return styles
+
+
+def arm_label(arm):
+    """Human-readable arm name.
+
+    """
+    if arm.startswith('knots'):
+        return f'{arm[5:]} $\\AA$ knots'
+    elif arm == 'nosmooth':
+        return 'no smooth continuum'
+    elif arm == BASELINE:
+        return f'iron/{BASELINE}'
+    return arm
+
+
+def read_arm(fastfile, ref):
+    """Read one fastspecfit catalog and row-match it to the reference catalog.
+
+    Parameters
+    ----------
+    fastfile : str
+        Merged fastspecfit catalog.
+    ref : :class:`astropy.table.Table`
+        Reference catalog.
+
+    Returns
+    -------
+    fast : :class:`numpy.ndarray`
+        Measurements row-matched to ``ref`` (zero where not fit).
+    isfit : :class:`numpy.ndarray`
+        Boolean array which is ``True`` for the objects in ``fastfile``.
+
+    """
+    from fastspecfit.io import read_fastspec_table
+
+    F = fitsio.FITS(fastfile)
+    meta = F['METADATA'].read(columns=FAST_METACOLS)
+    avail = F['FASTSPEC'].get_colnames()
+    if 'MORELINES' in F:
+        avail += F['MORELINES'].get_colnames()
+    cols = [col for col in FAST_COLS if col in avail]
+    missing = [col for col in FAST_COLS if col not in avail]
+    if len(missing) > 0:
+        log.warning(f'{fastfile} is missing columns {",".join(missing)}')
+    _fast = read_fastspec_table(F, columns=cols)[cols].as_array()
+    F.close()
+
+    iref = match_targetid(ref['TARGETID'].data, meta['TARGETID'])
+    I = iref >= 0
+
+    # missing columns are zero-filled
+    dtype = [(col, _fast.dtype[col] if col in cols else 'f4') for col in FAST_COLS]
+    fast = np.zeros(len(ref), dtype=dtype)
+    for col in cols:
+        fast[col][iref[I]] = _fast[col][I]
+    isfit = np.zeros(len(ref), bool)
+    isfit[iref[I]] = True
+
+    log.info(f'Read {np.sum(I):,d}/{len(ref):,d} objects from {fastfile}')
+    return fast, isfit
+
+
+def linesnr(fast, line):
+    """Signal-to-noise ratio of a fastspecfit emission-line flux.
+
+    """
+    ivar = np.clip(fast[f'{line}_FLUX_IVAR'], 0., None)
+    return fast[f'{line}_FLUX'] * np.sqrt(ivar)
+
+
+def logratio(num, den, good):
+    """Median, normalized median absolute deviation, and number of the
+    (log10) ratio of two positive quantities.
+
+    """
+    I = good & (num > 0.) & (den > 0.)
+    if np.sum(I) == 0:
+        return np.nan, np.nan, 0
+    ratio = np.log10(num[I] / den[I])
+    med = np.median(ratio)
+    return med, 1.4826 * np.median(np.abs(ratio - med)), np.sum(I)
+
+
+def frac(I, J):
+    """Fraction of the objects in J which are also in I.
+
+    """
+    return np.sum(I & J) / np.sum(J) if np.sum(J) > 0 else np.nan
+
+
+def summarize(arm, ref, fast, isfit, hasbroad, isbl, isgold, isnl, iscalib):
+    """Summary statistics for one arm.
+
+    Returns
+    -------
+    dict
+        One row of the summary table.
+
+    """
+    fwhm_emfit = SIGMA2FWHM * ref['HA_B_SIGMA'].data
+    fwhm_fast = SIGMA2FWHM * fast['HALPHA_BROAD_SIGMA']
+    gold = isgold & isfit
+    recgold = gold & hasbroad
+
+    row = {'ARM': arm, 'NFIT': np.sum(isfit)}
+
+    # recovery and false-positive rates
+    row['REC_BL'] = frac(hasbroad, isbl & isfit)
+    row['REC_GOLD'] = frac(hasbroad, gold)
+    row['REC_LT1000'] = frac(hasbroad, gold & (fwhm_emfit < 1000.))
+    row['REC_1000_2000'] = frac(hasbroad, gold & (fwhm_emfit >= 1000.) & (fwhm_emfit < 2000.))
+    row['REC_GT2000'] = frac(hasbroad, gold & (fwhm_emfit >= 2000.))
+    row['REC_IMBH'] = frac(hasbroad, gold & (ref['LOG_MBH'].data < 6.))
+    row['FALSEPOS_NL'] = frac(hasbroad, isnl & isfit)
+
+    # broad H-alpha width and flux of the recovered gold sample
+    row['DLOGFWHM'], row['DLOGFWHM_NMAD'], _ = logratio(fwhm_fast, fwhm_emfit, recgold)
+    row['DLOGFBROAD'], row['DLOGFBROAD_NMAD'], _ = logratio(
+        fast['HALPHA_BROAD_FLUX'], ref['HA_B_FLUX'].data, recgold)
+
+    # narrow lines
+    for fastline, emline, name in [('HALPHA', 'HA_N', 'HA'), ('NII_6584', 'NII6583', 'NII')]:
+        emflux, _ = emfit_narrow_flux(ref, emline)
+        for sample, I in [('BL', gold), ('NL', isnl & isfit)]:
+            row[f'DLOG{name}_{sample}'], row[f'DLOG{name}_{sample}_NMAD'], _ = logratio(
+                fast[f'{fastline}_FLUX'], emflux, I)
+
+    # smooth-continuum correction
+    for cam in FAST_CAMERAS:
+        for sample, I in [('BL', gold), ('NL', isnl & isfit), ('CALIB', iscalib & isfit)]:
+            row[f'SMOOTHCORR_{cam}_{sample}'] = np.median(np.abs(fast[f'SMOOTHCORR_{cam}'][I])) \
+                if np.sum(I) > 0 else np.nan
+
+    return row
+
+
+def write_changed(outfile, arm, ref, hasbroad, basebroad, isfit, isgold, isnl):
+    """Write the objects whose broad-line classification differs from the
+    baseline.
+
+    """
+    cats = [('lost', isgold & isfit & basebroad & ~hasbroad),
+            ('gained', isgold & isfit & ~basebroad & hasbroad),
+            ('spurious', isnl & isfit & ~basebroad & hasbroad)]
+    out = []
+    for cat, I in cats:
+        out1 = ref['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX', 'Z'][I]
+        out1['FWHM_EMFIT'] = (SIGMA2FWHM * ref['HA_B_SIGMA'][I]).astype('f4')
+        out1['CATEGORY'] = cat
+        out.append(out1)
+        log.info(f'{arm}: {np.sum(I):,d} {cat} relative to {BASELINE}.')
+    out = vstack(out)
+    out['Z'].info.format = '.5f'
+    out['FWHM_EMFIT'].info.format = '.0f'
+    out.write(outfile, format='ascii.fixed_width', bookend=False, delimiter=None, overwrite=True)
+
+
+def setup_axes(ax):
+    """Recessive axes and grid.
+
+    """
+    ax.grid(True, color='#e3e2dc', lw=0.6, zorder=0)
+    ax.set_axisbelow(True)
+    for side in ['top', 'right']:
+        ax.spines[side].set_visible(False)
+    for side in ['left', 'bottom']:
+        ax.spines[side].set_color('#8a897f')
+    ax.tick_params(colors='#4a4a45', labelsize=9)
+
+
+def qa_recovery(pngfile, arms, styles, ref, isfits, hasbroads, isgold, isnl):
+    """Recovery rate vs EmFit FWHM and the false-positive rate, per arm.
+
+    """
+    import matplotlib.pyplot as plt
+
+    fwhm_emfit = SIGMA2FWHM * ref['HA_B_SIGMA'].data
+    ibin = np.digitize(fwhm_emfit, FWHMBINS) - 1
+    nbin = len(FWHMBINS) - 1
+    xmid = np.sqrt(FWHMBINS[:-1] * FWHMBINS[1:])
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5), width_ratios=[2.2, 1])
+
+    for arm in arms:
+        rec = [frac(hasbroads[arm], isgold & isfits[arm] & (ibin == ii)) for ii in range(nbin)]
+        ax1.plot(xmid, rec, lw=2, ms=6, mec='white', mew=1, label=arm_label(arm), **styles[arm])
+    ngold = [np.sum(isgold & (ibin == ii)) for ii in range(nbin)]
+    for xx, nn in zip(xmid, ngold):
+        ax1.text(xx, 1.04, f'{nn:,d}', ha='center', va='bottom', fontsize=8, color='#6b6a63')
+    ax1.axvline(FWHMBINS[1], color='#8a897f', lw=1, ls=':')
+    ax1.text(FWHMBINS[1], 0.02, ' fastspecfit minimum width', fontsize=8, color='#6b6a63',
+             ha='left', va='bottom')
+    ax1.set_xscale('log')
+    ax1.set_xticks(FWHMBINS)
+    ax1.set_xticklabels([f'{edge:.0f}' for edge in FWHMBINS])
+    ax1.minorticks_off()
+    ax1.set_ylim(0., 1.12)
+    ax1.set_xlabel(r'EmFit broad H$\alpha$ FWHM [km/s]')
+    ax1.set_ylabel(r'Fraction with a fastspecfit broad H$\alpha$ line')
+    ax1.set_title('Recovery of gold BL-AGN (number per bin along the top)', fontsize=10, loc='left')
+    ax1.legend(fontsize=9, frameon=False, loc='lower right')
+    setup_axes(ax1)
+
+    ypos = np.arange(len(arms))[::-1]
+    fpos = np.array([frac(hasbroads[arm], isnl & isfits[arm]) for arm in arms])
+    ax2.barh(ypos, 100. * fpos, height=0.6, color=[styles[arm]['color'] for arm in arms], zorder=2)
+    for yy, ff in zip(ypos, fpos):
+        ax2.text(100. * ff, yy, f' {100.*ff:.2f}%', va='center', ha='left', fontsize=9, color='#4a4a45')
+    ax2.set_yticks(ypos)
+    ax2.set_yticklabels([arm_label(arm) for arm in arms])
+    if np.any(np.isfinite(fpos)):
+        ax2.set_xlim(0., 1.3 * max(100. * np.nanmax(fpos), 0.1))
+    ax2.set_xlabel(r'Control galaxies with a broad H$\alpha$ line [%]')
+    ax2.set_title('False positives (narrow-line control)', fontsize=10, loc='left')
+    setup_axes(ax2)
+    ax2.grid(False, axis='y')
+
+    fig.tight_layout()
+    fig.savefig(pngfile, dpi=150)
+    plt.close(fig)
+    log.info(f'Wrote {pngfile}')
+
+
+def qa_fwhm(pngfile, arms, styles, ref, fasts, isfits, hasbroads, isgold):
+    """fastspecfit vs EmFit broad H-alpha FWHM of the gold sample, per arm.
+
+    """
+    import matplotlib.pyplot as plt
+
+    fwhm_emfit = SIGMA2FWHM * ref['HA_B_SIGMA'].data
+    lim = (250., 16000.)
+
+    ncol = min(len(arms), 3)
+    nrow = int(np.ceil(len(arms) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4 * ncol, 4 * nrow), sharex=True,
+                             sharey=True, squeeze=False)
+    for ax, arm in zip(axes.flat, arms):
+        I = isgold & isfits[arm] & hasbroads[arm]
+        fwhm_fast = SIGMA2FWHM * fasts[arm]['HALPHA_BROAD_SIGMA']
+        ax.plot(lim, lim, color='#8a897f', lw=1, zorder=1)
+        ax.scatter(fwhm_emfit[I], fwhm_fast[I], s=3, alpha=0.25, lw=0, rasterized=True,
+                   color=styles[arm]['color'], zorder=2)
+        med, nmad, nobj = logratio(fwhm_fast, fwhm_emfit, I)
+        ax.text(0.04, 0.96, f'N = {nobj:,d}\nmedian = {med:+.3f} dex\nNMAD = {nmad:.3f} dex',
+                transform=ax.transAxes, ha='left', va='top', fontsize=9, color='#4a4a45')
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlim(lim)
+        ax.set_ylim(lim)
+        ax.set_title(arm_label(arm), fontsize=10, loc='left')
+        setup_axes(ax)
+    for ax in axes.flat[len(arms):]:
+        ax.set_visible(False)
+    for ax in axes[-1, :]:
+        ax.set_xlabel(r'EmFit broad H$\alpha$ FWHM [km/s]')
+    for ax in axes[:, 0]:
+        ax.set_ylabel(r'fastspecfit broad H$\alpha$ FWHM [km/s]')
+
+    fig.tight_layout()
+    fig.savefig(pngfile, dpi=150)
+    plt.close(fig)
+    log.info(f'Wrote {pngfile}')
+
+
+def qa_smoothcorr(pngfile, arms, styles, fasts, isfits, samples):
+    """Cumulative distribution of the absolute smooth-continuum correction in
+    each camera (columns) and sample (rows), per arm.
+
+    """
+    import matplotlib.pyplot as plt
+
+    arms = [arm for arm in arms if arm != 'nosmooth']
+    samples = [(name, I) for name, I in samples if np.sum(I) > 0]
+    xlim = (0.01, 100.)
+
+    fig, axes = plt.subplots(len(samples), len(FAST_CAMERAS), sharex=True, sharey=True, squeeze=False,
+                             figsize=(4 * len(FAST_CAMERAS), 3.2 * len(samples)))
+    for irow, (name, I) in enumerate(samples):
+        for icol, cam in enumerate(FAST_CAMERAS):
+            ax = axes[irow, icol]
+            for arm in arms:
+                corr = np.sort(np.abs(fasts[arm][f'SMOOTHCORR_{cam}'][I & isfits[arm]]))
+                if len(corr) == 0:
+                    continue
+                ax.plot(np.clip(corr, *xlim), np.arange(1, len(corr) + 1) / len(corr), lw=2,
+                        color=styles[arm]['color'], ls=styles[arm]['ls'], label=arm_label(arm))
+            ax.set_xscale('log')
+            ax.set_xlim(xlim)
+            ax.set_ylim(0., 1.)
+            ax.set_title(f'{name}: {cam.lower()} camera', fontsize=10, loc='left')
+            setup_axes(ax)
+    axes[0, 0].legend(fontsize=9, frameon=False, loc='lower right')
+    for ax in axes[-1, :]:
+        ax.set_xlabel('|Smooth-continuum correction| [%]')
+    for ax in axes[:, 0]:
+        ax.set_ylabel('Cumulative fraction')
+
+    fig.tight_layout()
+    fig.savefig(pngfile, dpi=150)
+    plt.close(fig)
+    log.info(f'Wrote {pngfile}')
+
+
+def main():
+    """Main wrapper.
+
+    """
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--rundir', type=str, required=True,
+                        help='Directory with the sample, baseline, and one subdirectory per arm.')
+    parser.add_argument('--outdir', type=str, default=None, help='Output directory.')
+    parser.add_argument('--arms', type=str, default=None,
+                        help='Comma-separated list of arms; by default, all the arms in --rundir.')
+    parser.add_argument('--minsnr-broad', type=float, default=3.,
+                        help='Minimum S/N of the fastspecfit broad H-alpha flux.')
+    parser.add_argument('--noplots', action='store_true', help='Do not make the figures.')
+    args = parser.parse_args()
+
+    outdir = os.path.join(args.rundir, 'compare') if args.outdir is None else args.outdir
+    os.makedirs(outdir, exist_ok=True)
+
+    samplefile = os.path.join(args.rundir, SAMPLEFILE)
+    ref = Table(fitsio.read(samplefile))
+    log.info(f'Read {len(ref):,d} rows from {samplefile}')
+
+    # gather the arms
+    armfiles = {BASELINE: os.path.join(args.rundir, BASELINEFILE)}
+    for armfile in sorted(glob(os.path.join(args.rundir, '*', 'iron', 'catalogs', 'fastspec-iron-emfit.fits'))):
+        armfiles[os.path.relpath(armfile, args.rundir).split(os.sep)[0]] = armfile
+    if args.arms is not None:
+        armfiles = {arm: armfiles[arm] for arm in args.arms.split(',')}
+    armfiles = {arm: armfile for arm, armfile in armfiles.items() if os.path.isfile(armfile)}
+    if len(armfiles) == 0:
+        errmsg = f'No fastspecfit catalogs found in {args.rundir}'
+        log.critical(errmsg)
+        raise IOError(errmsg)
+
+    # baseline first, then knots (in order of increasing spacing), then the rest
+    def _order(arm):
+        if arm == BASELINE:
+            return (0, 0.)
+        elif arm.startswith('knots'):
+            return (1, float(arm[5:]))
+        return (2, 0.)
+    arms = sorted(armfiles.keys(), key=_order)
+    styles = arm_styles(arms)
+
+    sample = np.char.strip(ref['SAMPLE'].astype(str))
+    isbl = sample == 'bl'
+    isgold = isbl & (ref['VI_FLAG'].data == 0)
+    isnl = sample == 'nl'
+    iscalib = sample == 'calib'
+    log.info(f'Sample: {np.sum(isbl):,d} bl ({np.sum(isgold):,d} gold), '
+             f'{np.sum(isnl):,d} nl, {np.sum(iscalib):,d} calib.')
+
+    fasts, isfits, hasbroads, rows = {}, {}, {}, []
+    for arm in arms:
+        fast, isfit = read_arm(armfiles[arm], ref)
+        hasbroad = (isfit & (fast['HALPHA_BROAD_FLUX'] > 0.) &
+                    (linesnr(fast, 'HALPHA_BROAD') >= args.minsnr_broad))
+        fasts[arm], isfits[arm], hasbroads[arm] = fast, isfit, hasbroad
+        rows.append(summarize(arm, ref, fast, isfit, hasbroad, isbl, isgold, isnl, iscalib))
+
+    summary = Table(rows)
+    for col in summary.colnames:
+        if summary[col].dtype.kind == 'f':
+            summary[col].info.format = '.4f'
+    summaryfile = os.path.join(outdir, 'summary.txt')
+    summary.write(summaryfile, format='ascii.fixed_width', bookend=False, delimiter=None, overwrite=True)
+    log.info(f'Wrote {summaryfile}')
+    for cols in [summary.colnames[:9], ['ARM'] + [col for col in summary.colnames if 'DLOG' in col],
+                 ['ARM'] + [col for col in summary.colnames if 'SMOOTHCORR' in col]]:
+        summary[cols].pprint(max_lines=-1, max_width=-1)
+
+    if BASELINE in arms:
+        for arm in arms:
+            if arm != BASELINE:
+                write_changed(os.path.join(outdir, f'changed-{arm}.txt'), arm, ref, hasbroads[arm],
+                              hasbroads[BASELINE], isfits[arm] & isfits[BASELINE], isgold, isnl)
+
+    if not args.noplots:
+        import matplotlib
+        matplotlib.use('Agg')
+        qa_recovery(os.path.join(outdir, 'recovery.png'), arms, styles, ref, isfits,
+                    hasbroads, isgold, isnl)
+        qa_fwhm(os.path.join(outdir, 'fwhm.png'), arms, styles, ref, fasts, isfits,
+                hasbroads, isgold)
+        qa_smoothcorr(os.path.join(outdir, 'smoothcorr.png'), arms, styles, fasts, isfits,
+                      [('calib', iscalib), ('bl (gold)', isgold), ('nl', isnl)])
+
+
+if __name__ == '__main__':
+    main()

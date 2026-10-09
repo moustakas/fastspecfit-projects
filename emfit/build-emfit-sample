@@ -1,0 +1,387 @@
+#!/usr/bin/env python
+"""
+Build the sample used to test the fastspecfit smooth continuum against EmFit.
+
+The sample has three parts, identified by the SAMPLE column:
+  bl    - the confident BL-AGN of Pucha+26 (Zenodo catalog)
+  nl    - EmFit line-emitting galaxies with no broad H-alpha, matched to the
+          BL-AGN in redshift and narrow H-alpha signal-to-noise ratio
+  calib - objects with a large smooth-continuum correction in the iron/v4.0
+          FastSpecFit VAC
+
+Two files are written to --outdir:
+  emfit-sample.fits               - samplefile for mpi-fastspecfit plus the
+                                    EmFit (and Pucha+26) reference measurements
+  fastspec-iron-v4.0-emfit.fits   - the iron/v4.0 (baseline) measurements
+
+Run at NERSC, e.g.,
+
+  source /global/common/software/desi/users/ioannis/fastspecfit/etc/fastspecfit-env.sh
+  build-emfit-sample \\
+    --emfitfile /global/cfs/cdirs/desi/public/dr1/vac/dr1/emfit/v2.3/emfit-dr1-v2.3.1.fits \\
+    --blagnfile $PSCRATCH/fastspecfit/emfit/desi-dr1-all-bl-agn.fits \\
+    --vacdir /dvs_ro/cfs/cdirs/desi/vac/dr1/fastspecfit/iron/v4.0/catalogs \\
+    --outdir $PSCRATCH/fastspecfit/emfit
+
+Without --vacdir the calib sample and the baseline file are skipped.
+
+"""
+import os, argparse
+from glob import glob
+import numpy as np
+import fitsio
+from astropy.table import Table, vstack
+
+from desiutil.log import get_logger
+
+from emfit_util import (SAMPLEFILE, BASELINEFILE, EMFIT_REFCOLS, BLAGN_COLS,
+                        FAST_METACOLS, FAST_COLS, FAST_CAMERAS, strip, snr,
+                        emfit_narrow_flux, match_targetid)
+
+log = get_logger()
+
+MINSNR = 3. # minimum narrow-line S/N of the control pool (Pucha+26)
+
+
+def read_emfit(emfitfile):
+    """Read the EmFit columns needed to select the sample.
+
+    """
+    cols = ['TARGETID', 'SURVEY', 'PROGRAM', 'Z', 'PROB_BROAD', 'HA_B_FLUX',
+            'HB_N_AMPLITUDE', 'HB_NOISE', 'OIII_DBL_FLAG', 'SII_DBL_FLAG']
+    for comp in ['HB_N', 'HB_OUT', 'OIII5007', 'OIII5007_OUT', 'NII6583',
+                 'NII6583_OUT', 'HA_N', 'HA_OUT']:
+        cols += [f'{comp}_FLUX', f'{comp}_FLUX_ERR']
+
+    em = fitsio.read(emfitfile, ext='EMFIT', columns=cols)
+    log.info(f'Read {len(em):,d} rows from {emfitfile}')
+    return em
+
+
+def select_control(em, ibl, rng, dz=0.025, dlogsnr=0.25):
+    """Select the narrow-line control sample.
+
+    The pool consists of line-emitting galaxies (Section 2.5 of Pucha+26) with
+    no broad H-alpha component in any EmFit iteration. From this pool we draw,
+    without replacement, as many objects as there are BL-AGN in each bin of
+    redshift and narrow H-alpha signal-to-noise ratio.
+
+    Parameters
+    ----------
+    em : :class:`numpy.ndarray`
+        EmFit catalog.
+    ibl : :class:`numpy.ndarray`
+        Indices of the BL-AGN in ``em``.
+    rng : :class:`numpy.random.Generator`
+        Random-number generator.
+    dz : float, optional
+        Redshift bin width. Defaults to 0.025.
+    dlogsnr : float, optional
+        Bin width in log10 of the narrow H-alpha S/N. Defaults to 0.25.
+
+    Returns
+    -------
+    :class:`numpy.ndarray`
+        Indices of the control sample in ``em``.
+
+    """
+    snr_ha = snr(*emfit_narrow_flux(em, 'HA_N'))
+    snr_hb = snr(*emfit_narrow_flux(em, 'HB_N'))
+    snr_nii = snr(*emfit_narrow_flux(em, 'NII6583'))
+    snr_oiii = snr(*emfit_narrow_flux(em, 'OIII5007'))
+    aon_hb = snr(em['HB_N_AMPLITUDE'], em['HB_NOISE']) # primary component only
+
+    pool = ((snr_ha >= MINSNR) & (snr_nii >= MINSNR) & (snr_oiii >= MINSNR) &
+            (snr_hb >= 1.) & (aon_hb >= 1.) &
+            (em['PROB_BROAD'] == 0.) & (em['HA_B_FLUX'] == 0.))
+    pool[ibl] = False
+    log.info(f'Control pool: {np.sum(pool):,d} line-emitting galaxies with no broad H-alpha.')
+
+    # The BL-AGN can have a narrow H-alpha S/N below the limit of the pool, so
+    # clip to the lowest populated bin.
+    logsnr = np.log10(np.clip(snr_ha, MINSNR, 10.**4.49))
+    key = (100 * np.floor(np.clip(em['Z'], 0., 0.4499) / dz).astype(int) +
+           np.floor(logsnr / dlogsnr).astype(int))
+
+    poolidx = np.where(pool)[0]
+    srt = np.argsort(key[poolidx], kind='stable')
+    poolidx = poolidx[srt]
+    poolkey = key[poolidx]
+
+    ukey, count = np.unique(key[ibl], return_counts=True)
+    lo = np.searchsorted(poolkey, ukey, side='left')
+    hi = np.searchsorted(poolkey, ukey, side='right')
+
+    inl, nshort = [], 0
+    for lo1, hi1, count1 in zip(lo, hi, count):
+        ntake = min(count1, hi1 - lo1)
+        nshort += count1 - ntake
+        if ntake > 0:
+            inl.append(rng.choice(poolidx[lo1:hi1], ntake, replace=False))
+    inl = np.sort(np.hstack(inl))
+
+    log.info(f'Selected {len(inl):,d} control objects for {len(ibl):,d} BL-AGN.')
+    if nshort > 0:
+        log.warning(f'The control pool is short by {nshort:,d} objects.')
+
+    return inl
+
+
+def scan_vac(vacdir, em):
+    """Locate every EmFit object in the iron/v4.0 merged catalogs.
+
+    Parameters
+    ----------
+    vacdir : str
+        Directory containing the merged ``fastspec-iron-*.fits`` catalogs.
+    em : :class:`numpy.ndarray`
+        EmFit catalog.
+
+    Returns
+    -------
+    vacfiles : list of str
+        Merged catalogs.
+    scan : dict of :class:`numpy.ndarray`
+        For each matched object: index in ``em`` (``emidx``), index in
+        ``vacfiles`` (``fileidx``), row in that file (``row``), and the
+        largest absolute smooth-continuum correction among the cameras
+        (``maxcorr``; percent).
+
+    """
+    vacfiles = sorted(glob(os.path.join(vacdir, 'fastspec-iron-*.fits')))
+    if len(vacfiles) == 0:
+        errmsg = f'No fastspec-iron-*.fits catalogs found in {vacdir}'
+        log.critical(errmsg)
+        raise IOError(errmsg)
+
+    em_survey, em_program = strip(em['SURVEY']), strip(em['PROGRAM'])
+    corrcols = [f'SMOOTHCORR_{cam}' for cam in FAST_CAMERAS]
+
+    scan = {'emidx': [], 'fileidx': [], 'row': [], 'maxcorr': []}
+    for ifile, vacfile in enumerate(vacfiles):
+        F = fitsio.FITS(vacfile)
+        meta = F['METADATA'].read(columns=['TARGETID', 'SURVEY', 'PROGRAM'])
+        emidx = match_targetid(em['TARGETID'], meta['TARGETID'])
+        row = np.where(emidx >= 0)[0]
+        if len(row) > 0:
+            # EmFit only includes the primary spectrum of each target
+            same = ((strip(meta['SURVEY'][row]) == em_survey[emidx[row]]) &
+                    (strip(meta['PROGRAM'][row]) == em_program[emidx[row]]))
+            row = row[same]
+        log.info(f'{os.path.basename(vacfile)}: {len(row):,d}/{len(meta):,d} objects in EmFit.')
+        if len(row) == 0:
+            F.close()
+            continue
+
+        corr = F['FASTSPEC'].read(columns=corrcols)
+        corr = np.abs(np.vstack([corr[col][row] for col in corrcols]))
+        corr[~np.isfinite(corr)] = 0.
+
+        scan['emidx'].append(emidx[row])
+        scan['fileidx'].append(np.full(len(row), ifile))
+        scan['row'].append(row)
+        scan['maxcorr'].append(np.max(corr, axis=0))
+        F.close()
+
+    scan = {key: np.hstack(val) for key, val in scan.items()}
+
+    # guard against overlapping merged catalogs
+    _, uindx = np.unique(scan['emidx'], return_index=True)
+    scan = {key: val[uindx] for key, val in scan.items()}
+    log.info(f'Found {len(uindx):,d}/{len(em):,d} EmFit objects in {vacdir}')
+
+    return vacfiles, scan
+
+
+def select_calib(scan, iexclude, rng, ncalib=5000, percentile=99.):
+    """Select objects with a large smooth-continuum correction in iron/v4.0.
+
+    Parameters
+    ----------
+    scan : dict
+        Output of :func:`scan_vac`.
+    iexclude : :class:`numpy.ndarray`
+        EmFit indices of objects already in the sample.
+    rng : :class:`numpy.random.Generator`
+        Random-number generator.
+    ncalib : int, optional
+        Number of objects to select. Defaults to 5000.
+    percentile : float, optional
+        Select from the objects above this percentile of the largest absolute
+        smooth-continuum correction among the cameras. Defaults to 99.
+
+    Returns
+    -------
+    :class:`numpy.ndarray`
+        EmFit indices of the calib sample.
+
+    """
+    maxcorr = scan['maxcorr']
+    pcts = [50., 90., 99., 99.9]
+    msg = ', '.join([f'{pct:g}%: {val:.2f}' for pct, val in zip(pcts, np.percentile(maxcorr, pcts))])
+    log.info(f'Percentiles of max|SMOOTHCORR| [%] -- {msg}')
+
+    thresh = np.percentile(maxcorr, percentile)
+    cand = (maxcorr > thresh) & ~np.isin(scan['emidx'], iexclude)
+    cand = scan['emidx'][cand]
+    ncalib = min(ncalib, len(cand))
+    icalib = np.sort(rng.choice(cand, ncalib, replace=False))
+    log.info(f'Selected {ncalib:,d}/{len(cand):,d} objects with max|SMOOTHCORR| > {thresh:.2f}%.')
+
+    return icalib
+
+
+def build_reference(emfitfile, blagn, indx, sample):
+    """Build the samplefile / reference catalog.
+
+    Parameters
+    ----------
+    emfitfile : str
+        EmFit catalog.
+    blagn : :class:`numpy.ndarray`
+        Pucha+26 BL-AGN catalog.
+    indx : :class:`numpy.ndarray`
+        Sorted EmFit row indices of the sample.
+    sample : :class:`numpy.ndarray`
+        Sample name of each object.
+
+    Returns
+    -------
+    :class:`astropy.table.Table`
+        Reference catalog.
+
+    """
+    ref = Table(fitsio.read(emfitfile, ext='EMFIT', rows=indx, columns=EMFIT_REFCOLS))
+    ref = ref[EMFIT_REFCOLS]
+    for col in ['SURVEY', 'PROGRAM']:
+        ref[col] = strip(ref[col])
+    ref.add_column(sample, name='SAMPLE', index=1)
+
+    iref = match_targetid(ref['TARGETID'].data, blagn['TARGETID'])
+    for col, fill in BLAGN_COLS.items():
+        if isinstance(fill, str):
+            val = np.full(len(ref), fill, dtype='U8')
+            val[iref] = strip(blagn[col])
+        else:
+            val = np.full(len(ref), fill, dtype=blagn[col].dtype.newbyteorder('='))
+            val[iref] = blagn[col]
+        ref[col] = val
+
+    return ref
+
+
+def build_baseline(vacfiles, scan, indx):
+    """Gather the iron/v4.0 measurements of the sample.
+
+    Parameters
+    ----------
+    vacfiles : list of str
+        Merged catalogs.
+    scan : dict
+        Output of :func:`scan_vac`.
+    indx : :class:`numpy.ndarray`
+        EmFit row indices of the sample.
+
+    Returns
+    -------
+    meta, fast : :class:`astropy.table.Table`
+        Row-matched subsets of the METADATA and FASTSPEC tables.
+
+    """
+    from fastspecfit.io import read_fastspec_table
+
+    I = np.isin(scan['emidx'], indx)
+    if np.sum(I) < len(indx):
+        log.warning(f'{len(indx)-np.sum(I):,d}/{len(indx):,d} objects are missing from iron/v4.0.')
+
+    meta, fast = [], []
+    for ifile in np.unique(scan['fileidx'][I]):
+        rows = np.sort(scan['row'][I & (scan['fileidx'] == ifile)])
+        F = fitsio.FITS(vacfiles[ifile])
+        avail = F['FASTSPEC'].get_colnames()
+        if 'MORELINES' in F:
+            avail += F['MORELINES'].get_colnames()
+        cols = [col for col in FAST_COLS if col in avail]
+        meta1 = Table(F['METADATA'].read(rows=rows, columns=FAST_METACOLS))
+        meta.append(meta1[FAST_METACOLS])
+        fast.append(read_fastspec_table(F, rows=rows, columns=cols)[cols])
+        F.close()
+        log.info(f'Read {len(rows):,d} rows from {os.path.basename(vacfiles[ifile])}')
+
+    return vstack(meta), vstack(fast)
+
+
+def main():
+    """Main wrapper.
+
+    """
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--emfitfile', type=str, required=True, help='EmFit DR1 catalog.')
+    parser.add_argument('--blagnfile', type=str, required=True,
+                        help='Pucha+26 BL-AGN catalog (desi-dr1-all-bl-agn.fits; Zenodo 21539891).')
+    parser.add_argument('--vacdir', type=str, default=None,
+                        help='Directory of merged iron/v4.0 fastspec catalogs.')
+    parser.add_argument('--outdir', type=str, default='.', help='Output directory.')
+    parser.add_argument('--ncalib', type=int, default=5000, help='Size of the calib sample.')
+    parser.add_argument('--calib-percentile', type=float, default=99.,
+                        help='Percentile of max|SMOOTHCORR| above which the calib sample is drawn.')
+    parser.add_argument('--seed', type=int, default=1, help='Random seed.')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing files.')
+    args = parser.parse_args()
+
+    samplefile = os.path.join(args.outdir, SAMPLEFILE)
+    baselinefile = os.path.join(args.outdir, BASELINEFILE)
+    if os.path.isfile(samplefile) and not args.overwrite:
+        log.warning(f'{samplefile} exists; use --overwrite.')
+        return
+
+    rng = np.random.default_rng(args.seed)
+
+    em = read_emfit(args.emfitfile)
+    blagn = fitsio.read(args.blagnfile)
+    log.info(f'Read {len(blagn):,d} rows from {args.blagnfile}')
+
+    # BL-AGN
+    ibl = match_targetid(em['TARGETID'], blagn['TARGETID'])
+    if np.any(ibl < 0):
+        errmsg = f'{np.sum(ibl < 0):,d} BL-AGN are missing from {args.emfitfile}'
+        log.critical(errmsg)
+        raise ValueError(errmsg)
+
+    # narrow-line control sample
+    inl = select_control(em, ibl, rng)
+
+    # large smooth-continuum corrections
+    if args.vacdir is None:
+        icalib = np.array([], dtype=int)
+    else:
+        vacfiles, scan = scan_vac(args.vacdir, em)
+        icalib = select_calib(scan, np.hstack((ibl, inl)), rng, ncalib=args.ncalib,
+                              percentile=args.calib_percentile)
+
+    indx = np.hstack((ibl, inl, icalib))
+    sample = np.hstack((np.full(len(ibl), 'bl', dtype='U5'), np.full(len(inl), 'nl', dtype='U5'),
+                        np.full(len(icalib), 'calib', dtype='U5')))
+    srt = np.argsort(indx)
+    indx, sample = indx[srt], sample[srt]
+
+    ref = build_reference(args.emfitfile, blagn, indx, sample)
+    for name in ['bl', 'nl', 'calib']:
+        I = ref['SAMPLE'] == name
+        npix = len(set(zip(ref['SURVEY'][I], ref['PROGRAM'][I], ref['HEALPIX'][I])))
+        log.info(f'{name}: {np.sum(I):,d} objects in {npix:,d} healpix files.')
+
+    os.makedirs(args.outdir, exist_ok=True)
+    ref.write(samplefile, overwrite=True)
+    log.info(f'Wrote {len(ref):,d} rows to {samplefile}')
+
+    if args.vacdir is not None:
+        meta, fast = build_baseline(vacfiles, scan, indx)
+        fitsio.write(baselinefile, meta.as_array(), extname='METADATA', clobber=True)
+        fitsio.write(baselinefile, fast.as_array(), extname='FASTSPEC')
+        log.info(f'Wrote {len(meta):,d} rows to {baselinefile}')
+
+
+if __name__ == '__main__':
+    main()
