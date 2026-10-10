@@ -96,6 +96,7 @@ stiffer than nearly all of them. The z camera spans about 2400 Angstrom, i.e.,
 ```bash
 cd $HOME/code/fastspecfit-projects/emfit   # this directory
 source /global/common/software/desi/users/ioannis/fastspecfit/etc/fastspecfit-env.sh
+export PATH=/global/common/software/desi/users/ioannis/fastspecfit/bin:$PATH   # smooth-cont checkout
 export PYTHONPATH=/global/common/software/desi/users/ioannis/fastspecfit/py:$PYTHONPATH   # smooth-cont checkout
 export RUNDIR=$PSCRATCH/fastspecfit/emfit
 
