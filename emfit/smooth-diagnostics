@@ -1,0 +1,545 @@
+#!/usr/bin/env python
+"""
+Measure what the smooth continuum costs and what it buys, for every arm.
+
+SMOOTHCORR is the camera median of the smooth continuum over the flux, i.e., a
+zero-point which any spline reproduces, so it does not distinguish the knot
+spacings. Here we measure two quantities which do, from the MODELS extension
+of the per-healpix fastspec files (the merged catalogs do not have one):
+
+  * Cost: the smooth-continuum flux under broad H-alpha. We integrate the
+    smooth continuum over +/-1.5 FWHM around H-alpha after subtracting the
+    straight line which joins its two ends (HA_BUMP; 1e-17 erg/s/cm2), so a
+    positive value is line flux which the spline absorbed. The FWHM is the
+    EmFit one for the BL-AGN; the other objects are assigned a FWHM drawn at
+    random from the gold BL-AGN, so that they give the null distribution.
+    The stellar continuum at H-alpha (HA_CONT) turns HA_BUMP into an
+    equivalent width.
+
+  * Benefit: chi2 of the line-free pixels of each camera about the stellar
+    plus smooth continuum (CHI2), together with the number of free parameters
+    of the spline (NPAR). If the chi2 of a more flexible arm drops by about
+    the number of parameters it adds, the extra knots only fit noise; a much
+    larger drop means that they absorb real structure. This needs the
+    observed spectra, which are re-read (with the same emission-line mask and
+    inverse variance as in the fit) using the fastspecfit I/O.
+
+  smooth-diagnostics --rundir $PSCRATCH/fastspecfit/emfit --mp 128
+
+One row per object is written to ${rundir}/smooth-diagnostics.fits; the
+per-arm columns are in the order of the ARMS header keyword. compare-emfit
+summarizes and plots this file if it exists.
+
+"""
+import os, argparse
+import numpy as np
+import fitsio
+from astropy.table import Table
+
+from desiutil.log import get_logger
+
+from emfit_util import (SAMPLEFILE, BASELINE, DIAGFILE, SIGMA2FWHM, C_LIGHT,
+                        HALPHA_WAVE, FAST_CAMERAS, arm_sortkey, strip, match_targetid)
+
+log = get_logger()
+
+NFWHM = 1.5      # half-width of the H-alpha window in units of the FWHM
+NEDGEPIX = 5     # pixels averaged on either side of each end of the window
+
+# must match fastspecfit.continuum.ContinuumTools.smooth_continuum
+NMINPIX = 15     # minimum number of pixels between knots
+NMASKPIX = 9     # pixels masked at each end of a camera
+DEGREE = 3       # cubic spline
+
+CLIPSIGMA = 4.   # outlier rejection in the chi2
+
+
+def diag_dtype(narm):
+    """Data model of the output table.
+
+    """
+    ncam = len(FAST_CAMERAS)
+    return np.dtype([
+        ('TARGETID', 'i8'),
+        ('FWHM_WINDOW', 'f4'),        # FWHM which sets the H-alpha window [km/s]
+        ('ISFIT', '?', (narm, )),
+        ('HASBROAD', '?', (narm, )),
+        ('HA_BUMP', 'f4', (narm, )),  # [1e-17 erg/s/cm2]
+        ('HA_CONT', 'f4', (narm, )),  # [1e-17 erg/s/cm2/Angstrom]
+        ('NPIX', 'i4', (ncam, )),     # pixels in the chi2
+        ('CHI2', 'f8', (narm, ncam)),
+        ('SIGCHI', 'f4', (narm, ncam)), # robust scatter of the residuals [sigma]
+        ('NPAR', 'i2', (narm, ncam)), # free parameters of the spline (-1 = unknown)
+        ])
+
+
+def knot_spacing(arm):
+    """Knot spacing of an arm in Angstroms, zero for no smooth continuum, or
+    `None` if the arm does not use the fixed-knot spline.
+
+    """
+    if arm.startswith('knots'):
+        return float(arm[5:])
+    elif arm == 'nosmooth':
+        return 0.
+    return None
+
+
+def healpix_file(topdir, prefix, survey, program, healpix):
+    """Full path to a per-healpix file, or `None` if it does not exist.
+
+    """
+    filedir = os.path.join(topdir, survey, program, str(healpix // 100), str(healpix))
+    for suffix in ['fits.gz', 'fits']:
+        onefile = os.path.join(filedir, f'{prefix}-{survey}-{program}-{healpix}.{suffix}')
+        if os.path.isfile(onefile):
+            return onefile
+    return None
+
+
+def read_models(fastfile, targetids, minsnr_broad=3.):
+    """Read the model spectra of one per-healpix fastspec file.
+
+    Parameters
+    ----------
+    fastfile : str
+        Per-healpix fastspec file.
+    targetids : :class:`numpy.ndarray`
+        Objects of interest.
+    minsnr_broad : float, optional
+        Minimum S/N of the broad H-alpha flux. Defaults to 3.
+
+    Returns
+    -------
+    wave : :class:`numpy.ndarray`
+        Wavelength vector of the models [Angstrom].
+    rows : :class:`numpy.ndarray`
+        Row of each of ``targetids`` in the remaining arrays, or -1.
+    cont, smooth : :class:`numpy.ndarray`
+        Stellar and smooth continuum models, ``[nobj, npix]``.
+    hasbroad : :class:`numpy.ndarray`
+        Whether each object has a broad H-alpha line.
+
+    """
+    F = fitsio.FITS(fastfile)
+    if 'MODELS' not in F:
+        log.warning(f'No MODELS extension in {fastfile}')
+        F.close()
+        return None
+
+    tid = F['METADATA'].read(columns=['TARGETID'])['TARGETID']
+    hdr = F['MODELS'].read_header()
+    models = F['MODELS'].read() # [nobj, 3, npix]
+    line = F['FASTSPEC'].read(columns=['HALPHA_BROAD_FLUX', 'HALPHA_BROAD_FLUX_IVAR'])
+    F.close()
+
+    wave = hdr['CRVAL1'] + hdr['CDELT1'] * np.arange(models.shape[2])
+    rows = match_targetid(tid, targetids)
+
+    flux = line['HALPHA_BROAD_FLUX']
+    snr = flux * np.sqrt(np.clip(line['HALPHA_BROAD_FLUX_IVAR'], 0., None))
+    hasbroad = (flux > 0.) & (snr >= minsnr_broad)
+
+    return wave, rows, models[:, 0, :], models[:, 1, :], hasbroad
+
+
+def halpha_bump(wave, smooth, cont, linewave, halfwidth):
+    """Smooth-continuum flux under H-alpha, relative to the straight line which
+    joins the two ends of the window.
+
+    Parameters
+    ----------
+    wave : :class:`numpy.ndarray`
+        Uniform wavelength vector [Angstrom].
+    smooth, cont : :class:`numpy.ndarray`
+        Smooth and stellar continuum models.
+    linewave : float
+        Observed-frame wavelength of H-alpha [Angstrom].
+    halfwidth : float
+        Half-width of the window [Angstrom].
+
+    Returns
+    -------
+    bump : float
+        Integrated flux, or NaN if the window is not fully covered.
+    linecont : float
+        Median stellar continuum in the window, or NaN.
+
+    """
+    dwave = wave[1] - wave[0]
+    lo = int(np.round((linewave - halfwidth - wave[0]) / dwave))
+    hi = int(np.round((linewave + halfwidth - wave[0]) / dwave))
+    if lo < NEDGEPIX or hi >= (len(wave) - NEDGEPIX) or hi <= lo:
+        return np.nan, np.nan
+
+    linecont = np.median(cont[lo:hi+1])
+
+    # no smooth continuum
+    if np.all(smooth == 0.):
+        return 0., linecont
+
+    # the smooth continuum is zero where there are no data
+    if np.any(smooth[lo-NEDGEPIX:hi+NEDGEPIX+1] == 0.):
+        return np.nan, linecont
+
+    # average over a few pixels, since the models of adjacent cameras are
+    # interleaved where the cameras overlap
+    slo = np.mean(smooth[lo-NEDGEPIX:lo+NEDGEPIX+1])
+    shi = np.mean(smooth[hi-NEDGEPIX:hi+NEDGEPIX+1])
+    baseline = slo + (shi - slo) * np.arange(hi - lo + 1) / (hi - lo)
+    bump = np.sum(smooth[lo:hi+1] - baseline) * dwave
+
+    return bump, linecont
+
+
+def spline_npar(goodwave, spacing):
+    """Number of free parameters of the smooth-continuum spline of one
+    camera, before any outlier rejection (see
+    `fastspecfit.continuum.ContinuumTools.smooth_continuum`).
+
+    Parameters
+    ----------
+    goodwave : :class:`numpy.ndarray`
+        Wavelengths of the unmasked pixels [Angstrom].
+    spacing : float
+        Knot spacing [Angstrom].
+
+    Returns
+    -------
+    int
+        Number of B-spline coefficients.
+
+    """
+    minwave, maxwave = goodwave[[0, -1]]
+    nknot = max(int(np.round((maxwave - minwave) / spacing)), 1)
+    allknots = np.linspace(minwave, maxwave, nknot + 1)[1:-1]
+    counts = np.histogram(goodwave, bins=np.hstack((minwave, allknots, maxwave)))[0]
+
+    nkeep, npix = 0, 0
+    for iknot in range(len(allknots)):
+        npix += counts[iknot]
+        if npix >= NMINPIX:
+            nkeep += 1
+            npix = 0
+    if (npix + counts[-1]) < NMINPIX and nkeep > 0:
+        nkeep -= 1
+
+    return nkeep + DEGREE + 1
+
+
+def camera_chi2(data, models, spacings, out, iobj):
+    """chi2 of the line-free pixels of each camera, for every arm.
+
+    The same pixels are used for every arm: unmasked, outside the emission-line
+    mask and the overlap between cameras, and within `CLIPSIGMA` of the model
+    of the most flexible arm.
+
+    Parameters
+    ----------
+    data : dict
+        Spectroscopic data of one object (see `fastspecfit.io.one_spectrum`).
+    models : list
+        For each arm, `None` or the wavelength vector and the stellar and
+        smooth continuum models of this object.
+    spacings : list
+        Knot spacing of each arm (see :func:`knot_spacing`).
+    out : :class:`numpy.ndarray`
+        Output table, modified in place.
+    iobj : int
+        Row of this object in ``out``.
+
+    """
+    narm = len(models)
+    ncam = len(data['cameras'])
+    npar = out['NPAR'][iobj, :, :] # view
+    for icam in range(ncam):
+        jcam = FAST_CAMERAS.index(str(data['cameras'][icam]).upper())
+        wave, flux, ivar = data['wave'][icam], data['flux'][icam], data['ivar'][icam]
+
+        good = np.logical_not(data['linemask'][icam]) & (ivar > 0.)
+        good[:NMASKPIX] = False
+        good[-NMASKPIX:] = False
+        if np.sum(good) < NMINPIX:
+            continue
+        goodwave = wave[good] # the pixels used by the spline
+
+        # The models of adjacent cameras are interleaved where the cameras
+        # overlap, so do not use those pixels.
+        if icam > 0:
+            good &= wave > data['wave'][icam-1][-1]
+        if icam < (ncam - 1):
+            good &= wave < data['wave'][icam+1][0]
+        if np.sum(good) < NMINPIX:
+            continue
+        istd = np.sqrt(ivar[good])
+
+        chi = np.zeros((narm, np.sum(good)))
+        med, sig = np.zeros(narm), np.zeros(narm)
+        for iarm in range(narm):
+            if models[iarm] is None:
+                continue
+            modelwave, cont, smooth = models[iarm]
+            camsmooth = np.interp(wave[good], modelwave, smooth)
+            chi[iarm, :] = (flux[good] - np.interp(wave[good], modelwave, cont) - camsmooth) * istd
+            q25, med[iarm], q75 = np.percentile(chi[iarm, :], [25., 50., 75.])
+            sig[iarm] = (q75 - q25) / 1.349
+
+            if spacings[iarm] is None:
+                pass
+            elif spacings[iarm] == 0. or np.all(camsmooth == 0.):
+                npar[iarm, jcam] = 0
+            else:
+                npar[iarm, jcam] = spline_npar(goodwave, spacings[iarm])
+
+        # reject outliers with respect to the most flexible arm
+        iref = [iarm for iarm in range(narm) if sig[iarm] > 0. and npar[iarm, jcam] > 0]
+        if len(iref) == 0:
+            iref = [iarm for iarm in range(narm) if sig[iarm] > 0.]
+            if len(iref) == 0:
+                continue
+        iref = iref[np.argmax(npar[iref, jcam])]
+        keep = np.abs(chi[iref, :] - med[iref]) < (CLIPSIGMA * sig[iref])
+
+        out['NPIX'][iobj, jcam] = np.sum(keep)
+        for iarm in range(narm):
+            if models[iarm] is not None:
+                out['CHI2'][iobj, iarm, jcam] = np.sum(chi[iarm, keep]**2)
+                out['SIGCHI'][iobj, iarm, jcam] = sig[iarm]
+
+
+def read_spectra(redrockfile, targetids):
+    """Read and pre-process the spectra of one healpix exactly as in the fit.
+
+    Parameters
+    ----------
+    redrockfile : str
+        Redrock file.
+    targetids : :class:`numpy.ndarray`
+        Objects to read.
+
+    Returns
+    -------
+    list of dict
+        Data dictionary of each object which was found.
+
+    """
+    from fastspecfit.io import DESISpectra, one_spectrum
+    from fastspecfit.singlecopy import sc_data
+
+    Spec = DESISpectra(phot=sc_data.photometry, cosmo=sc_data.cosmology)
+    Spec.gather_metadata(redrockfiles=[redrockfile, ], targetids=targetids)
+    if len(Spec.specfiles) == 0:
+        return []
+
+    data, meta = Spec.read(sc_data.photometry)
+    for data1, meta1 in zip(data, meta):
+        one_spectrum(data1, meta1, synthphot=False)
+
+    return data
+
+
+def one_healpix(survey, program, healpix, targetids, redshift, fwhm, arms,
+                fastfiles, redrockfile=None, minsnr_broad=3.):
+    """Diagnostics of all the objects in one healpix.
+
+    Parameters
+    ----------
+    survey, program : str
+        Survey and program.
+    healpix : int
+        Healpix number.
+    targetids, redshift, fwhm : :class:`numpy.ndarray`
+        Objects of interest, their redshifts, and the FWHM [km/s] which sets
+        the width of the H-alpha window.
+    arms : list of str
+        Arms.
+    fastfiles : list
+        Per-healpix fastspec file of each arm, or `None`.
+    redrockfile : str, optional
+        Redrock file; if `None`, the chi2 is not measured.
+    minsnr_broad : float, optional
+        Minimum S/N of the broad H-alpha flux. Defaults to 3.
+
+    Returns
+    -------
+    :class:`numpy.ndarray`
+        One row per object (see :func:`diag_dtype`).
+
+    """
+    nobj, narm = len(targetids), len(arms)
+    spacings = [knot_spacing(arm) for arm in arms]
+
+    out = np.zeros(nobj, dtype=diag_dtype(narm))
+    out['TARGETID'] = targetids
+    out['FWHM_WINDOW'] = fwhm
+    out['NPAR'] = -1
+    for col in ['HA_BUMP', 'HA_CONT', 'CHI2', 'SIGCHI']:
+        out[col] = np.nan
+
+    linewave = HALPHA_WAVE * (1. + redshift)
+    halfwidth = NFWHM * fwhm / C_LIGHT * linewave
+
+    allmodels = [None] * narm
+    for iarm, fastfile in enumerate(fastfiles):
+        if fastfile is None:
+            continue
+        allmodels[iarm] = read_models(fastfile, targetids, minsnr_broad=minsnr_broad)
+        if allmodels[iarm] is None:
+            continue
+        wave, rows, cont, smooth, hasbroad = allmodels[iarm]
+        for iobj in np.where(rows >= 0)[0]:
+            row = rows[iobj]
+            out['ISFIT'][iobj, iarm] = True
+            out['HASBROAD'][iobj, iarm] = hasbroad[row]
+            out['HA_BUMP'][iobj, iarm], out['HA_CONT'][iobj, iarm] = halpha_bump(
+                wave, smooth[row, :], cont[row, :], linewave[iobj], halfwidth[iobj])
+
+    if redrockfile is None or not np.any(out['ISFIT']):
+        return out
+
+    # Do not let one bad file stop the whole run.
+    try:
+        alldata = read_spectra(redrockfile, targetids)
+    except Exception as err:
+        log.warning(f'Problem reading {survey}-{program}-{healpix}: {err}')
+        return out
+
+    for data in alldata:
+        iobj = np.where(targetids == data['uniqueid'])[0]
+        if len(iobj) == 0:
+            continue
+        iobj = iobj[0]
+        models = [None] * narm
+        for iarm in range(narm):
+            if out['ISFIT'][iobj, iarm]:
+                wave, rows, cont, smooth, _ = allmodels[iarm]
+                models[iarm] = (wave, cont[rows[iobj], :], smooth[rows[iobj], :])
+        camera_chi2(data, models, spacings, out, iobj)
+
+    return out
+
+
+def main():
+    """Main wrapper.
+
+    """
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--rundir', type=str, required=True,
+                        help='Directory with the sample and one subdirectory per arm.')
+    parser.add_argument('--outfile', type=str, default=None,
+                        help=f'Output file; by default, ${{rundir}}/{DIAGFILE}.')
+    parser.add_argument('--arms', type=str, default=None,
+                        help='Comma-separated list of arms; by default, all the arms in --rundir.')
+    parser.add_argument('--baseline-dir', type=str, default=None,
+                        help=f'Top-level directory of the per-healpix {BASELINE} fastspec files '
+                        '(<dir>/<survey>/<program>/<healpix//100>/<healpix>/); adds the baseline '
+                        'as an arm.')
+    parser.add_argument('--specprod', type=str, default='iron', help='Spectroscopic production.')
+    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing workers.')
+    parser.add_argument('--nhealpix', type=int, default=None,
+                        help='Only process the first N healpix files (for testing).')
+    parser.add_argument('--no-chi2', action='store_true',
+                        help='Do not read the spectra, i.e., only measure the H-alpha bump.')
+    parser.add_argument('--minsnr-broad', type=float, default=3.,
+                        help='Minimum S/N of the fastspecfit broad H-alpha flux.')
+    parser.add_argument('--seed', type=int, default=1, help='Random seed.')
+    args = parser.parse_args()
+
+    outfile = os.path.join(args.rundir, DIAGFILE) if args.outfile is None else args.outfile
+
+    samplefile = os.path.join(args.rundir, SAMPLEFILE)
+    ref = Table(fitsio.read(samplefile))
+    log.info(f'Read {len(ref):,d} rows from {samplefile}')
+
+    # gather the arms
+    armdirs = {}
+    if args.baseline_dir is not None:
+        armdirs[BASELINE] = args.baseline_dir
+    for arm in sorted(os.listdir(args.rundir)):
+        armdir = os.path.join(args.rundir, arm, args.specprod, 'healpix')
+        if os.path.isdir(armdir):
+            armdirs[arm] = armdir
+    if args.arms is not None:
+        armdirs = {arm: armdirs[arm] for arm in args.arms.split(',')}
+    if len(armdirs) == 0:
+        errmsg = f'No arms found in {args.rundir}'
+        log.critical(errmsg)
+        raise IOError(errmsg)
+    arms = sorted(armdirs.keys(), key=arm_sortkey)
+    log.info(f'Arms: {",".join(arms)}')
+
+    # The width of the H-alpha window: the EmFit FWHM for the BL-AGN, and a
+    # FWHM drawn from the gold BL-AGN for everything else.
+    sample = strip(ref['SAMPLE'])
+    isbl = sample == 'bl'
+    isgold = isbl & (ref['VI_FLAG'].data == 0)
+    fwhm = SIGMA2FWHM * ref['HA_B_SIGMA'].data.astype('f8')
+    rng = np.random.default_rng(args.seed)
+    fwhm[~isbl] = rng.choice(fwhm[isgold], np.sum(~isbl))
+
+    survey, program = strip(ref['SURVEY']), strip(ref['PROGRAM'])
+    healpix = ref['HEALPIX'].data.astype(int)
+    key = np.char.add(np.char.add(np.char.add(survey, '-'), np.char.add(program, '-')),
+                      healpix.astype(str))
+    ukey, inverse = np.unique(key, return_inverse=True)
+    srt = np.argsort(inverse, kind='stable')
+    groups = np.split(srt, np.cumsum(np.bincount(inverse))[:-1])
+    if args.nhealpix is not None:
+        groups = groups[:args.nhealpix]
+    log.info(f'Working on {sum(len(I) for I in groups):,d} objects in {len(groups):,d} healpix files.')
+
+    if args.no_chi2:
+        redux_dir = None
+    else:
+        redux_dir = os.path.join(os.path.expandvars(os.environ.get('DESI_SPECTRO_REDUX')),
+                                 args.specprod, 'healpix')
+
+    diagargs = []
+    for I in groups:
+        survey1, program1, healpix1 = survey[I[0]], program[I[0]], healpix[I[0]]
+        redrockfile = None
+        if redux_dir is not None:
+            redrockfile = healpix_file(redux_dir, 'redrock', survey1, program1, healpix1)
+            if redrockfile is None:
+                log.warning(f'No Redrock file for {survey1}-{program1}-{healpix1}')
+        diagargs.append({
+            'survey':       survey1,
+            'program':      program1,
+            'healpix':      healpix1,
+            'targetids':    ref['TARGETID'].data[I],
+            'redshift':     ref['Z'].data[I].astype('f8'),
+            'fwhm':         fwhm[I],
+            'arms':         arms,
+            'fastfiles':    [healpix_file(armdirs[arm], 'fastspec', survey1, program1, healpix1)
+                             for arm in arms],
+            'redrockfile':  redrockfile,
+            'minsnr_broad': args.minsnr_broad,
+        })
+
+    from fastspecfit.util import MPPool
+    if args.no_chi2:
+        mp_pool = MPPool(args.mp)
+    else:
+        # the spectra are read in the workers, if any
+        from fastspecfit.singlecopy import sc_data, _initialize_sc_data_worker
+        if args.mp > 1:
+            mp_pool = MPPool(args.mp, initializer=_initialize_sc_data_worker, init_argdict={})
+        else:
+            sc_data.initialize()
+            mp_pool = MPPool(1)
+
+    out = np.hstack(list(mp_pool.starmap(one_healpix, diagargs)))
+    mp_pool.close()
+
+    for iarm, arm in enumerate(arms):
+        log.info(f'{arm}: {np.sum(out["ISFIT"][:, iarm]):,d}/{len(out):,d} objects with models, '
+                 f'{np.sum(np.isfinite(out["HA_BUMP"][:, iarm])):,d} with an H-alpha window, '
+                 f'{np.sum(np.any(np.isfinite(out["CHI2"][:, iarm, :]), axis=1)):,d} with a chi2.')
+
+    fitsio.write(outfile, out, extname='SMOOTHDIAG', header={'ARMS': ','.join(arms)}, clobber=True)
+    log.info(f'Wrote {len(out):,d} rows to {outfile}')
+
+
+if __name__ == '__main__':
+    main()

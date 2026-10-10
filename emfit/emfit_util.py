@@ -10,6 +10,10 @@ SIGMA2FWHM = 2. * np.sqrt(2. * np.log(2.))
 SAMPLEFILE = 'emfit-sample.fits'
 BASELINEFILE = 'fastspec-iron-v4.0-emfit.fits'
 BASELINE = 'v4.0'
+DIAGFILE = 'smooth-diagnostics.fits' # written by smooth-diagnostics
+
+C_LIGHT = 299792.458 # [km/s]
+HALPHA_WAVE = 6564.60 # vacuum [Angstrom]
 
 # EmFit columns copied into the reference catalog.
 EMFIT_IDCOLS = ['TARGETID', 'SURVEY', 'PROGRAM', 'HEALPIX', 'TARGET_RA', 'TARGET_DEC',
@@ -47,6 +51,18 @@ FAST_COLS = ([f'SMOOTHCORR_{cam}' for cam in FAST_CAMERAS] +
              [f'SNR_{cam}' for cam in FAST_CAMERAS] +
              ['DELTA_LINECHI2', 'DELTA_LINENDOF'] +
              [f'{line}{suffix}' for line in FAST_LINES for suffix in FAST_LINE_SUFFIXES])
+
+
+def arm_sortkey(arm):
+    """Sort key which orders the arms as: baseline, knots (in order of
+    increasing spacing), everything else.
+
+    """
+    if arm == BASELINE:
+        return (0, 0.)
+    elif arm.startswith('knots'):
+        return (1, float(arm[5:]))
+    return (2, 0.)
 
 
 def strip(strings):

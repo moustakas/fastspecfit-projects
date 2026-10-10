@@ -5,7 +5,7 @@
 #SBATCH --mail-user=jmoustakas@siena.edu
 #SBATCH --mail-type=ALL
 #SBATCH --nodes=5
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --job-name=fastspec-emfit
 #SBATCH --output=fastspec-emfit-%j.log
 
@@ -15,8 +15,8 @@
 #
 # The arms run concurrently, one node each, without MPI: a single process per
 # node with one multiprocessing worker per physical core, each fitting one
-# healpix file at a time. (With MPI, job 59592459 launched 32 independent
-# "rank 0" processes which all fit the full sample.)
+# healpix file at a time. This is fast enough for a sample of this size, so
+# MPI is not needed.
 #
 # Existing per-healpix output files are skipped, so the job can be resubmitted
 # if it times out.

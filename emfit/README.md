@@ -22,6 +22,7 @@ outflow and double-peaked narrow components.
 |---|---|
 | `build-emfit-sample` | Select the sample; write the samplefile / reference catalog and the iron/v4.0 baseline |
 | `fastspec-emfit.slurm` | Fit the sample once per arm with `mpi-fastspecfit --samplefile`, and merge |
+| `smooth-diagnostics` | Per-object smooth-continuum diagnostics from the per-healpix model spectra (and the observed spectra) |
 | `compare-emfit` | Summary statistics, figures, and lists of changed objects |
 | `emfit_util.py` | Column lists and helpers shared by the two Python scripts |
 
@@ -107,9 +108,19 @@ export RUNDIR=$PSCRATCH/fastspecfit/emfit
 # 2. fit and merge every arm (edit the variables at the top first)
 sbatch fastspec-emfit.slurm
 
-# 3. compare
+# 3. smooth-continuum diagnostics (optional; writes $RUNDIR/smooth-diagnostics.fits)
+./smooth-diagnostics --rundir $RUNDIR --mp 128
+
+# 4. compare
 ./compare-emfit --rundir $RUNDIR
 ```
+
+`smooth-diagnostics` reads the `MODELS` extension of the per-healpix fastspec
+files of every arm (the merged catalogs do not have one) and re-reads the
+observed spectra with the fastspecfit I/O, so it needs the same environment as
+the fits. Use `--nhealpix 20 --mp 1` for a quick test, `--no-chi2` to skip the
+spectra, and `--baseline-dir` (the top-level directory of the per-healpix
+iron/v4.0 fastspec files) to add the baseline as an arm.
 
 Each arm is written to `$RUNDIR/<arm>/iron/` and merged into
 `$RUNDIR/<arm>/iron/catalogs/fastspec-iron-emfit.fits`. `compare-emfit` picks up
@@ -122,11 +133,14 @@ which should take roughly half an hour per arm; it asks for 2 hours. The job
 resumes where it stopped if resubmitted. Each arm has its own log in
 `$RUNDIR/fastspec-emfit-<arm>-<jobid>.log`.
 
-MPI is avoided because in job 59592459 all 32 `srun` tasks came up as
-independent "rank 0" processes, each fitting the whole sample. The cause is
-not yet known; `mpi-fastspecfit` silently falls back to no MPI when
-`from mpi4py import MPI` fails. To check, in an interactive allocation with
-the same environment:
+The first attempt used MPI, and in job 59592459 all 32 `srun` tasks came up
+as independent "rank 0" processes, each fitting the whole sample. The cause was
+the 26.3 DESI software stack, which broke in a NERSC maintenance;
+`mpi-fastspecfit` silently falls back to no MPI when `from mpi4py import MPI`
+fails. `etc/fastspecfit-env.sh` on the `smooth-cont` branch now loads 26.9,
+where MPI works, but a single process per node is fast enough for this
+sample, so the Slurm script stays MPI-free. To check MPI in an interactive
+allocation:
 
 ```bash
 srun -n 4 python -c "from mpi4py import MPI; print(MPI.COMM_WORLD.rank, MPI.COMM_WORLD.size)"
@@ -153,6 +167,35 @@ srun -n 4 python -c "from mpi4py import MPI; print(MPI.COMM_WORLD.rank, MPI.COMM
 - `changed-<arm>.txt`: gold BL-AGN `lost` or `gained` and control objects with
   a `spurious` broad line relative to the baseline, for inspection with
   `fastqa`.
+
+## Output of `smooth-diagnostics`
+
+`SMOOTHCORR` is the camera median of the smooth continuum over the flux, a
+zero-point which any spline reproduces, so it does not distinguish the knot
+spacings. `smooth-diagnostics` measures two quantities which do, and
+`compare-emfit` summarizes them in `smoothdiag.txt` and `smoothdiag.png` when
+`smooth-diagnostics.fits` exists.
+
+- **Cost** (`HA_BUMP`): the smooth continuum integrated over +/-1.5 FWHM
+  around H-alpha, after subtracting the straight line which joins its two
+  ends. Divided by the EmFit broad H-alpha flux (`FABS_*`), it is the fraction
+  of the broad line which the spline absorbed; `FABS_LOST` and `FABS_KEPT` are
+  the medians for the gold BL-AGN which lose and keep the broad line of the
+  reference arm (`nosmooth`). Objects without an EmFit broad line are assigned
+  a FWHM drawn from the gold BL-AGN, so the control sample gives the null
+  distribution (`BUMPEW_NL`, as an equivalent width in Angstrom).
+- **Benefit** (`DCHI2_{camera}_{sample}`): the decrease in chi2 of the
+  line-free pixels per added spline parameter, relative to the next stiffer
+  arm, in units of the variance of the residuals. A value of about one means
+  that the added knots only fit noise; `FSIG_*` is the fraction of objects in
+  which the decrease is significant (3-sigma). The expectation of one is
+  approximate, because the knots of two arms are not nested and the spline
+  rejects outliers.
+
+Caveats: the model spectra of adjacent cameras are interleaved where the
+cameras overlap, so those pixels are left out of the chi2, and `HA_BUMP` is an
+average of the two cameras when H-alpha falls there. `HA_BUMP` is undefined
+(NaN) when the window runs off the spectrum or crosses a gap.
 
 ## Things to keep in mind when reading the results
 
@@ -187,10 +230,19 @@ srun -n 4 python -c "from mpi4py import MPI; print(MPI.COMM_WORLD.rank, MPI.COMM
 
 ## Not yet done
 
-- Nothing here has been run. The Python scripts pass a syntax check only.
+- All three scripts have been run at NERSC for the six arms. The
+  `compare-emfit` output and `emfit-sample.fits` are also on the laptop, in
+  `compare/` and in this directory; the per-arm catalogs are only at NERSC.
+- `smooth-diagnostics` and the `smoothdiag` part of `compare-emfit` have
+  passed a syntax check only.
+- At 200 Angstrom the gold BL-AGN are lost most often when H-alpha is in the r
+  camera or the r/z overlap (8.6% at 7400 to 7600 Angstrom, against about 2%
+  in the interior of the z camera), and at every knot spacing near the red end
+  of the z camera. The cause has not been established.
+- In `smoothcorr.png` the legend overlaps the curves in the upper-left panel.
 - The plot colors were taken from a validated palette but not re-validated
   (no `node` on the laptop).
-- Possible additions: recovery in bins of the smooth correction itself;
+- Possible additions: recovery in bins of observed H-alpha wavelength;
   comparison of the fastspecfit smooth continuum at H-alpha with EmFit's
   `NII_HA_CONTINUUM`; H-beta broad-line comparison (the columns are already in
   both files).

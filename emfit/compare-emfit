@@ -26,6 +26,12 @@ Output (to --outdir, by default ${rundir}/compare):
   changed-<arm>.txt           - objects whose broad-line classification differs
                                 from the baseline (e.g., for fastqa)
 
+If ${rundir}/smooth-diagnostics.fits exists (see smooth-diagnostics), also:
+  smoothdiag.txt              - one row per arm: the broad H-alpha flux absorbed
+                                by the smooth continuum, and the chi2 gained per
+                                spline parameter relative to the next stiffer arm
+  smoothdiag.png              - the same, as a figure
+
 """
 import os, argparse
 from glob import glob
@@ -35,8 +41,9 @@ from astropy.table import Table, vstack
 
 from desiutil.log import get_logger
 
-from emfit_util import (SAMPLEFILE, BASELINEFILE, BASELINE, SIGMA2FWHM, FAST_METACOLS,
-                        FAST_COLS, FAST_CAMERAS, emfit_narrow_flux, match_targetid)
+from emfit_util import (SAMPLEFILE, BASELINEFILE, BASELINE, DIAGFILE, SIGMA2FWHM,
+                        FAST_METACOLS, FAST_COLS, FAST_CAMERAS, arm_sortkey,
+                        emfit_narrow_flux, match_targetid)
 
 log = get_logger()
 
@@ -376,6 +383,227 @@ def qa_smoothcorr(pngfile, arms, styles, fasts, isfits, samples):
     log.info(f'Wrote {pngfile}')
 
 
+def read_diag(diagfile, ref):
+    """Read the output of smooth-diagnostics and row-match it to the reference
+    catalog.
+
+    Returns
+    -------
+    diag : :class:`numpy.ndarray`
+        Diagnostics row-matched to ``ref``.
+    diagarms : list of str
+        Arms, in the order of the per-arm columns of ``diag``.
+
+    """
+    _diag, hdr = fitsio.read(diagfile, ext='SMOOTHDIAG', header=True)
+    diagarms = hdr['ARMS'].strip().split(',')
+
+    diag = np.zeros(len(ref), dtype=_diag.dtype)
+    for col in ['HA_BUMP', 'HA_CONT', 'CHI2', 'SIGCHI']:
+        diag[col] = np.nan
+    diag['NPAR'] = -1
+
+    iref = match_targetid(ref['TARGETID'].data, _diag['TARGETID'])
+    I = iref >= 0
+    diag[iref[I]] = _diag[I]
+
+    log.info(f'Read {np.sum(I):,d}/{len(ref):,d} objects from {diagfile}')
+    return diag, diagarms
+
+
+def stiffness_order(diagarms):
+    """Indices of the arms with a known number of spline parameters, from the
+    stiffest (no smooth continuum) to the most flexible.
+
+    """
+    def _spacing(arm):
+        return np.inf if arm == 'nosmooth' else float(arm[5:])
+    indx = [iarm for iarm, arm in enumerate(diagarms) if arm == 'nosmooth' or arm.startswith('knots')]
+    return sorted(indx, key=lambda iarm: -_spacing(diagarms[iarm]))
+
+
+def dchi2_per_parameter(diag, istiff, iflex):
+    """Decrease in chi2 between two arms per added spline parameter, in units
+    of the variance of the residuals of the more flexible arm.
+
+    A value of about one means that the added parameters only fit noise.
+    (This is approximate: the knots of the two arms are not nested, and the
+    spline rejects outliers.)
+
+    Returns
+    -------
+    ratio : :class:`numpy.ndarray`
+        Decrease in chi2 per parameter, ``[nobj, ncamera]`` (NaN if undefined).
+    signif : :class:`numpy.ndarray`
+        Whether the decrease exceeds the noise expectation by 3-sigma.
+
+    """
+    dnpar = (diag['NPAR'][:, iflex, :] - diag['NPAR'][:, istiff, :]).astype('f8')
+    var = diag['SIGCHI'][:, iflex, :].astype('f8')**2
+    good = ((diag['NPAR'][:, istiff, :] >= 0) & (dnpar > 0) & (diag['NPIX'] > 0) & (var > 0.) &
+            np.isfinite(diag['CHI2'][:, istiff, :]) & np.isfinite(diag['CHI2'][:, iflex, :]))
+
+    dchi2 = np.full(dnpar.shape, np.nan)
+    dchi2[good] = (diag['CHI2'][:, istiff, :] - diag['CHI2'][:, iflex, :])[good] / var[good]
+    ratio = np.full(dnpar.shape, np.nan)
+    ratio[good] = dchi2[good] / dnpar[good]
+    signif = np.zeros(dnpar.shape, bool)
+    signif[good] = dchi2[good] > (dnpar[good] + 3. * np.sqrt(2. * dnpar[good]))
+
+    return ratio, signif
+
+
+def nanmedian(values):
+    """Median of the finite values, or NaN if there are none.
+
+    """
+    values = values[np.isfinite(values)]
+    return np.median(values) if len(values) > 0 else np.nan
+
+
+def absorbed_fraction(diag, iarm, ref):
+    """Fraction of the EmFit broad H-alpha flux absorbed by the smooth
+    continuum (NaN where undefined).
+
+    """
+    fbroad = ref['HA_B_FLUX'].data.astype('f8')
+    fabs = np.full(len(ref), np.nan)
+    I = diag['ISFIT'][:, iarm] & (fbroad > 0.)
+    fabs[I] = diag['HA_BUMP'][I, iarm] / fbroad[I]
+    return fabs
+
+
+def summarize_diag(diag, diagarms, ref, isgold, isnl, iscalib):
+    """Summary of the smooth-continuum diagnostics, one row per arm.
+
+    Columns
+    -------
+    FABS_GOLD (and _P16, _P84) : median and percentiles of the fraction of the
+        EmFit broad H-alpha flux absorbed by the smooth continuum, gold BL-AGN.
+    FABS_LOST, FABS_KEPT : the median for the gold BL-AGN which have a broad
+        line in the reference arm (REFARM) and do not / do have one in this arm.
+    BUMPEW_GOLD, BUMPEW_NL (and _NMAD) : the absorbed flux as an observed-frame
+        equivalent width [Angstrom]; the control sample is the null.
+    DCHI2_{camera}_{sample} : median decrease in chi2 per added spline
+        parameter relative to the next stiffer arm (STIFFER); about one if the
+        added parameters only fit noise.
+    FSIG_{camera}_{sample} : fraction of objects in which that decrease is
+        significant (3-sigma).
+
+    """
+    order = stiffness_order(diagarms)
+    stiffer = {iflex: istiff for istiff, iflex in zip(order[:-1], order[1:])}
+    irefarm = order[0] if len(order) > 0 else 0
+    refbroad = diag['HASBROAD'][:, irefarm]
+
+    samples = [('NL', isnl), ('BL', isgold), ('CALIB', iscalib)]
+
+    rows = []
+    for iarm, arm in enumerate(diagarms):
+        isfit = diag['ISFIT'][:, iarm]
+        hasbroad = diag['HASBROAD'][:, iarm]
+        row = {'ARM': arm, 'NFIT': np.sum(isfit)}
+
+        fabs = absorbed_fraction(diag, iarm, ref)
+        good = isgold & np.isfinite(fabs)
+        if np.sum(good) > 0:
+            row['FABS_GOLD_P16'], row['FABS_GOLD'], row['FABS_GOLD_P84'] = \
+                np.percentile(fabs[good], [16., 50., 84.])
+        else:
+            row['FABS_GOLD_P16'], row['FABS_GOLD'], row['FABS_GOLD_P84'] = np.nan, np.nan, np.nan
+        row['REFARM'] = diagarms[irefarm]
+        row['NLOST'] = np.sum(good & refbroad & ~hasbroad)
+        row['FABS_LOST'] = nanmedian(fabs[good & refbroad & ~hasbroad])
+        row['FABS_KEPT'] = nanmedian(fabs[good & refbroad & hasbroad])
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            bumpew = diag['HA_BUMP'][:, iarm] / diag['HA_CONT'][:, iarm]
+        for sample, I in [('GOLD', isgold), ('NL', isnl)]:
+            J = I & isfit & np.isfinite(bumpew) & (diag['HA_CONT'][:, iarm] > 0.)
+            med = nanmedian(bumpew[J])
+            row[f'BUMPEW_{sample}'] = med
+            row[f'BUMPEW_{sample}_NMAD'] = 1.4826 * nanmedian(np.abs(bumpew[J] - med))
+
+        if iarm in stiffer:
+            row['STIFFER'] = diagarms[stiffer[iarm]]
+            ratio, signif = dchi2_per_parameter(diag, stiffer[iarm], iarm)
+        else:
+            row['STIFFER'] = '-'
+            ratio = np.full((len(ref), len(FAST_CAMERAS)), np.nan)
+            signif = np.zeros(ratio.shape, bool)
+        for prefix in ['DCHI2', 'FSIG']:
+            for sample, I in samples:
+                for icam, cam in enumerate(FAST_CAMERAS):
+                    J = I & np.isfinite(ratio[:, icam])
+                    if prefix == 'DCHI2':
+                        row[f'DCHI2_{cam}_{sample}'] = nanmedian(ratio[J, icam])
+                    else:
+                        row[f'FSIG_{cam}_{sample}'] = frac(signif[:, icam], J)
+        rows.append(row)
+
+    return Table(rows)
+
+
+def qa_smoothdiag(pngfile, diag, diagarms, styles, ref, isgold, isnl):
+    """Cumulative distribution of the fraction of the broad H-alpha flux
+    absorbed by the smooth continuum (gold BL-AGN), and the decrease in chi2
+    per added spline parameter (control sample), per arm.
+
+    """
+    import matplotlib.pyplot as plt
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
+
+    # cost
+    xlim = (-0.3, 1.)
+    for iarm, arm in enumerate(diagarms):
+        if arm == 'nosmooth':
+            continue
+        fabs = absorbed_fraction(diag, iarm, ref)
+        fabs = np.sort(fabs[isgold & np.isfinite(fabs)])
+        if len(fabs) == 0:
+            continue
+        ax1.plot(np.clip(fabs, *xlim), np.arange(1, len(fabs) + 1) / len(fabs), lw=2,
+                 color=styles[arm]['color'], ls=styles[arm]['ls'], label=arm_label(arm))
+    ax1.axvline(0., color='#8a897f', lw=1, ls=':')
+    ax1.set_xlim(xlim)
+    ax1.set_ylim(0., 1.)
+    ax1.set_xlabel(r'Smooth-continuum flux under H$\alpha$ / EmFit broad H$\alpha$ flux')
+    ax1.set_ylabel('Cumulative fraction')
+    ax1.set_title(r'Cost: broad H$\alpha$ flux absorbed (gold BL-AGN)', fontsize=10, loc='left')
+    ax1.legend(fontsize=9, frameon=False, loc='lower right')
+    setup_axes(ax1)
+
+    # benefit
+    order = stiffness_order(diagarms)
+    pairs = list(zip(order[:-1], order[1:]))
+    xpos = np.arange(len(pairs))
+    for icam, cam in enumerate(FAST_CAMERAS):
+        med = []
+        for istiff, iflex in pairs:
+            ratio, _ = dchi2_per_parameter(diag, istiff, iflex)
+            med.append(nanmedian(ratio[isnl, icam]))
+        ax2.plot(xpos, np.clip(med, 0.1, None), lw=2, ms=7, mec='white', mew=1,
+                 color=EXTRA[icam], marker=MARKERS[icam], label=f'{cam.lower()} camera')
+    ax2.axhline(1., color='#8a897f', lw=1, ls=':')
+    if len(pairs) > 0:
+        ax2.text(xpos[-1], 1., 'noise only ', fontsize=8, color='#6b6a63', ha='right', va='bottom')
+        ax2.set_xticks(xpos)
+        ax2.set_xticklabels([f'{arm_label(diagarms[istiff])}\n' + r'$\rightarrow$' +
+                             f' {arm_label(diagarms[iflex])}' for istiff, iflex in pairs], fontsize=8)
+        ax2.set_xlim(-0.4, len(pairs) - 0.6)
+    ax2.set_yscale('log')
+    ax2.set_ylabel(r'Median $\Delta\chi^2$ per added spline parameter')
+    ax2.set_title('Benefit: structure absorbed by the added knots (control)', fontsize=10, loc='left')
+    ax2.legend(fontsize=9, frameon=False, loc='upper right')
+    setup_axes(ax2)
+
+    fig.tight_layout()
+    fig.savefig(pngfile, dpi=150)
+    plt.close(fig)
+    log.info(f'Wrote {pngfile}')
+
+
 def main():
     """Main wrapper.
 
@@ -412,13 +640,7 @@ def main():
         raise IOError(errmsg)
 
     # baseline first, then knots (in order of increasing spacing), then the rest
-    def _order(arm):
-        if arm == BASELINE:
-            return (0, 0.)
-        elif arm.startswith('knots'):
-            return (1, float(arm[5:]))
-        return (2, 0.)
-    arms = sorted(armfiles.keys(), key=_order)
+    arms = sorted(armfiles.keys(), key=arm_sortkey)
     styles = arm_styles(arms)
 
     sample = np.char.strip(ref['SAMPLE'].astype(str))
@@ -448,6 +670,24 @@ def main():
                  ['ARM'] + [col for col in summary.colnames if 'SMOOTHCORR' in col]]:
         summary[cols].pprint(max_lines=-1, max_width=-1)
 
+    # optional smooth-continuum diagnostics
+    diag = None
+    diagfile = os.path.join(args.rundir, DIAGFILE)
+    if os.path.isfile(diagfile):
+        diag, diagarms = read_diag(diagfile, ref)
+        diagsummary = summarize_diag(diag, diagarms, ref, isgold, isnl, iscalib)
+        for col in diagsummary.colnames:
+            if diagsummary[col].dtype.kind == 'f':
+                diagsummary[col].info.format = '.4f'
+        diagsummaryfile = os.path.join(outdir, 'smoothdiag.txt')
+        diagsummary.write(diagsummaryfile, format='ascii.fixed_width', bookend=False,
+                          delimiter=None, overwrite=True)
+        log.info(f'Wrote {diagsummaryfile}')
+        for cols in [[col for col in diagsummary.colnames if 'DCHI2' not in col and 'FSIG' not in col],
+                     ['ARM', 'STIFFER'] + [col for col in diagsummary.colnames if 'DCHI2' in col],
+                     ['ARM', 'STIFFER'] + [col for col in diagsummary.colnames if 'FSIG' in col]]:
+            diagsummary[cols].pprint(max_lines=-1, max_width=-1)
+
     if BASELINE in arms:
         for arm in arms:
             if arm != BASELINE:
@@ -463,6 +703,9 @@ def main():
                 hasbroads, isgold)
         qa_smoothcorr(os.path.join(outdir, 'smoothcorr.png'), arms, styles, fasts, isfits,
                       [('calib', iscalib), ('bl (gold)', isgold), ('nl', isnl)])
+        if diag is not None:
+            qa_smoothdiag(os.path.join(outdir, 'smoothdiag.png'), diag, diagarms,
+                          arm_styles(diagarms), ref, isgold, isnl)
 
 
 if __name__ == '__main__':
