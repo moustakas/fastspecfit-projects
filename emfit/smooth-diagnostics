@@ -52,7 +52,8 @@ NFWHM = 1.5      # half-width of the H-alpha window in units of the FWHM
 NEDGEPIX = 5     # pixels averaged on either side of each end of the window
 MAXBADFRAC = 0.2 # maximum fraction of the window without data
 
-# must match fastspecfit.continuum.ContinuumTools.smooth_continuum
+# must match fastspecfit.continuum.ContinuumTools.smooth_continuum (as must
+# trim_ends and spline_npar, below)
 NMINPIX = 15     # minimum number of pixels between knots
 NMASKPIX = 9     # pixels masked at each end of a camera
 DEGREE = 3       # cubic spline
@@ -125,6 +126,10 @@ def read_models(fastfile, targetids, minsnr_broad=3.):
         Stellar and smooth continuum models, ``[nobj, npix]``.
     hasbroad : :class:`numpy.ndarray`
         Whether each object has a broad H-alpha line.
+    trimmed : bool
+        Whether the fit dropped the short runs of unmasked pixels at the ends
+        of each camera (see :func:`trim_ends`), which is the case if the file
+        has the ``DELTA_SMOOTHNDOF`` columns.
 
     """
     F = fitsio.FITS(fastfile)
@@ -137,6 +142,7 @@ def read_models(fastfile, targetids, minsnr_broad=3.):
     hdr = F['MODELS'].read_header()
     models = F['MODELS'].read() # [nobj, 3, npix]
     line = F['FASTSPEC'].read(columns=['HALPHA_BROAD_FLUX', 'HALPHA_BROAD_FLUX_IVAR'])
+    trimmed = f'DELTA_SMOOTHNDOF_{FAST_CAMERAS[0]}' in F['FASTSPEC'].get_colnames()
     F.close()
 
     wave = hdr['CRVAL1'] + hdr['CDELT1'] * np.arange(models.shape[2])
@@ -146,7 +152,7 @@ def read_models(fastfile, targetids, minsnr_broad=3.):
     snr = flux * np.sqrt(np.clip(line['HALPHA_BROAD_FLUX_IVAR'], 0., None))
     hasbroad = (flux > 0.) & (snr >= minsnr_broad)
 
-    return wave, rows, models[:, 0, :], models[:, 1, :], hasbroad
+    return wave, rows, models[:, 0, :], models[:, 1, :], hasbroad, trimmed
 
 
 def halpha_bump(wave, smooth, cont, linewave, halfwidth):
@@ -209,6 +215,39 @@ def halpha_bump(wave, smooth, cont, linewave, halfwidth):
     return bump, linecont
 
 
+def trim_ends(good):
+    """Drop a run of unmasked pixels at either end of a camera if it is shorter
+    than the masked region which separates it from the rest of the spectrum
+    (a copy of ``_trim_ends`` in
+    `fastspecfit.continuum.ContinuumTools.smooth_continuum`).
+
+    Parameters
+    ----------
+    good : :class:`numpy.ndarray`
+        Boolean array which is ``True`` for the unmasked pixels of one camera.
+
+    Returns
+    -------
+    :class:`numpy.ndarray`
+        Trimmed copy of ``good``.
+
+    """
+    good = good.copy()
+    for _ in range(2): # blue end, then red end
+        while True:
+            I = np.flatnonzero(good)
+            gaps = np.flatnonzero(np.diff(I) > 1)
+            if len(gaps) == 0:
+                break
+            nrun = gaps[0] + 1                       # pixels in the end run
+            ngap = I[gaps[0] + 1] - I[gaps[0]] - 1   # masked pixels beyond it
+            if nrun >= ngap:
+                break
+            good[I[:nrun]] = False
+        good = good[::-1]
+    return good
+
+
 def spline_npar(goodwave, spacing):
     """Number of free parameters of the smooth-continuum spline of one
     camera, before any outlier rejection (see
@@ -256,8 +295,9 @@ def camera_chi2(data, models, spacings, out, iobj):
     data : dict
         Spectroscopic data of one object (see `fastspecfit.io.one_spectrum`).
     models : list
-        For each arm, `None` or the wavelength vector and the stellar and
-        smooth continuum models of this object.
+        For each arm, `None` or the wavelength vector, the stellar and smooth
+        continuum models of this object, and whether the fit trimmed the ends
+        of each camera (see :func:`trim_ends`).
     spacings : list
         Knot spacing of each arm (see :func:`knot_spacing`).
     out : :class:`numpy.ndarray`
@@ -278,7 +318,8 @@ def camera_chi2(data, models, spacings, out, iobj):
         good[-NMASKPIX:] = False
         if np.sum(good) < NMINPIX:
             continue
-        goodwave = wave[good] # the pixels used by the spline
+        # the pixels used by the spline, without and with trimming
+        goodwave = {False: wave[good], True: wave[trim_ends(good)]}
 
         # The models of adjacent cameras are interleaved where the cameras
         # overlap, so do not use those pixels.
@@ -295,7 +336,7 @@ def camera_chi2(data, models, spacings, out, iobj):
         for iarm in range(narm):
             if models[iarm] is None:
                 continue
-            modelwave, cont, smooth = models[iarm]
+            modelwave, cont, smooth, trimmed = models[iarm]
             camsmooth = np.interp(wave[good], modelwave, smooth)
             chi[iarm, :] = (flux[good] - np.interp(wave[good], modelwave, cont) - camsmooth) * istd
             q25, med[iarm], q75 = np.percentile(chi[iarm, :], [25., 50., 75.])
@@ -305,8 +346,10 @@ def camera_chi2(data, models, spacings, out, iobj):
                 pass
             elif spacings[iarm] == 0. or np.all(camsmooth == 0.):
                 npar[iarm, jcam] = 0
+            elif len(goodwave[trimmed]) < NMINPIX:
+                npar[iarm, jcam] = 0
             else:
-                npar[iarm, jcam] = spline_npar(goodwave, spacings[iarm])
+                npar[iarm, jcam] = spline_npar(goodwave[trimmed], spacings[iarm])
 
         # reject outliers with respect to the most flexible arm
         iref = [iarm for iarm in range(narm) if sig[iarm] > 0. and npar[iarm, jcam] > 0]
@@ -403,7 +446,7 @@ def one_healpix(survey, program, healpix, targetids, redshift, fwhm, arms,
         allmodels[iarm] = read_models(fastfile, targetids, minsnr_broad=minsnr_broad)
         if allmodels[iarm] is None:
             continue
-        wave, rows, cont, smooth, hasbroad = allmodels[iarm]
+        wave, rows, cont, smooth, hasbroad, _ = allmodels[iarm]
         for iobj in np.where(rows >= 0)[0]:
             row = rows[iobj]
             out['ISFIT'][iobj, iarm] = True
@@ -429,8 +472,8 @@ def one_healpix(survey, program, healpix, targetids, redshift, fwhm, arms,
         models = [None] * narm
         for iarm in range(narm):
             if out['ISFIT'][iobj, iarm]:
-                wave, rows, cont, smooth, _ = allmodels[iarm]
-                models[iarm] = (wave, cont[rows[iobj], :], smooth[rows[iobj], :])
+                wave, rows, cont, smooth, _, trimmed = allmodels[iarm]
+                models[iarm] = (wave, cont[rows[iobj], :], smooth[rows[iobj], :], trimmed)
         camera_chi2(data, models, spacings, out, iobj)
 
     return out
