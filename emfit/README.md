@@ -24,6 +24,7 @@ outflow and double-peaked narrow components.
 | `fastspec-emfit.slurm` | Fit the sample once per arm with `mpi-fastspecfit --samplefile`, and merge |
 | `smooth-diagnostics` | Per-object smooth-continuum diagnostics from the per-healpix model spectra (and the observed spectra) |
 | `compare-emfit` | Summary statistics, figures, and lists of changed objects |
+| `fastqa-emfit` | Select a few objects per open question from the diagnostics and build their `fastqa` figures, once per arm |
 | `emfit_util.py` | Column lists and helpers shared by the two Python scripts |
 
 ## Inputs
@@ -113,6 +114,9 @@ sbatch fastspec-emfit.slurm
 
 # 4. compare
 ./compare-emfit --rundir $RUNDIR
+
+# 5. figures for visual inspection (writes compare/fastqa-targets.txt and $RUNDIR/fastqa/)
+./fastqa-emfit --rundir $RUNDIR --mp 32
 ```
 
 `smooth-diagnostics` reads the `MODELS` extension of the per-healpix fastspec

@@ -1,0 +1,297 @@
+#!/usr/bin/env python
+"""
+Select a small number of objects for visual inspection and build their fastqa
+figures, once per arm.
+
+The objects are drawn from the output of smooth-diagnostics, a few per group,
+where each group addresses one open question about the smooth continuum:
+
+  A1, A2 - gold BL-AGN with H-alpha at the red end of the z camera and a large
+           smooth-continuum bump at 800 Angstrom; the broad line is lost (A1)
+           or kept (A2) at 800 Angstrom. Do the ends of the spline misbehave?
+  A3     - the same, with H-alpha in the r/z overlap.
+  A4     - H-alpha in the r/z overlap; lost at 200 Angstrom and kept at 800
+           Angstrom, with no measurable bump at 200 Angstrom.
+  B1, B2 - H-alpha in the interior of a camera; lost at 200 Angstrom and kept
+           at 800 Angstrom, with a large positive (B1) or negative (B2) bump
+           at 200 Angstrom.
+  B3     - the same, with no measurable bump and a high EmFit S/N.
+  C      - log M_BH < 6; lost at 200 Angstrom and kept at 800 Angstrom.
+  D      - control galaxies with a significant decrease in the chi2 of the z
+           camera from 800 to 400 Angstrom.
+  E      - calib objects with a large decrease in the chi2 of the z camera
+           from no smooth continuum to 800 Angstrom, and none beyond.
+
+"Lost" and "kept" are relative to the arm with no smooth continuum, and the
+"bump" is HA_BUMP over the EmFit broad H-alpha flux (see smooth-diagnostics).
+
+  fastqa-emfit --rundir $PSCRATCH/fastspecfit/emfit --mp 32
+
+Output:
+  ${rundir}/compare/fastqa-targets.txt   - the objects, their group, and the
+                                           quantities they were selected on
+  ${rundir}/fastqa/<arm>-*.png           - one figure per object and arm
+
+fastqa reads the smooth-continuum settings of each arm from the header of its
+catalog, and skips the figures which already exist (unless --overwrite).
+
+"""
+import os, argparse, subprocess
+import numpy as np
+import fitsio
+from astropy.table import Table
+
+from desiutil.log import get_logger
+
+from emfit_util import (SAMPLEFILE, DIAGFILE, SIGMA2FWHM, HALPHA_WAVE, FAST_CAMERAS,
+                        strip, snr, match_targetid)
+
+log = get_logger()
+
+REFARM = 'nosmooth'      # "lost" and "kept" are relative to this arm
+REQUIRED_ARMS = [REFARM, 'knots800', 'knots400', 'knots200']
+QA_ARMS = 'nosmooth,knots800,knots200'
+
+# observed-frame wavelength of H-alpha [Angstrom]
+REDEND = (9400., 9600.)                        # red end of the z camera
+OVERLAP = (7200., 7600.)                       # r/z overlap
+INTERIOR = [(6800., 7200.), (8000., 9200.)]    # interior of the r and z cameras
+
+MINSNR = 10.             # minimum EmFit broad H-alpha S/N (groups A and B)
+MINSNR_HIGH = 25.        # the same, for group B3
+BIGBUMP = 0.1            # "large" |bump|
+NOBUMP = 0.02            # "no measurable" |bump|
+MINFWHM = 589.           # smallest FWHM allowed by fastspecfit [km/s]
+
+
+def read_diag(diagfile, ref):
+    """Read the output of smooth-diagnostics, row-matched to the reference
+    catalog.
+
+    Returns
+    -------
+    diag : :class:`numpy.ndarray`
+        Diagnostics, one row per row of ``ref``.
+    arms : list of str
+        Arms, in the order of the per-arm columns of ``diag``.
+
+    """
+    diag, hdr = fitsio.read(diagfile, ext='SMOOTHDIAG', header=True)
+    arms = hdr['ARMS'].strip().split(',')
+
+    indx = match_targetid(diag['TARGETID'], ref['TARGETID'].data)
+    if np.any(indx < 0):
+        errmsg = f'{np.sum(indx < 0):,d} objects are missing from {diagfile}'
+        log.critical(errmsg)
+        raise ValueError(errmsg)
+
+    log.info(f'Read {len(diag):,d} rows from {diagfile}')
+    return diag[indx], arms
+
+
+def dchi2_nsigma(diag, istiff, iflex):
+    """Significance of the decrease in chi2 between two arms, i.e., the
+    decrease (in units of the variance of the residuals of the more flexible
+    arm) minus the number of added spline parameters, over its expected
+    scatter (see `dchi2_per_parameter` in compare-emfit).
+
+    Returns
+    -------
+    :class:`numpy.ndarray`
+        Significance, ``[nobj, ncamera]`` (NaN if undefined).
+
+    """
+    dnpar = (diag['NPAR'][:, iflex, :] - diag['NPAR'][:, istiff, :]).astype('f8')
+    var = diag['SIGCHI'][:, iflex, :].astype('f8')**2
+    good = ((diag['NPAR'][:, istiff, :] >= 0) & (dnpar > 0) & (diag['NPIX'] > 0) & (var > 0.) &
+            np.isfinite(diag['CHI2'][:, istiff, :]) & np.isfinite(diag['CHI2'][:, iflex, :]))
+
+    nsigma = np.full(dnpar.shape, np.nan)
+    dchi2 = (diag['CHI2'][:, istiff, :] - diag['CHI2'][:, iflex, :])[good] / var[good]
+    nsigma[good] = (dchi2 - dnpar[good]) / np.sqrt(2. * dnpar[good])
+    return nsigma
+
+
+def select_targets(ref, diag, arms, seed=1):
+    """Select the objects of every group.
+
+    Parameters
+    ----------
+    ref : :class:`astropy.table.Table`
+        Reference catalog.
+    diag : :class:`numpy.ndarray`
+        Output of smooth-diagnostics, row-matched to ``ref``.
+    arms : list of str
+        Arms of ``diag``.
+    seed : int, optional
+        Random seed. Defaults to 1.
+
+    Returns
+    -------
+    :class:`astropy.table.Table`
+        One row per selected object.
+
+    """
+    iref, i800, i400, i200 = [arms.index(arm) for arm in REQUIRED_ARMS]
+
+    sample = strip(ref['SAMPLE'])
+    isgold = (sample == 'bl') & (ref['VI_FLAG'].data == 0)
+    isnl = sample == 'nl'
+    iscalib = sample == 'calib'
+
+    fbroad = ref['HA_B_FLUX'].data.astype('f8')
+    snrbroad = snr(fbroad, ref['HA_B_FLUX_ERR'].data.astype('f8'))
+    fwhm = SIGMA2FWHM * ref['HA_B_SIGMA'].data.astype('f8')
+    logmbh = ref['LOG_MBH'].data
+    linewave = HALPHA_WAVE * (1. + ref['Z'].data.astype('f8'))
+
+    def inwave(lohi):
+        return (linewave >= lohi[0]) & (linewave < lohi[1])
+
+    # the smooth-continuum bump over the EmFit broad H-alpha flux
+    bump = np.full((len(ref), len(arms)), np.nan)
+    I = fbroad > 0.
+    bump[I, :] = diag['HA_BUMP'][I, :] / fbroad[I, np.newaxis]
+    with np.errstate(invalid='ignore'):
+        big800 = np.abs(bump[:, i800]) > BIGBUMP
+        nobump200 = np.abs(bump[:, i200]) < NOBUMP
+        posbump200 = bump[:, i200] > 0.2
+        negbump200 = bump[:, i200] < -0.1
+
+    hasbroad = diag['HASBROAD']
+    refbroad = hasbroad[:, iref]
+    lost200 = ~hasbroad[:, i200] & hasbroad[:, i800] # lost at 200, kept at 800
+
+    izcam = FAST_CAMERAS.index('Z')
+    nsig_ref_800 = dchi2_nsigma(diag, iref, i800)
+    nsig_800_400 = dchi2_nsigma(diag, i800, i400)
+    with np.errstate(invalid='ignore'):
+        nlgain = nsig_800_400[:, izcam] > 5.
+        calibgain = (nsig_ref_800[:, izcam] > 20.) & (nsig_800_400[:, izcam] < 1.)
+
+    good = isgold & refbroad & (snrbroad > MINSNR)
+    interior = inwave(INTERIOR[0]) | inwave(INTERIOR[1])
+
+    # group, number of objects, selection; the order matters, because the
+    # objects are drawn in sequence and without replacement
+    groups = [
+        ('A1', 2, good & inwave(REDEND) & big800 & ~hasbroad[:, i800]),
+        ('A2', 2, good & inwave(REDEND) & big800 & hasbroad[:, i800]),
+        ('A3', 3, good & inwave(OVERLAP) & big800),
+        ('A4', 2, good & inwave(OVERLAP) & nobump200 & lost200),
+        ('B1', 3, good & interior & posbump200 & lost200),
+        ('B2', 2, good & interior & negbump200 & lost200),
+        ('B3', 3, good & interior & nobump200 & (snrbroad > MINSNR_HIGH) & lost200),
+        ('C', 3, isgold & refbroad & (logmbh < 6.) & (logmbh > 0.) & (fwhm > MINFWHM) & lost200),
+        ('D', 3, isnl & nlgain),
+        ('E', 3, iscalib & calibgain),
+    ]
+
+    rng = np.random.default_rng(seed)
+    used = np.zeros(len(ref), bool)
+    indx, groupname = [], []
+    for group, nobj, I in groups:
+        pool = np.where(I & ~used)[0]
+        sel = np.sort(rng.choice(pool, min(nobj, len(pool)), replace=False))
+        used[sel] = True
+        indx.append(sel)
+        groupname.append([group] * len(sel))
+        log.info(f'Group {group}: {len(sel)} of {len(pool):,d} objects.')
+    indx = np.hstack(indx)
+
+    out = Table()
+    out['GROUP'] = np.hstack(groupname)
+    out['TARGETID'] = ref['TARGETID'].data[indx]
+    out['SAMPLE'] = sample[indx]
+    out['SURVEY'] = strip(ref['SURVEY'])[indx]
+    out['PROGRAM'] = strip(ref['PROGRAM'])[indx]
+    out['HEALPIX'] = ref['HEALPIX'].data[indx]
+    out['Z'] = ref['Z'].data[indx]
+    out['HALPHA_WAVE'] = linewave[indx]
+    out['FWHM_EMFIT'] = fwhm[indx]
+    out['SNR_EMFIT'] = snrbroad[indx]
+    out['LOG_MBH'] = logmbh[indx]
+    # one character per arm: does fastspecfit have a broad H-alpha line?
+    out['BROAD'] = [''.join('Y' if hasbroad[ii, iarm] else '-' for iarm in (iref, i800, i400, i200))
+                    for ii in indx]
+    for arm, iarm in [('800', i800), ('400', i400), ('200', i200)]:
+        out[f'BUMP_{arm}'] = bump[indx, iarm]
+    out['NSIG_Z_800'] = nsig_ref_800[indx, izcam]
+    out['NSIG_Z_400'] = nsig_800_400[indx, izcam]
+
+    out['Z'].info.format = '.5f'
+    for col in ['HALPHA_WAVE', 'FWHM_EMFIT']:
+        out[col].info.format = '.0f'
+    for col in ['SNR_EMFIT', 'NSIG_Z_800', 'NSIG_Z_400']:
+        out[col].info.format = '.1f'
+    for col in ['LOG_MBH', 'BUMP_800', 'BUMP_400', 'BUMP_200']:
+        out[col].info.format = '.2f'
+
+    return out
+
+
+def main():
+    """Main wrapper.
+
+    """
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--rundir', type=str, required=True,
+                        help='Directory with the sample, the diagnostics, and one subdirectory per arm.')
+    parser.add_argument('--targetfile', type=str, default=None,
+                        help='Output table of objects; by default, ${rundir}/compare/fastqa-targets.txt.')
+    parser.add_argument('--outdir', type=str, default=None,
+                        help='Output directory of the figures; by default, ${rundir}/fastqa.')
+    parser.add_argument('--arms', type=str, default=QA_ARMS,
+                        help='Comma-separated list of arms to build the figures for.')
+    parser.add_argument('--specprod', type=str, default='iron', help='Spectroscopic production.')
+    parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing workers.')
+    parser.add_argument('--seed', type=int, default=1, help='Random seed.')
+    parser.add_argument('--select-only', action='store_true',
+                        help='Write the table of objects but do not build the figures.')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing figures.')
+    args = parser.parse_args()
+
+    targetfile = os.path.join(args.rundir, 'compare', 'fastqa-targets.txt') \
+        if args.targetfile is None else args.targetfile
+    outdir = os.path.join(args.rundir, 'fastqa') if args.outdir is None else args.outdir
+
+    samplefile = os.path.join(args.rundir, SAMPLEFILE)
+    ref = Table(fitsio.read(samplefile))
+    log.info(f'Read {len(ref):,d} rows from {samplefile}')
+
+    diag, arms = read_diag(os.path.join(args.rundir, DIAGFILE), ref)
+    missing = [arm for arm in REQUIRED_ARMS if arm not in arms]
+    if len(missing) > 0:
+        errmsg = f'The diagnostics are missing the arms {",".join(missing)}'
+        log.critical(errmsg)
+        raise ValueError(errmsg)
+
+    targets = select_targets(ref, diag, arms, seed=args.seed)
+    os.makedirs(os.path.dirname(os.path.abspath(targetfile)), exist_ok=True)
+    targets.write(targetfile, format='ascii.fixed_width', bookend=False, delimiter=None, overwrite=True)
+    log.info(f'Wrote {len(targets)} objects to {targetfile}')
+    targets.pprint(max_lines=-1, max_width=-1)
+
+    if args.select_only:
+        return
+
+    targetids = ','.join(targets['TARGETID'].data.astype(str))
+    for arm in args.arms.split(','):
+        fastfile = os.path.join(args.rundir, arm, args.specprod, 'catalogs',
+                                f'fastspec-{args.specprod}-emfit.fits')
+        if not os.path.isfile(fastfile):
+            log.warning(f'Skipping {arm}: {fastfile} not found.')
+            continue
+        cmd = ['fastqa', fastfile, '--targetids', targetids, '--outdir', outdir,
+               '--outprefix', arm, '--mp', str(args.mp)]
+        if args.overwrite:
+            cmd.append('--overwrite')
+        log.info(' '.join(cmd))
+        err = subprocess.call(cmd)
+        if err != 0:
+            log.warning(f'fastqa returned {err} for {arm}.')
+
+
+if __name__ == '__main__':
+    main()
