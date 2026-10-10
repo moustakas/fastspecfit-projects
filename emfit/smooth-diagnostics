@@ -429,6 +429,10 @@ def one_healpix(survey, program, healpix, targetids, redshift, fwhm, arms,
     nobj, narm = len(targetids), len(arms)
     spacings = [knot_spacing(arm) for arm in arms]
 
+    t0 = time.time()
+    name = f'{survey}-{program}-{healpix}'
+    log.debug(f'{name}: starting on {nobj} objects.')
+
     out = np.zeros(nobj, dtype=diag_dtype(narm))
     out['TARGETID'] = targetids
     out['FWHM_WINDOW'] = fwhm
@@ -454,15 +458,19 @@ def one_healpix(survey, program, healpix, targetids, redshift, fwhm, arms,
             out['HA_BUMP'][iobj, iarm], out['HA_CONT'][iobj, iarm] = halpha_bump(
                 wave, smooth[row, :], cont[row, :], linewave[iobj], halfwidth[iobj])
 
+    tmodels = time.time() - t0
     if redrockfile is None or not np.any(out['ISFIT']):
+        log.info(f'{name}: {nobj} objects; models {tmodels:.1f} s; spectra not read.')
         return out
 
     # Do not let one bad file stop the whole run.
+    log.debug(f'{name}: reading the spectra.')
     try:
         alldata = read_spectra(redrockfile, targetids)
     except Exception as err:
         log.warning(f'Problem reading {survey}-{program}-{healpix}: {err}')
         return out
+    tspec = time.time() - t0 - tmodels
 
     for data in alldata:
         iobj = np.where(targetids == data['uniqueid'])[0]
@@ -475,6 +483,10 @@ def one_healpix(survey, program, healpix, targetids, redshift, fwhm, arms,
                 wave, rows, cont, smooth, _, trimmed = allmodels[iarm]
                 models[iarm] = (wave, cont[rows[iobj], :], smooth[rows[iobj], :], trimmed)
         camera_chi2(data, models, spacings, out, iobj)
+
+    tchi2 = time.time() - t0 - tmodels - tspec
+    log.info(f'{name}: {nobj} objects; models {tmodels:.1f} s, spectra {tspec:.1f} s, '
+             f'chi2 {tchi2:.1f} s.')
 
     return out
 
@@ -609,6 +621,7 @@ def main():
         redux_dir = os.path.join(os.path.expandvars(os.environ.get('DESI_SPECTRO_REDUX')),
                                  args.specprod, 'healpix')
 
+    t0 = time.time()
     diagargs = []
     for I in groups:
         survey1, program1, healpix1 = survey[I[0]], program[I[0]], healpix[I[0]]
@@ -630,6 +643,13 @@ def main():
             'redrockfile':  redrockfile,
             'minsnr_broad': args.minsnr_broad,
         })
+    log.info(f'Gathered the input files in {(time.time()-t0)/60.:.1f} min.')
+    for iarm, arm in enumerate(arms):
+        nfast = sum(diagarg['fastfiles'][iarm] is not None for diagarg in diagargs)
+        log.info(f'{arm}: {nfast:,d}/{len(diagargs):,d} per-healpix fastspec files in {armdirs[arm]}')
+    if redux_dir is not None:
+        nredrock = sum(diagarg['redrockfile'] is not None for diagarg in diagargs)
+        log.info(f'{nredrock:,d}/{len(diagargs):,d} Redrock files in {redux_dir}')
 
     def init_pool():
         from fastspecfit.util import MPPool
@@ -664,7 +684,9 @@ def main():
                 continue
 
         if mp_pool is None:
+            log.info(f'Initializing {args.mp} worker(s).')
             mp_pool = init_pool()
+        log.info(f'Chunk {ichunk+1}/{len(chunks)}: starting on {len(chunk):,d} healpix files.')
         t0 = time.time()
         out.append(np.hstack(list(mp_pool.starmap(one_healpix, chunk))))
         log.info(f'Chunk {ichunk+1}/{len(chunks)}: {len(out[-1]):,d} objects in {len(chunk):,d} '
