@@ -30,8 +30,13 @@ One row per object is written to ${rundir}/smooth-diagnostics.fits; the
 per-arm columns are in the order of the ARMS header keyword. compare-emfit
 summarizes and plots this file if it exists.
 
+The healpix files are processed in chunks of --chunksize, and each chunk is
+written to ${rundir}/smooth-diagnostics-chunks/ as soon as it is done, so an
+interrupted run picks up where it stopped when the same command is repeated.
+Use --overwrite to start over. Nothing is checkpointed with --nhealpix.
+
 """
-import os, argparse
+import os, time, argparse
 import numpy as np
 import fitsio
 from astropy.table import Table
@@ -431,6 +436,56 @@ def one_healpix(survey, program, healpix, targetids, redshift, fwhm, arms,
     return out
 
 
+def write_diag(outfile, out, hdr):
+    """Write a diagnostics table, replacing any existing file only once the
+    new one is complete.
+
+    """
+    tmpfile = outfile + '.tmp'
+    fitsio.write(tmpfile, out, extname='SMOOTHDIAG', header=hdr, clobber=True)
+    os.replace(tmpfile, outfile)
+
+
+def read_chunk(chunkfile, hdr, targetids):
+    """Read one checkpoint file.
+
+    Parameters
+    ----------
+    chunkfile : str
+        Checkpoint file.
+    hdr : dict
+        Settings of this run (see :func:`main`).
+    targetids : :class:`numpy.ndarray`
+        Objects expected in this chunk, in order.
+
+    Returns
+    -------
+    :class:`numpy.ndarray`
+        Diagnostics of the chunk.
+
+    Raises
+    ------
+    ValueError
+        If the checkpoint file was written with different settings or for
+        different objects.
+
+    """
+    out, chunkhdr = fitsio.read(chunkfile, ext='SMOOTHDIAG', header=True)
+    same = len(out) == len(targetids) and np.all(out['TARGETID'] == targetids)
+    for key, val in hdr.items():
+        if key not in chunkhdr:
+            same = False
+        elif isinstance(val, str):
+            same &= chunkhdr[key].strip() == val
+        else:
+            same &= chunkhdr[key] == val
+    if not same:
+        errmsg = f'{chunkfile} was written with different settings or objects; use --overwrite.'
+        log.critical(errmsg)
+        raise ValueError(errmsg)
+    return out.astype(out.dtype.newbyteorder('=')) # native byte order, to stack
+
+
 def main():
     """Main wrapper.
 
@@ -450,7 +505,11 @@ def main():
     parser.add_argument('--specprod', type=str, default='iron', help='Spectroscopic production.')
     parser.add_argument('--mp', type=int, default=1, help='Number of multiprocessing workers.')
     parser.add_argument('--nhealpix', type=int, default=None,
-                        help='Only process the first N healpix files (for testing).')
+                        help='Only process the first N healpix files (for testing); no checkpoints.')
+    parser.add_argument('--chunksize', type=int, default=500,
+                        help='Number of healpix files per checkpoint; zero for no checkpoints.')
+    parser.add_argument('--overwrite', action='store_true',
+                        help='Ignore (and overwrite) existing checkpoints.')
     parser.add_argument('--no-chi2', action='store_true',
                         help='Do not read the spectra, i.e., only measure the H-alpha bump.')
     parser.add_argument('--minsnr-broad', type=float, default=3.,
@@ -529,27 +588,57 @@ def main():
             'minsnr_broad': args.minsnr_broad,
         })
 
-    from fastspecfit.util import MPPool
-    if args.no_chi2:
-        mp_pool = MPPool(args.mp)
-    else:
+    def init_pool():
+        from fastspecfit.util import MPPool
+        if args.no_chi2:
+            return MPPool(args.mp)
         # the spectra are read in the workers, if any
         from fastspecfit.singlecopy import sc_data, _initialize_sc_data_worker
         if args.mp > 1:
-            mp_pool = MPPool(args.mp, initializer=_initialize_sc_data_worker, init_argdict={})
-        else:
-            sc_data.initialize()
-            mp_pool = MPPool(1)
+            return MPPool(args.mp, initializer=_initialize_sc_data_worker, init_argdict={})
+        sc_data.initialize()
+        return MPPool(1)
 
-    out = np.hstack(list(mp_pool.starmap(one_healpix, diagargs)))
-    mp_pool.close()
+    # the settings which a checkpoint must share with this run
+    hdr = {'ARMS': ','.join(arms), 'NOCHI2': bool(args.no_chi2),
+           'MINSNR': float(args.minsnr_broad), 'SEED': int(args.seed)}
+
+    if args.nhealpix is not None or args.chunksize <= 0:
+        chunkdir = None
+        chunks = [diagargs]
+    else:
+        chunkdir = outfile.replace('.fits', '') + '-chunks'
+        os.makedirs(chunkdir, exist_ok=True)
+        chunks = [diagargs[ii:ii+args.chunksize] for ii in range(0, len(diagargs), args.chunksize)]
+
+    out, mp_pool = [], None
+    for ichunk, chunk in enumerate(chunks):
+        if chunkdir is not None:
+            chunkfile = os.path.join(chunkdir, f'chunk-{args.chunksize}-{ichunk:04d}.fits')
+            if os.path.isfile(chunkfile) and not args.overwrite:
+                out.append(read_chunk(chunkfile, hdr, np.hstack([diagarg['targetids'] for diagarg in chunk])))
+                log.info(f'Chunk {ichunk+1}/{len(chunks)}: read {len(out[-1]):,d} objects from {chunkfile}')
+                continue
+
+        if mp_pool is None:
+            mp_pool = init_pool()
+        t0 = time.time()
+        out.append(np.hstack(list(mp_pool.starmap(one_healpix, chunk))))
+        log.info(f'Chunk {ichunk+1}/{len(chunks)}: {len(out[-1]):,d} objects in {len(chunk):,d} '
+                 f'healpix files in {(time.time()-t0)/60.:.1f} min.')
+        if chunkdir is not None:
+            write_diag(chunkfile, out[-1], hdr)
+
+    if mp_pool is not None:
+        mp_pool.close()
+    out = np.hstack(out)
 
     for iarm, arm in enumerate(arms):
         log.info(f'{arm}: {np.sum(out["ISFIT"][:, iarm]):,d}/{len(out):,d} objects with models, '
                  f'{np.sum(np.isfinite(out["HA_BUMP"][:, iarm])):,d} with an H-alpha window, '
                  f'{np.sum(np.any(np.isfinite(out["CHI2"][:, iarm, :]), axis=1)):,d} with a chi2.')
 
-    fitsio.write(outfile, out, extname='SMOOTHDIAG', header={'ARMS': ','.join(arms)}, clobber=True)
+    write_diag(outfile, out, hdr)
     log.info(f'Wrote {len(out):,d} rows to {outfile}')
 
 
