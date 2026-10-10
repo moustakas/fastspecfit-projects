@@ -45,6 +45,7 @@ log = get_logger()
 
 NFWHM = 1.5      # half-width of the H-alpha window in units of the FWHM
 NEDGEPIX = 5     # pixels averaged on either side of each end of the window
+MAXBADFRAC = 0.2 # maximum fraction of the window without data
 
 # must match fastspecfit.continuum.ContinuumTools.smooth_continuum
 NMINPIX = 15     # minimum number of pixels between knots
@@ -178,16 +179,27 @@ def halpha_bump(wave, smooth, cont, linewave, halfwidth):
     if np.all(smooth == 0.):
         return 0., linecont
 
-    # the smooth continuum is zero where there are no data
-    if np.any(smooth[lo-NEDGEPIX:hi+NEDGEPIX+1] == 0.):
-        return np.nan, linecont
+    # The smooth continuum is set to zero in every pixel without data, so
+    # interpolate over those pixels (and their neighbors, which can be
+    # depressed by the interpolation onto the output wavelengths) unless they
+    # make up too much of the window.
+    ss, ee = lo - NEDGEPIX, hi + NEDGEPIX + 1
+    winsmooth = smooth[ss:ee].astype('f8')
+    bad = np.abs(winsmooth) <= (1e-6 * np.max(np.abs(smooth)))
+    if np.any(bad):
+        bad = np.convolve(bad, np.ones(3), mode='same') > 0.
+        if np.mean(bad) > MAXBADFRAC:
+            return np.nan, linecont
+        pix = np.arange(len(winsmooth))
+        winsmooth[bad] = np.interp(pix[bad], pix[~bad], winsmooth[~bad])
 
     # average over a few pixels, since the models of adjacent cameras are
     # interleaved where the cameras overlap
-    slo = np.mean(smooth[lo-NEDGEPIX:lo+NEDGEPIX+1])
-    shi = np.mean(smooth[hi-NEDGEPIX:hi+NEDGEPIX+1])
+    slo = np.mean(winsmooth[:2*NEDGEPIX+1])
+    shi = np.mean(winsmooth[-(2*NEDGEPIX+1):])
+    winsmooth = winsmooth[NEDGEPIX:-NEDGEPIX]
     baseline = slo + (shi - slo) * np.arange(hi - lo + 1) / (hi - lo)
-    bump = np.sum(smooth[lo:hi+1] - baseline) * dwave
+    bump = np.sum(winsmooth - baseline) * dwave
 
     return bump, linecont
 

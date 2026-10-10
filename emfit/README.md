@@ -195,7 +195,8 @@ spacings. `smooth-diagnostics` measures two quantities which do, and
 Caveats: the model spectra of adjacent cameras are interleaved where the
 cameras overlap, so those pixels are left out of the chi2, and `HA_BUMP` is an
 average of the two cameras when H-alpha falls there. `HA_BUMP` is undefined
-(NaN) when the window runs off the spectrum or crosses a gap.
+(NaN) when the window runs off the spectrum or more than 20% of it has no
+data; isolated masked pixels are interpolated over.
 
 ## Things to keep in mind when reading the results
 
