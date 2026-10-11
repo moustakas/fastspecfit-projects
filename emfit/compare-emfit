@@ -23,6 +23,9 @@ Output (to --outdir, by default ${rundir}/compare):
   recovery.png                - recovery and false-positive rates
   fwhm.png                    - fastspecfit vs EmFit broad H-alpha FWHM
   smoothcorr.png              - distribution of the smooth-continuum corrections
+                                (SMOOTHCORR; catalogs written before 2026-10-10)
+  smoothrms.png               - distribution of the rms of the smooth continuum
+                                (SMOOTHRMS, which replaced SMOOTHCORR)
   changed-<arm>.txt           - objects whose broad-line classification differs
                                 from the baseline (e.g., for fastqa)
 
@@ -42,7 +45,7 @@ from astropy.table import Table, vstack
 from desiutil.log import get_logger
 
 from emfit_util import (SAMPLEFILE, BASELINEFILE, BASELINE, DIAGFILE, SIGMA2FWHM,
-                        FAST_METACOLS, FAST_COLS, FAST_CAMERAS, arm_sortkey,
+                        FAST_METACOLS, FAST_COLS, FAST_CAMERAS, FAST_SMOOTHSTATS, arm_sortkey,
                         emfit_narrow_flux, match_targetid)
 
 log = get_logger()
@@ -108,7 +111,8 @@ def read_arm(fastfile, ref):
     Returns
     -------
     fast : :class:`numpy.ndarray`
-        Measurements row-matched to ``ref`` (zero where not fit).
+        Measurements row-matched to ``ref`` (zero where not fit; a column
+        which is not in ``fastfile`` is NaN).
     isfit : :class:`numpy.ndarray`
         Boolean array which is ``True`` for the objects in ``fastfile``.
 
@@ -130,9 +134,11 @@ def read_arm(fastfile, ref):
     iref = match_targetid(ref['TARGETID'].data, meta['TARGETID'])
     I = iref >= 0
 
-    # missing columns are zero-filled
+    # missing columns are NaN
     dtype = [(col, _fast.dtype[col] if col in cols else 'f4') for col in FAST_COLS]
     fast = np.zeros(len(ref), dtype=dtype)
+    for col in missing:
+        fast[col] = np.nan
     for col in cols:
         fast[col][iref[I]] = _fast[col][I]
     isfit = np.zeros(len(ref), bool)
@@ -207,11 +213,11 @@ def summarize(arm, ref, fast, isfit, hasbroad, isbl, isgold, isnl, iscalib):
             row[f'DLOG{name}_{sample}'], row[f'DLOG{name}_{sample}_NMAD'], _ = logratio(
                 fast[f'{fastline}_FLUX'], emflux, I)
 
-    # smooth-continuum correction
-    for cam in FAST_CAMERAS:
-        for sample, I in [('BL', gold), ('NL', isnl & isfit), ('CALIB', iscalib & isfit)]:
-            row[f'SMOOTHCORR_{cam}_{sample}'] = np.median(np.abs(fast[f'SMOOTHCORR_{cam}'][I])) \
-                if np.sum(I) > 0 else np.nan
+    # smooth-continuum statistics (NaN if not in this catalog)
+    for stat in FAST_SMOOTHSTATS:
+        for cam in FAST_CAMERAS:
+            for sample, I in [('BL', gold), ('NL', isnl & isfit), ('CALIB', iscalib & isfit)]:
+                row[f'{stat}_{cam}_{sample}'] = nanmedian(np.abs(fast[f'{stat}_{cam}'][I]))
 
     return row
 
@@ -344,14 +350,20 @@ def qa_fwhm(pngfile, arms, styles, ref, fasts, isfits, hasbroads, isgold):
     log.info(f'Wrote {pngfile}')
 
 
-def qa_smoothcorr(pngfile, arms, styles, fasts, isfits, samples):
-    """Cumulative distribution of the absolute smooth-continuum correction in
-    each camera (columns) and sample (rows), per arm.
+def qa_smoothcorr(pngfile, arms, styles, fasts, isfits, samples, stat='SMOOTHCORR',
+                  xlabel='|Smooth-continuum correction| [%]'):
+    """Cumulative distribution of the absolute value of a smooth-continuum
+    statistic (``stat``) in each camera (columns) and sample (rows), for the
+    arms whose catalog has it.
 
     """
     import matplotlib.pyplot as plt
 
-    arms = [arm for arm in arms if arm != 'nosmooth']
+    arms = [arm for arm in arms if arm != 'nosmooth' and
+            np.any(np.isfinite(fasts[arm][f'{stat}_{FAST_CAMERAS[0]}'][isfits[arm]]))]
+    if len(arms) == 0:
+        log.info(f'No arm has {stat}; skipping {pngfile}')
+        return
     samples = [(name, I) for name, I in samples if np.sum(I) > 0]
     xlim = (0.01, 100.)
 
@@ -361,7 +373,7 @@ def qa_smoothcorr(pngfile, arms, styles, fasts, isfits, samples):
         for icol, cam in enumerate(FAST_CAMERAS):
             ax = axes[irow, icol]
             for arm in arms:
-                corr = np.sort(np.abs(fasts[arm][f'SMOOTHCORR_{cam}'][I & isfits[arm]]))
+                corr = np.sort(np.abs(fasts[arm][f'{stat}_{cam}'][I & isfits[arm]]))
                 if len(corr) == 0:
                     continue
                 ax.plot(np.clip(corr, *xlim), np.arange(1, len(corr) + 1) / len(corr), lw=2,
@@ -371,9 +383,9 @@ def qa_smoothcorr(pngfile, arms, styles, fasts, isfits, samples):
             ax.set_ylim(0., 1.)
             ax.set_title(f'{name}: {cam.lower()} camera', fontsize=10, loc='left')
             setup_axes(ax)
-    axes[0, 0].legend(fontsize=9, frameon=False, loc='lower right')
+    axes[0, 0].legend(fontsize=9, frameon=False, loc='lower left')
     for ax in axes[-1, :]:
-        ax.set_xlabel('|Smooth-continuum correction| [%]')
+        ax.set_xlabel(xlabel)
     for ax in axes[:, 0]:
         ax.set_ylabel('Cumulative fraction')
 
@@ -667,7 +679,8 @@ def main():
     summary.write(summaryfile, format='ascii.fixed_width', bookend=False, delimiter=None, overwrite=True)
     log.info(f'Wrote {summaryfile}')
     for cols in [summary.colnames[:9], ['ARM'] + [col for col in summary.colnames if 'DLOG' in col],
-                 ['ARM'] + [col for col in summary.colnames if 'SMOOTHCORR' in col]]:
+                 ['ARM'] + [col for col in summary.colnames if 'SMOOTHCORR' in col],
+                 ['ARM'] + [col for col in summary.colnames if 'SMOOTHRMS' in col]]:
         summary[cols].pprint(max_lines=-1, max_width=-1)
 
     # optional smooth-continuum diagnostics
@@ -703,6 +716,9 @@ def main():
                 hasbroads, isgold)
         qa_smoothcorr(os.path.join(outdir, 'smoothcorr.png'), arms, styles, fasts, isfits,
                       [('calib', iscalib), ('bl (gold)', isgold), ('nl', isnl)])
+        qa_smoothcorr(os.path.join(outdir, 'smoothrms.png'), arms, styles, fasts, isfits,
+                      [('calib', iscalib), ('bl (gold)', isgold), ('nl', isnl)], stat='SMOOTHRMS',
+                      xlabel='rms of the smooth continuum / stellar continuum [%]')
         if diag is not None:
             qa_smoothdiag(os.path.join(outdir, 'smoothdiag.png'), diag, diagarms,
                           arm_styles(diagarms), ref, isgold, isnl)
