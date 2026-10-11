@@ -567,7 +567,7 @@ class HealpixPool(object):
                               f'{" ".join(names[:20])}')
                     log.critical(errmsg)
                     raise RuntimeError(errmsg)
-                log.warning(f'A worker died (out of memory?) with {self.nworkers} workers and '
+                log.warning(f'A worker died with {self.nworkers} workers and '
                             f'{len(todo):,d} healpix files left; starting over with '
                             f'{self.nworkers // 2}.')
                 self.nworkers //= 2

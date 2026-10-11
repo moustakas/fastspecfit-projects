@@ -47,7 +47,12 @@ FAST_LINES = ['HALPHA', 'HALPHA_BROAD', 'HBETA', 'HBETA_BROAD', 'NII_6584',
 FAST_LINE_SUFFIXES = ['_FLUX', '_FLUX_IVAR', '_SIGMA', '_SIGMA_IVAR', '_AMP',
                       '_AMP_IVAR', '_CONT', '_CONT_IVAR', '_EW']
 FAST_CAMERAS = ['B', 'R', 'Z']
-FAST_COLS = ([f'SMOOTHCORR_{cam}' for cam in FAST_CAMERAS] +
+# Smooth-continuum statistics: SMOOTHCORR (the camera median of the smooth
+# continuum over the flux) was replaced by SMOOTHRMS (its rms relative to the
+# median stellar continuum) on the smooth-cont branch, so a catalog has one or
+# the other. The two are not comparable.
+FAST_SMOOTHSTATS = ['SMOOTHCORR', 'SMOOTHRMS']
+FAST_COLS = ([f'{stat}_{cam}' for stat in FAST_SMOOTHSTATS for cam in FAST_CAMERAS] +
              [f'SNR_{cam}' for cam in FAST_CAMERAS] +
              ['DELTA_LINECHI2', 'DELTA_LINENDOF'] +
              [f'{line}{suffix}' for line in FAST_LINES for suffix in FAST_LINE_SUFFIXES])
