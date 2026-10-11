@@ -78,8 +78,17 @@ Width distribution of the `bl` sample (EmFit FWHM of broad H-alpha):
 | `knots100` | `--smooth-knot-spacing=100` |
 | `knots200` | `--smooth-knot-spacing=200` (branch default) |
 | `knots400` | `--smooth-knot-spacing=400` |
-| `knots800` | `--smooth-knot-spacing=800` |
+| `knots800` | `--smooth-knot-spacing=800` (branch default since 2026-10-10), current code |
 | `nosmooth` | `--no-smooth-continuum` |
+| `old-knots800` | The 800 Angstrom fit of 2026-10-09, i.e., before the short runs of pixels at the ends of a camera were dropped (fastspecfit 1fbef9b) |
+| `prebatch-knots800` | 800 Angstrom, before the Monte Carlo realizations were fit at once with the rejected pixels of the nominal fit (fastspecfit 2b7acc7) |
+
+The `knots100`, `knots200`, `knots400`, and `nosmooth` arms were fit on
+2026-10-09 and not since, so they also predate 1fbef9b (which does not matter
+for `nosmooth`). The catalogs fit before 2026-10-10 have
+`SMOOTHCORR_{B,R,Z}`, and the later ones (`knots800` and `prebatch-knots800`)
+have `SMOOTHRMS_{B,R,Z}`, `DELTA_SMOOTHCHI2_{B,R,Z}`, and
+`DELTA_SMOOTHNDOF_{B,R,Z}` in their place (fastspecfit cab7c44).
 
 Why this grid: at z = 0.26 one Angstrom is about 36 km/s at H-alpha. A broad
 line with FWHM of 600 to 1500 km/s (the low-mass regime) is 17 to 42 Angstrom
@@ -135,15 +144,20 @@ run. A checkpoint written with different arms, objects, `--no-chi2`,
 Nothing is checkpointed with `--nhealpix`.
 
 Three runs on 2026-10-10 and 2026-10-11 stopped making progress within the
-first chunk, with no error. The cause was not confirmed on the node. The
-likely one is that a worker was killed for lack of memory: every worker read
-the full coadd of its healpix (several GB for the main survey) to get a few
-spectra, and `multiprocessing.Pool` waits forever for the result of a dead
-worker. `DESISpectra.read` now reads only the requested targets, and the
-script's own pool (`HealpixPool`) notices a dead worker, starts over with half
-as many workers, and repeats the unfinished healpix files. It also lists the
-healpix files in progress if none finishes in 10 minutes, so a file which
-blocks would be named in the log.
+first chunk, with no error, because workers died and `multiprocessing.Pool`
+waits forever for the result of a dead worker. The script's own pool
+(`HealpixPool`) notices a dead worker, starts over with half as many workers,
+and repeats the unfinished healpix files. It also lists the healpix files in
+progress if none finishes in 10 minutes, so a file which blocks would be named
+in the log.
+
+On 2026-10-11 the workers died with 128, 64, and 32 workers, all within about
+70 s of the start, and the run went through with 16 (about 2 minutes per
+chunk). Why they die is not known. It is not the memory in steady state (0.5
+GB per worker, with `DESISpectra.read` now reading only the requested targets
+of each coadd) and it is not the number of threads (`OMP_NUM_THREADS=1`, one
+thread per worker). The messages which the workers printed when they died
+have not been looked at; until they are, use `--mp 16`.
 
 Each arm is written to `$RUNDIR/<arm>/iron/` and merged into
 `$RUNDIR/<arm>/iron/catalogs/fastspec-iron-emfit.fits`. `compare-emfit` picks up
@@ -182,11 +196,16 @@ srun -n 4 python -c "from mpi4py import MPI; print(MPI.COMM_WORLD.rank, MPI.COMM
   - `DLOGHA_*`, `DLOGNII_*`: the same for the narrow H-alpha and [NII] 6584
     fluxes, for the gold and control samples. EmFit primary and secondary
     components are summed where the line is double-peaked.
-  - `SMOOTHCORR_{B,R,Z}_*`: median |smooth-continuum correction| in percent.
+  - `SMOOTHCORR_{B,R,Z}_*`: median |smooth-continuum correction| in percent
+    (NaN for the arms whose catalog does not have `SMOOTHCORR`).
+  - `SMOOTHRMS_{B,R,Z}_*`: median rms of the smooth continuum relative to the
+    median stellar continuum, in percent (NaN for the arms whose catalog does
+    not have `SMOOTHRMS`). The two statistics are not comparable.
 - `recovery.png`: recovery rate against EmFit FWHM, and the false-positive rate.
 - `fwhm.png`: fastspecfit against EmFit broad H-alpha FWHM for the gold sample.
 - `smoothcorr.png`: cumulative distributions of |`SMOOTHCORR`| by sample and
-  camera.
+  camera, for the arms which have it.
+- `smoothrms.png`: the same for `SMOOTHRMS`.
 - `changed-<arm>.txt`: gold BL-AGN `lost` or `gained` and control objects with
   a `spurious` broad line relative to the baseline, for inspection with
   `fastqa`.
@@ -226,6 +245,10 @@ data; isolated masked pixels are interpolated over.
 All numbers are from `compare/summary.txt`, `compare/changed-<arm>.txt`, and
 `emfit-sample.fits`; the figures are in `compare/`. The fits were run with
 `--minsnr-broad` at its default of 3.
+
+In this section and the next, `knots800` is the fit of 2026-10-09, which is
+now the `old-knots800` arm. The current code is in "800 Angstrom with the
+current code" below.
 
 ### Recovery of the gold BL-AGN and agreement with EmFit
 
@@ -353,10 +376,113 @@ broad H-alpha flux, and losses and gains are relative to `nosmooth`:
   0.9, and 1.5%. This supports the suspicion above about the ends of the
   per-camera spline, and it is independent of the choice of knot spacing.
 
+### 800 Angstrom with the current code (2026-10-11)
+
+After the results above, the default became 800 Angstrom (fastspecfit
+a451be6), a short run of unmasked pixels at either end of a camera is no
+longer used if it is shorter than the masked region next to it (1fbef9b), and
+the Monte Carlo realizations are fit at once with the pixels and knots of the
+nominal fit (2b7acc7). The `knots800` arm was fit again with this code.
+`compare-emfit` was run on 2026-10-11 with the eight arms, and
+`smooth-diagnostics` with three (`knots800`, `old-knots800`, `nosmooth`), so
+`smooth-diagnostics.fits` no longer has the 100, 200, and 400 Angstrom arms
+of the tables above.
+
+From `compare/summary.txt` and `compare/changed-<arm>.txt`:
+
+| | `v4.0` | `old-knots800` | `knots800` | `nosmooth` |
+|---|---|---|---|---|
+| Gold recovered | 88.55% | 88.42% | 88.54% | 88.76% |
+| FWHM < 1000 | 65.0% | 65.6% | 65.6% | 66.2% |
+| 1000 to 2000 | 80.6% | 80.5% | 80.5% | 80.8% |
+| FWHM > 2000 | 94.2% | 94.0% | 94.2% | 94.3% |
+| log M_BH < 6 | 54.5% | 55.3% | 55.1% | 55.9% |
+| Control with a broad line | 1.04% | 1.07% | 1.05% | 1.11% |
+| FWHM offset / scatter vs EmFit [dex] | +0.024 / 0.030 | +0.022 / 0.030 | +0.022 / 0.030 | +0.036 / 0.034 |
+| Broad flux offset / scatter vs EmFit [dex] | +0.020 / 0.031 | +0.019 / 0.033 | +0.020 / 0.033 | +0.031 / 0.034 |
+| [NII] scatter of the control [dex] | 0.037 | 0.036 | 0.036 | 0.037 |
+| Lost / gained / spurious vs `v4.0` | | 143 / 119 / 19 | 129 / 126 / 17 | 133 / 170 / 21 |
+
+- `knots800` matches iron/v4.0 in every row, and its losses and gains
+  relative to iron/v4.0 are at the floor set by `nosmooth`.
+- `prebatch-knots800` has the same summary row as `knots800` to every digit,
+  and `changed-prebatch-knots800.txt` is identical to `changed-knots800.txt`,
+  so fitting the realizations with the rejected pixels of the nominal fit has
+  no measurable effect.
+- The benefit is unchanged (`compare/smoothdiag.txt`): relative to
+  `nosmooth`, the median decrease in chi2 per spline parameter is 2.5 / 2.0 /
+  3.4 in the b / r / z cameras of the control (significant in 46 / 35 / 59%),
+  11.9 / 5.2 / 10.7 in `calib` (84 / 70 / 88%), and 21.9 / 5.9 / 8.6 in the
+  BL-AGN (88 / 73 / 84%).
+
+Median `SMOOTHRMS` (the rms of the smooth continuum relative to the median
+stellar continuum, over all the pixels with data) of `knots800`, in percent,
+from `compare/summary.txt`; see also `compare/smoothrms.png`:
+
+| Sample | b | r | z |
+|---|---|---|---|
+| Control | 10.8 | 3.1 | 2.8 |
+| Gold BL-AGN | 13.4 | 2.5 | 2.2 |
+| `calib` | 30.3 | 7.1 | 7.7 |
+
+- The smooth continuum is typically 2 to 3% of the stellar continuum in the
+  r and z cameras and about 10% in the b camera, and two to three times
+  larger in `calib`, as expected of a sample selected by the size of the old
+  correction. In about 15% of `calib` it is at least 100% in the b camera.
+- These numbers cannot be compared with the `SMOOTHCORR` of the other arms
+  (e.g., a median of 3.8 / 2.1 / 1.7% in the control at 800 Angstrom before
+  the change): `SMOOTHCORR` is a median of the signed ratio to the flux,
+  which averages out a smooth continuum which changes sign across the
+  camera, and `SMOOTHRMS` does not.
+
+Cost, for the gold BL-AGN, relative to `nosmooth`. These numbers were
+computed on the laptop from `smooth-diagnostics.fits` and `emfit-sample.fits`
+(they are not in `compare-emfit`), for the objects fit in both arms with an
+EmFit broad H-alpha flux:
+
+| | `old-knots800` | `knots800` |
+|---|---|---|
+| Absorbed fraction: 2nd / 50th / 98th percentile | -3.3% / 0.0% / 5.4% | -2.1% / 0.0% / 3.4% |
+| Lost / gained | 199 / 138 | 170 / 130 |
+| Lost with abs(fraction) > 0.1 | 20 | 7 |
+| Loss rate where abs(fraction) < 0.02 | 1.11% | 0.99% |
+| Control: NMAD of the bump EW [Angstrom] | 0.23 | 0.19 |
+
+Percentage of the gold BL-AGN with abs(fraction) > 0.1, and loss rate (lost /
+gained), against the observed wavelength of H-alpha:
+
+| Observed H-alpha [Angstrom] | N | `old-knots800` | `knots800` |
+|---|---|---|---|
+| 6800 to 7200 | 1,330 | 0.23%; 1.51% (17 / 19) | 0.00%; 1.51% (17 / 18) |
+| 7200 to 7600 | 2,172 | 3.55%; 2.08% (37 / 20) | 1.43%; 1.63% (29 / 14) |
+| 7600 to 8000 | 2,814 | 1.17%; 1.28% (32 / 23) | 0.50%; 1.24% (31 / 24) |
+| 8000 to 9200 | 9,670 | 0.32%; 0.91% (80 / 59) | 0.21%; 0.72% (63 / 59) |
+| 9200 to 9400 | 1,007 | 3.08%; 0.85% (8 / 7) | 0.50%; 0.64% (6 / 5) |
+| 9400 to 9600 | 631 | 7.29%; 4.06% (23 / 3) | 2.54%; 4.06% (23 / 3) |
+
+- Dropping the short runs at the ends of the cameras removes most of the
+  absorption there (a factor of 2.5 to 6 fewer objects with abs(fraction) >
+  0.1 in the three ranges near the ends), and with it about 30 of the lost
+  broad lines.
+- The red end of the z camera still loses broad lines: 23 lost and 3 gained
+  with H-alpha at 9400 to 9600 Angstrom, the same as before the fix (21 of
+  the 23 are the same objects). All 23 have H-alpha at 9400 to 9500 Angstrom
+  (14 of 266 at 9400 to 9450, 9 of 216 at 9450 to 9500, none of 84 at 9500
+  to 9550), and their EmFit FWHM ranges from 1419 to 8094 km/s (median 2925,
+  against 2785 for all the objects in this range).
+- Absorption as measured by `HA_BUMP` does not explain them: only 4 of the 23
+  have abs(fraction) > 0.1 (median 0.008). `HA_BUMP` subtracts the straight
+  line which joins the ends of the window, so it does not register an offset
+  or a tilt of the smooth continuum under the line, e.g., from the constant
+  extrapolation beyond the last pixel which is used. The cause is not known.
+  This is about 20 objects, 0.1% of the gold sample.
+
 ### Where this leaves the default
 
-Every measurement favors 800 Angstrom over the current default of 200
-(`SMOOTH_KNOT_SPACING` in `py/fastspecfit/util.py`):
+The default was changed from 200 to 800 Angstrom on 2026-10-10
+(`SMOOTH_KNOT_SPACING` in `py/fastspecfit/util.py`; fastspecfit a451be6).
+Every measurement favors 800 Angstrom over 200 (the numbers below are those
+of `old-knots800`):
 
 - Recovery, scatter, and false positives at 800 Angstrom match iron/v4.0 and
   `nosmooth`; 400 Angstrom costs about 1.2 points of recovery and 200
@@ -373,7 +499,7 @@ does gain from more knots, and the broad-line offsets relative to EmFit are
 smallest there (+0.012 dex in FWHM). The default is meant for most objects,
 so this does not outweigh the cost. No arm stiffer than 800 Angstrom was
 run, so we do not know where between 800 Angstrom and no smooth continuum the
-benefit falls off. The decision is John's and has not been made.
+benefit falls off.
 
 ## Things to keep in mind when reading the results
 
@@ -408,33 +534,34 @@ benefit falls off. The decision is John's and has not been made.
 
 ## Status and next steps
 
-Status on 2026-10-10:
+Status on 2026-10-11:
 
-- `build-emfit-sample`, `fastspec-emfit.slurm`, `compare-emfit`, and
-  `smooth-diagnostics` (full run) are done at NERSC for the six arms. The
-  `compare-emfit` output, `emfit-sample.fits`, and `smooth-diagnostics.fits`
-  are also on the laptop; the per-arm catalogs and per-healpix files are only
-  at NERSC (`$PSCRATCH/fastspecfit/emfit`, which is purged).
-- `compare-emfit` has not been rerun since the full `smooth-diagnostics` run,
-  so `smoothdiag.txt` and `smoothdiag.png` do not exist, and the `smoothdiag`
-  part of `compare-emfit` has still only passed a syntax check.
-- `smooth-diagnostics.fits` was written by the version of the script before
-  the checkpoints (its header has `ARMS` only).
+- All the arms of the table above are fit, and `compare-emfit` and
+  `smooth-diagnostics` (three arms) were run at NERSC on 2026-10-11. Their
+  output, `emfit-sample.fits`, and `smooth-diagnostics.fits` are also on the
+  laptop; the per-arm catalogs and per-healpix files are only at NERSC
+  (`$PSCRATCH/fastspecfit/emfit`, which is purged).
+- `compare-emfit` now reads `SMOOTHRMS` as well as `SMOOTHCORR` (a column
+  which is not in a catalog is NaN and not zero) and writes `smoothrms.png`.
+  It was run again with this change, and `compare/` on the laptop is its
+  output.
+- The branch was assessed on 2026-10-11 as ready for a PR, once the two
+  items of step 1 are fixed. The tests were not run as part of that
+  assessment.
 
 Next steps, in order:
 
-1. Choose the default `--smooth-knot-spacing` (the results favor 800
-   Angstrom) and change `SMOOTH_KNOT_SPACING`.
-2. `./compare-emfit --rundir $RUNDIR` at NERSC, and copy
-   `compare/smoothdiag.txt` and `compare/smoothdiag.png` to the laptop. Check
-   them against the tables above.
-3. `fastqa` on the camera ends at 800 Angstrom (H-alpha at 9400 to 9600 and
-   7200 to 7600 Angstrom, with a large absorbed fraction), to decide whether
-   the ends of the per-camera spline need a fix before the PR. This is a
-   question about the algorithm, not about the knot spacing.
-4. Optional, if the default changes: a `knots1600` arm, to show that 800
-   Angstrom is not still more flexible than it needs to be.
-5. Open a PR in fastspecfit (`smooth-cont` into `main`). Replacing the
+1. In the fastspecfit repo, before the PR: `etc/fastspecfit-env.sh` (acccd49)
+   has `module load fastspecfit` commented out and the development checkout
+   in `PYTHONPATH` and `PATH`; and `doc/changes.rst` still advertises
+   `--smooth-window` and `--smooth-step`, and has no entry for the new
+   algorithm, `--smooth-knot-spacing`, the `SMKNOTS` header keyword, or the
+   columns which replace `SMOOTHCORR_*`.
+2. `fastqa` on the lost objects with H-alpha at 9400 to 9500 Angstrom, to
+   find out why they are lost, or state it in the PR as a known limitation.
+3. Optional: a `knots1600` arm, to show that 800 Angstrom is not still more
+   flexible than it needs to be.
+4. Open a PR in fastspecfit (`smooth-cont` into `main`). Replacing the
    smooth-continuum algorithm is a fairly major change, so the PR should show
    the performance against EmFit, including the new diagnostics.
 
@@ -445,13 +572,9 @@ Open items:
 - The loss rate against the absorbed fraction, and the absorbed fraction
   against the observed wavelength of H-alpha, are not in `compare-emfit`
   (computed by hand; see above).
-- In `smoothcorr.png` the legend overlaps the curves in the upper-left panel.
 - The plot colors were taken from a validated palette but not re-validated
   (no `node` on the laptop).
 - Possible additions: recovery in bins of observed H-alpha wavelength (now
   computed by hand; see above); comparison of the fastspecfit smooth continuum
   at H-alpha with EmFit's `NII_HA_CONTINUUM`; H-beta broad-line comparison
   (the columns are already in both files).
-- Side finding in the fastspecfit repo, not acted on: `doc/changes.rst` on
-  `smooth-cont` still advertises `--smooth-window` and `--smooth-step`, but the
-  command line now exposes `--smooth-knot-spacing`.
