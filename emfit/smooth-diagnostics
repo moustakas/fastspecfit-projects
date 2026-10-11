@@ -60,6 +60,8 @@ DEGREE = 3       # cubic spline
 
 CLIPSIGMA = 4.   # outlier rejection in the chi2
 
+STALLTIME = 600. # report the healpix files in progress if none finishes in this time [s]
+
 
 def diag_dtype(narm):
     """Data model of the output table.
@@ -491,6 +493,97 @@ def one_healpix(survey, program, healpix, targetids, redshift, fwhm, arms,
     return out
 
 
+class HealpixPool(object):
+    """Pool of workers which call :func:`one_healpix`.
+
+    Unlike `multiprocessing.Pool`, which waits forever for the result of a
+    worker which was killed (e.g., by the out-of-memory killer), this pool
+    notices a dead worker, starts over with half as many workers, and repeats
+    the healpix files which did not finish. It also reports the healpix files
+    it is waiting for when nothing finishes for `STALLTIME` seconds.
+
+    Parameters
+    ----------
+    nworkers : int
+        Number of workers; with one, the work is done in this process.
+    read_spectra : bool
+        Whether the workers read the spectra, in which case each of them
+        needs its own copy of the fastspecfit single-copy data.
+
+    """
+    def __init__(self, nworkers, read_spectra=True):
+        self.nworkers = nworkers
+        self.initializer = None
+        self.pool = None
+        if read_spectra:
+            from fastspecfit.singlecopy import sc_data, _initialize_sc_data_worker
+            if nworkers > 1:
+                self.initializer = _initialize_sc_data_worker
+            else:
+                sc_data.initialize()
+
+
+    def starmap(self, diagargs):
+        """Call :func:`one_healpix` with each keyword-argument dictionary in
+        ``diagargs``, and return the results in the same order.
+
+        """
+        from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+        from concurrent.futures.process import BrokenProcessPool
+
+        if self.nworkers == 1:
+            return [one_healpix(**diagarg) for diagarg in diagargs]
+
+        results = [None] * len(diagargs)
+        todo = list(range(len(diagargs)))
+        while len(todo) > 0:
+            if self.pool is None:
+                log.info(f'Initializing {self.nworkers} workers.')
+                self.pool = ProcessPoolExecutor(self.nworkers, initializer=self.initializer)
+            futures = {self.pool.submit(one_healpix, **diagargs[ii]): ii for ii in todo}
+
+            pending, broken = set(futures.keys()), False
+            while len(pending) > 0:
+                done, pending = wait(pending, timeout=STALLTIME, return_when=FIRST_COMPLETED)
+                if len(done) == 0:
+                    names = ['{survey}-{program}-{healpix}'.format(**diagargs[futures[future]])
+                             for future in pending if future.running()]
+                    log.warning(f'Nothing finished in {STALLTIME:.0f} s; {len(pending):,d} healpix '
+                                f'files left, waiting for {" ".join(sorted(names)[:20])}')
+                for future in done:
+                    try:
+                        results[futures[future]] = future.result()
+                    except BrokenProcessPool:
+                        broken = True
+            todo = [ii for ii in todo if results[ii] is None]
+
+            # Every unfinished healpix file fails when one worker dies, and we
+            # do not know which one it was working on.
+            if broken:
+                self.close()
+                if self.nworkers < 4:
+                    names = ['{survey}-{program}-{healpix}'.format(**diagargs[ii]) for ii in todo]
+                    errmsg = (f'A worker died with only {self.nworkers} workers; unfinished: '
+                              f'{" ".join(names[:20])}')
+                    log.critical(errmsg)
+                    raise RuntimeError(errmsg)
+                log.warning(f'A worker died (out of memory?) with {self.nworkers} workers and '
+                            f'{len(todo):,d} healpix files left; starting over with '
+                            f'{self.nworkers // 2}.')
+                self.nworkers //= 2
+
+        return results
+
+
+    def close(self):
+        """Shut down the workers, if any.
+
+        """
+        if self.pool is not None:
+            self.pool.shutdown(wait=True)
+            self.pool = None
+
+
 def write_diag(outfile, out, hdr):
     """Write a diagnostics table, replacing any existing file only once the
     new one is complete.
@@ -651,17 +744,6 @@ def main():
         nredrock = sum(diagarg['redrockfile'] is not None for diagarg in diagargs)
         log.info(f'{nredrock:,d}/{len(diagargs):,d} Redrock files in {redux_dir}')
 
-    def init_pool():
-        from fastspecfit.util import MPPool
-        if args.no_chi2:
-            return MPPool(args.mp)
-        # the spectra are read in the workers, if any
-        from fastspecfit.singlecopy import sc_data, _initialize_sc_data_worker
-        if args.mp > 1:
-            return MPPool(args.mp, initializer=_initialize_sc_data_worker, init_argdict={})
-        sc_data.initialize()
-        return MPPool(1)
-
     # the settings which a checkpoint must share with this run
     hdr = {'ARMS': ','.join(arms), 'NOCHI2': bool(args.no_chi2),
            'MINSNR': float(args.minsnr_broad), 'SEED': int(args.seed)}
@@ -684,11 +766,10 @@ def main():
                 continue
 
         if mp_pool is None:
-            log.info(f'Initializing {args.mp} worker(s).')
-            mp_pool = init_pool()
+            mp_pool = HealpixPool(args.mp, read_spectra=not args.no_chi2)
         log.info(f'Chunk {ichunk+1}/{len(chunks)}: starting on {len(chunk):,d} healpix files.')
         t0 = time.time()
-        out.append(np.hstack(list(mp_pool.starmap(one_healpix, chunk))))
+        out.append(np.hstack(mp_pool.starmap(chunk)))
         log.info(f'Chunk {ichunk+1}/{len(chunks)}: {len(out[-1]):,d} objects in {len(chunk):,d} '
                  f'healpix files in {(time.time()-t0)/60.:.1f} min.')
         if chunkdir is not None:

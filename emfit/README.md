@@ -134,6 +134,17 @@ run. A checkpoint written with different arms, objects, `--no-chi2`,
 `--minsnr-broad`, or `--seed` is an error; use `--overwrite` to start over.
 Nothing is checkpointed with `--nhealpix`.
 
+Three runs on 2026-10-10 and 2026-10-11 stopped making progress within the
+first chunk, with no error. The cause was not confirmed on the node. The
+likely one is that a worker was killed for lack of memory: every worker read
+the full coadd of its healpix (several GB for the main survey) to get a few
+spectra, and `multiprocessing.Pool` waits forever for the result of a dead
+worker. `DESISpectra.read` now reads only the requested targets, and the
+script's own pool (`HealpixPool`) notices a dead worker, starts over with half
+as many workers, and repeats the unfinished healpix files. It also lists the
+healpix files in progress if none finishes in 10 minutes, so a file which
+blocks would be named in the log.
+
 Each arm is written to `$RUNDIR/<arm>/iron/` and merged into
 `$RUNDIR/<arm>/iron/catalogs/fastspec-iron-emfit.fits`. `compare-emfit` picks up
 whichever arms exist, so it can be run before all of them finish.
